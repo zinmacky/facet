@@ -7,6 +7,12 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
+    # メジャー更新は自動 PR を出さない(patch/minor のみ)。
+    # 破壊的変更を含むメジャーは計画的に手動で対応する。
+    # セキュリティ修正はリポジトリの Dependabot security updates が別途担う。
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     # PR ノイズを抑えるため dev/prod でまとめる
     groups:
       dev-dependencies:
