@@ -12,29 +12,29 @@ import { blurPad, cropCover } from "./blur-pad.js";
  * trim は filtergraph ではなく seek 引数に落とす(キーフレームシークで高速)。
  */
 export function compose(spec: EditSpec): FilterPlan {
-  const { seekArgs, durationArgs } = trimArgs(spec.trim);
+	const { seekArgs, durationArgs } = trimArgs(spec.trim);
 
-  const nodes: string[] = [];
-  let cursor = "0:v";
+	const nodes: string[] = [];
+	let cursor = "0:v";
 
-  // 1. ソース側の事前クロップ(手動枠)
-  if (spec.crop) {
-    const filter = cropFilter(spec.crop, spec.source);
-    nodes.push(`[${cursor}]${filter}[pre]`);
-    cursor = "pre";
-  }
+	// 1. ソース側の事前クロップ(手動枠)
+	if (spec.crop) {
+		const filter = cropFilter(spec.crop, spec.source);
+		nodes.push(`[${cursor}]${filter}[pre]`);
+		cursor = "pre";
+	}
 
-  // 2. ターゲット形状への適合
-  const seg =
-    spec.preset.fit === "blur-pad"
-      ? blurPad(spec.preset, cursor, "out")
-      : cropCover(spec.preset, cursor, "out");
-  nodes.push(seg.chain);
+	// 2. ターゲット形状への適合
+	const seg =
+		spec.preset.fit === "blur-pad"
+			? blurPad(spec.preset, cursor, "out")
+			: cropCover(spec.preset, cursor, "out");
+	nodes.push(seg.chain);
 
-  return {
-    seekArgs,
-    durationArgs,
-    filterComplex: nodes.join(";"),
-    outLabel: `[${seg.out}]`,
-  };
+	return {
+		seekArgs,
+		durationArgs,
+		filterComplex: nodes.join(";"),
+		outLabel: `[${seg.out}]`,
+	};
 }

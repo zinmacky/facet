@@ -11,43 +11,43 @@ const TOKEN_EXPIRES_KEY = "ig_long_lived_expires_at";
  * トークン未設定なら何もしない(no-op)。
  */
 export async function refreshTokens(env: Env): Promise<void> {
-  const current = await env.TOKENS.get(TOKEN_KEY);
-  if (current === null || current === "") {
-    console.log("token-refresh: ig_long_lived not set, skipping");
-    return;
-  }
+	const current = await env.TOKENS.get(TOKEN_KEY);
+	if (current === null || current === "") {
+		console.log("token-refresh: ig_long_lived not set, skipping");
+		return;
+	}
 
-  const query = new URLSearchParams({
-    grant_type: "ig_refresh_token",
-    access_token: current,
-  });
-  const url = `https://graph.facebook.com/${env.GRAPH_VERSION}/refresh_access_token?${query.toString()}`;
+	const query = new URLSearchParams({
+		grant_type: "ig_refresh_token",
+		access_token: current,
+	});
+	const url = `https://graph.facebook.com/${env.GRAPH_VERSION}/refresh_access_token?${query.toString()}`;
 
-  const res = await fetch(url, { method: "GET" });
-  let body: unknown;
-  try {
-    body = await res.json();
-  } catch {
-    console.error(`token-refresh: non-JSON response (status ${res.status})`);
-    return;
-  }
+	const res = await fetch(url, { method: "GET" });
+	let body: unknown;
+	try {
+		body = await res.json();
+	} catch {
+		console.error(`token-refresh: non-JSON response (status ${res.status})`);
+		return;
+	}
 
-  if (typeof body === "object" && body !== null && "error" in body) {
-    const err = (body as { error?: { message?: string } }).error;
-    console.error(`token-refresh: graph error: ${err?.message ?? "unknown"}`);
-    return;
-  }
+	if (typeof body === "object" && body !== null && "error" in body) {
+		const err = (body as { error?: { message?: string } }).error;
+		console.error(`token-refresh: graph error: ${err?.message ?? "unknown"}`);
+		return;
+	}
 
-  const data = body as { access_token?: unknown; expires_in?: unknown };
-  if (typeof data.access_token !== "string") {
-    console.error("token-refresh: response missing access_token");
-    return;
-  }
+	const data = body as { access_token?: unknown; expires_in?: unknown };
+	if (typeof data.access_token !== "string") {
+		console.error("token-refresh: response missing access_token");
+		return;
+	}
 
-  await env.TOKENS.put(TOKEN_KEY, data.access_token);
-  if (typeof data.expires_in === "number") {
-    const expiresAt = Date.now() + data.expires_in * 1000;
-    await env.TOKENS.put(TOKEN_EXPIRES_KEY, String(expiresAt));
-  }
-  console.log("token-refresh: ig_long_lived refreshed");
+	await env.TOKENS.put(TOKEN_KEY, data.access_token);
+	if (typeof data.expires_in === "number") {
+		const expiresAt = Date.now() + data.expires_in * 1000;
+		await env.TOKENS.put(TOKEN_EXPIRES_KEY, String(expiresAt));
+	}
+	console.log("token-refresh: ig_long_lived refreshed");
 }

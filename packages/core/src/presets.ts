@@ -8,11 +8,11 @@ import type { Preset, PresetName } from "./types.js";
  * fit は用途で上書き可能。ここでは無難な既定を与える。
  */
 export const PRESETS: Record<PresetName, Preset> = {
-  "9:16": { name: "9:16", width: 1080, height: 1920, fit: "blur-pad" },
-  "1:1": { name: "1:1", width: 1080, height: 1080, fit: "crop" },
-  "4:5": { name: "4:5", width: 1080, height: 1350, fit: "blur-pad" },
+	"9:16": { name: "9:16", width: 1080, height: 1920, fit: "blur-pad" },
+	"1:1": { name: "1:1", width: 1080, height: 1080, fit: "crop" },
+	"4:5": { name: "4:5", width: 1080, height: 1350, fit: "blur-pad" },
 };
 
 export function getPreset(name: PresetName): Preset {
-  return PRESETS[name];
+	return PRESETS[name];
 }

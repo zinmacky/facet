@@ -8,24 +8,24 @@ import type { Env } from "./env.js";
  * DO 側で status を creating に進めて冪等化する前提。ここは fire-and-forget でよい。
  */
 export async function scanDueJobs(env: Env): Promise<void> {
-  const now = Date.now();
-  const { results } = await env.DB.prepare(
-    "SELECT id FROM jobs WHERE status = 'pending' AND publish_at <= ?",
-  )
-    .bind(now)
-    .all<{ id: string }>();
+	const now = Date.now();
+	const { results } = await env.DB.prepare(
+		"SELECT id FROM jobs WHERE status = 'pending' AND publish_at <= ?",
+	)
+		.bind(now)
+		.all<{ id: string }>();
 
-  for (const row of results) {
-    const stub = env.PUBLISH_DO.get(env.PUBLISH_DO.idFromName(row.id));
-    try {
-      // job.id を body で渡す。DO は state.id から元の名前を引けないため。
-      await stub.fetch("https://do/start", {
-        method: "POST",
-        body: JSON.stringify({ jobId: row.id }),
-      });
-    } catch (err) {
-      // 個別ジョブの起動失敗は握りつぶし、次の分の再スキャンに委ねる。
-      console.error(`scanDueJobs: failed to start job ${row.id}:`, err);
-    }
-  }
+	for (const row of results) {
+		const stub = env.PUBLISH_DO.get(env.PUBLISH_DO.idFromName(row.id));
+		try {
+			// job.id を body で渡す。DO は state.id から元の名前を引けないため。
+			await stub.fetch("https://do/start", {
+				method: "POST",
+				body: JSON.stringify({ jobId: row.id }),
+			});
+		} catch (err) {
+			// 個別ジョブの起動失敗は握りつぶし、次の分の再スキャンに委ねる。
+			console.error(`scanDueJobs: failed to start job ${row.id}:`, err);
+		}
+	}
 }

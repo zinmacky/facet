@@ -6,22 +6,22 @@ import react from "@vitejs/plugin-react";
 const SERVER_ORIGIN = "http://localhost:5178";
 
 export default defineConfig({
-  plugins: [react()],
-  server: {
-    port: 5179,
-    proxy: {
-      // /api/* → server の /*(プレフィックスを剥がす)
-      "/api": {
-        target: SERVER_ORIGIN,
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ""),
-      },
-      // /files/* はローカルのメディア配信。SSE も含むため ws は不要だが素通しする。
-      "/files": {
-        target: SERVER_ORIGIN,
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/files/, "/files"),
-      },
-    },
-  },
+	plugins: [react()],
+	server: {
+		port: 5179,
+		proxy: {
+			// /api/* → server の /*(プレフィックスを剥がす)
+			"/api": {
+				target: SERVER_ORIGIN,
+				changeOrigin: true,
+				rewrite: (path) => path.replace(/^\/api/, ""),
+			},
+			// /files/* はローカルのメディア配信。SSE も含むため ws は不要だが素通しする。
+			"/files": {
+				target: SERVER_ORIGIN,
+				changeOrigin: true,
+				rewrite: (path) => path.replace(/^\/files/, "/files"),
+			},
+		},
+	},
 });

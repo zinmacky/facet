@@ -14,46 +14,50 @@ import { config } from "../config.js";
  */
 
 export interface UploadWithScheduleParams {
-  videoPath: string;
-  title: string;
-  description?: string;
-  /** 公開予約時刻。ISO 8601 文字列。指定時は private 固定で予約公開。 */
-  publishAt?: string;
-  /** publishAt 未指定時の公開範囲。既定は private。 */
-  privacyStatus?: "private" | "unlisted" | "public";
-  tags?: string[];
+	videoPath: string;
+	title: string;
+	description?: string;
+	/** 公開予約時刻。ISO 8601 文字列。指定時は private 固定で予約公開。 */
+	publishAt?: string;
+	/** publishAt 未指定時の公開範囲。既定は private。 */
+	privacyStatus?: "private" | "unlisted" | "public";
+	tags?: string[];
 }
 
 export interface UploadWithScheduleResult {
-  videoId: string;
-  status: string;
+	videoId: string;
+	status: string;
 }
 
 /** YouTube OAuth 用の必須設定が揃っているか検証しつつ取り出す。 */
 function requireYoutubeConfig(): {
-  clientId: string;
-  clientSecret: string;
-  redirectUri: string;
-  refreshToken: string;
+	clientId: string;
+	clientSecret: string;
+	redirectUri: string;
+	refreshToken: string;
 } {
-  const { YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REDIRECT_URI, YOUTUBE_REFRESH_TOKEN } =
-    config;
-  if (
-    !YOUTUBE_CLIENT_ID ||
-    !YOUTUBE_CLIENT_SECRET ||
-    !YOUTUBE_REDIRECT_URI ||
-    !YOUTUBE_REFRESH_TOKEN
-  ) {
-    throw new Error(
-      "YouTube 連携に必要な環境変数が未設定です (YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET / YOUTUBE_REDIRECT_URI / YOUTUBE_REFRESH_TOKEN)",
-    );
-  }
-  return {
-    clientId: YOUTUBE_CLIENT_ID,
-    clientSecret: YOUTUBE_CLIENT_SECRET,
-    redirectUri: YOUTUBE_REDIRECT_URI,
-    refreshToken: YOUTUBE_REFRESH_TOKEN,
-  };
+	const {
+		YOUTUBE_CLIENT_ID,
+		YOUTUBE_CLIENT_SECRET,
+		YOUTUBE_REDIRECT_URI,
+		YOUTUBE_REFRESH_TOKEN,
+	} = config;
+	if (
+		!YOUTUBE_CLIENT_ID ||
+		!YOUTUBE_CLIENT_SECRET ||
+		!YOUTUBE_REDIRECT_URI ||
+		!YOUTUBE_REFRESH_TOKEN
+	) {
+		throw new Error(
+			"YouTube 連携に必要な環境変数が未設定です (YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET / YOUTUBE_REDIRECT_URI / YOUTUBE_REFRESH_TOKEN)",
+		);
+	}
+	return {
+		clientId: YOUTUBE_CLIENT_ID,
+		clientSecret: YOUTUBE_CLIENT_SECRET,
+		redirectUri: YOUTUBE_REDIRECT_URI,
+		refreshToken: YOUTUBE_REFRESH_TOKEN,
+	};
 }
 
 /**
@@ -61,44 +65,51 @@ function requireYoutubeConfig(): {
  * resumable upload はライブラリ側が自動的に担う。
  */
 export async function uploadWithSchedule(
-  params: UploadWithScheduleParams,
+	params: UploadWithScheduleParams,
 ): Promise<UploadWithScheduleResult> {
-  const { videoPath, title, description, publishAt, privacyStatus, tags } = params;
-  const creds = requireYoutubeConfig();
+	const { videoPath, title, description, publishAt, privacyStatus, tags } =
+		params;
+	const creds = requireYoutubeConfig();
 
-  const oauth2 = new google.auth.OAuth2(creds.clientId, creds.clientSecret, creds.redirectUri);
-  oauth2.setCredentials({ refresh_token: creds.refreshToken });
+	const oauth2 = new google.auth.OAuth2(
+		creds.clientId,
+		creds.clientSecret,
+		creds.redirectUri,
+	);
+	oauth2.setCredentials({ refresh_token: creds.refreshToken });
 
-  const youtube = google.youtube({ version: "v3", auth: oauth2 });
+	const youtube = google.youtube({ version: "v3", auth: oauth2 });
 
-  // 予約公開(publishAt 指定)時は YouTube 側の要件で private が必須。
-  const scheduled = publishAt !== undefined;
-  const privacy = scheduled ? "private" : (privacyStatus ?? "private");
+	// 予約公開(publishAt 指定)時は YouTube 側の要件で private が必須。
+	const scheduled = publishAt !== undefined;
+	const privacy = scheduled ? "private" : (privacyStatus ?? "private");
 
-  const res = await youtube.videos.insert({
-    part: ["snippet", "status"],
-    requestBody: {
-      snippet: {
-        title,
-        description: description ?? "",
-        ...(tags ? { tags } : {}),
-      },
-      status: {
-        privacyStatus: privacy,
-        // publishAt を指定すると、その時刻に private→public へ自動フリップされる(監査済み前提)。
-        ...(publishAt !== undefined ? { publishAt } : {}),
-        selfDeclaredMadeForKids: false,
-      },
-    },
-    media: {
-      body: createReadStream(videoPath),
-    },
-  });
+	const res = await youtube.videos.insert({
+		part: ["snippet", "status"],
+		requestBody: {
+			snippet: {
+				title,
+				description: description ?? "",
+				...(tags ? { tags } : {}),
+			},
+			status: {
+				privacyStatus: privacy,
+				// publishAt を指定すると、その時刻に private→public へ自動フリップされる(監査済み前提)。
+				...(publishAt !== undefined ? { publishAt } : {}),
+				selfDeclaredMadeForKids: false,
+			},
+		},
+		media: {
+			body: createReadStream(videoPath),
+		},
+	});
 
-  const videoId = res.data.id;
-  if (!videoId) {
-    throw new Error("YouTube のアップロードは成功しましたが videoId が取得できませんでした");
-  }
+	const videoId = res.data.id;
+	if (!videoId) {
+		throw new Error(
+			"YouTube のアップロードは成功しましたが videoId が取得できませんでした",
+		);
+	}
 
-  return { videoId, status: scheduled ? "scheduled" : privacy };
+	return { videoId, status: scheduled ? "scheduled" : privacy };
 }

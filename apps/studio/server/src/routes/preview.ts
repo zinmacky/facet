@@ -17,46 +17,50 @@ export const preview = new Hono();
 
 /** プレビューの入力元。EditSpec に含まれない実ファイルパスは別途受け取る。 */
 interface PreviewBody {
-  spec: EditSpec;
-  /** 元動画の絶対パス。 */
-  input: string;
+	spec: EditSpec;
+	/** 元動画の絶対パス。 */
+	input: string;
 }
 
 /** spec + input から安定したハッシュを作る(キャッシュキー)。 */
 function specHash(body: PreviewBody): string {
-  const json = JSON.stringify({ spec: body.spec, input: resolve(body.input) });
-  return createHash("sha1").update(json).digest("hex").slice(0, 16);
+	const json = JSON.stringify({ spec: body.spec, input: resolve(body.input) });
+	return createHash("sha1").update(json).digest("hex").slice(0, 16);
 }
 
 preview.post("/preview", async (c) => {
-  const body = (await c.req.json()) as PreviewBody;
-  if (!body?.spec || !body?.input) {
-    return c.json({ error: "spec と input が必要です" }, 400);
-  }
+	const body = (await c.req.json()) as PreviewBody;
+	if (!body?.spec || !body?.input) {
+		return c.json({ error: "spec と input が必要です" }, 400);
+	}
 
-  const workDir = resolve(config.WORK_DIR);
-  await mkdir(workDir, { recursive: true });
+	const workDir = resolve(config.WORK_DIR);
+	await mkdir(workDir, { recursive: true });
 
-  const hash = specHash(body);
-  const output = join(workDir, `preview-${hash}.mp4`);
+	const hash = specHash(body);
+	const output = join(workDir, `preview-${hash}.mp4`);
 
-  // キャッシュヒット: 既存ファイルをそのまま返す。
-  if (!existsSync(output)) {
-    const plan = compose(body.spec);
-    try {
-      await encode(plan, {
-        input: resolve(body.input),
-        output,
-        // プレビューは低ビットレート・高速優先。
-        bitrate: "2M",
-        overwrite: true,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: message }, 500);
-    }
-  }
+	// キャッシュヒット: 既存ファイルをそのまま返す。
+	if (!existsSync(output)) {
+		const plan = compose(body.spec);
+		try {
+			await encode(plan, {
+				input: resolve(body.input),
+				output,
+				// プレビューは低ビットレート・高速優先。
+				bitrate: "2M",
+				overwrite: true,
+			});
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			return c.json({ error: message }, 500);
+		}
+	}
 
-  const url = `/files/raw?path=${encodeURIComponent(output)}`;
-  return c.json({ url, width: body.spec.preset.width, height: body.spec.preset.height });
+	const url = `/files/raw?path=${encodeURIComponent(output)}`;
+	return c.json({
+		url,
+		width: body.spec.preset.width,
+		height: body.spec.preset.height,
+	});
 });
