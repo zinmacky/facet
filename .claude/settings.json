@@ -1,0 +1,30 @@
+{
+	"enabledPlugins": {
+		"typescript-lsp@claude-plugins-official": true
+	},
+	"hooks": {
+		"PostToolUse": [
+			{
+				"matcher": "Write|Edit",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post-edit-check.sh",
+						"timeout": 30
+					}
+				]
+			}
+		]
+	},
+	"permissions": {
+		"allow": [
+			"Bash(pnpm -r typecheck)",
+			"Bash(pnpm typecheck)",
+			"Bash(pnpm test)",
+			"Bash(pnpm -r test)",
+			"Bash(pnpm build)",
+			"Bash(pnpm lint)",
+			"Bash(pnpm format)"
+		]
+	}
+}

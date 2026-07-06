@@ -22,3 +22,6 @@ coverage/
 
 # studio 書き出し一時ディレクトリ
 .work/
+
+# Claude Code: 個人の permission 蓄積(共有は .claude/settings.json 側)
+.claude/settings.local.json
