@@ -73,19 +73,32 @@ export function CropOverlay({ crop, onChange, aspect, snap }: CropOverlayProps) 
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
-  // スナップを ON にした瞬間(または対象比が変わった瞬間)に、現在の枠を即座に比率へ合わせる。
-  // これがないとリサイズするまで反映されない。
+  // スナップ ON(または対象比変更)時に、現在の枠を即座に比率へ合わせる。
+  // さらに、動画メタデータ読込などでコンテナ寸法が確定/変化したときにも再スナップする。
+  // (初回 effect 実行時点では <video> 未ロードでコンテナ比が正しくない場合があるため。)
   useEffect(() => {
     if (!snap || !aspect || aspect <= 0) return;
-    const target = aspect / containerAspectRatio();
-    const c = cropRef.current;
-    const snapped = snapRectToRatio(c, target);
-    const changed =
-      Math.abs(snapped.x - c.x) > 0.001 ||
-      Math.abs(snapped.y - c.y) > 0.001 ||
-      Math.abs(snapped.width - c.width) > 0.001 ||
-      Math.abs(snapped.height - c.height) > 0.001;
-    if (changed) onChangeRef.current(snapped);
+    const el = containerRef.current;
+    if (!el) return;
+
+    const applySnap = () => {
+      const target = aspect / containerAspectRatio();
+      if (!Number.isFinite(target) || target <= 0) return;
+      const c = cropRef.current;
+      const snapped = snapRectToRatio(c, target);
+      const changed =
+        Math.abs(snapped.x - c.x) > 0.001 ||
+        Math.abs(snapped.y - c.y) > 0.001 ||
+        Math.abs(snapped.width - c.width) > 0.001 ||
+        Math.abs(snapped.height - c.height) > 0.001;
+      if (changed) onChangeRef.current(snapped);
+    };
+
+    applySnap();
+    // コンテナのリサイズ(=動画ロードで実寸が入る等)で再スナップ。同一比なら冪等で no-op。
+    const ro = new ResizeObserver(() => applySnap());
+    ro.observe(el);
+    return () => ro.disconnect();
   }, [snap, aspect, containerAspectRatio]);
 
   // 枠全体の移動。矩形サイズは保ったまま位置だけを [0,1] 内に収める。

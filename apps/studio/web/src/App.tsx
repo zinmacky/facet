@@ -25,7 +25,8 @@ function createClip(source: Source, index: number): Clip {
     id: crypto.randomUUID(),
     name: `${sourceBaseName(source.inputPath)}_${index}`,
     trim: { start: 0, end: source.probe.duration },
-    aspect: "16:9",
+    // 既定は「自由」(=全画面・未クロップ)。選択直後の白枠と一致させる。
+    aspect: "free",
   };
 }
 
