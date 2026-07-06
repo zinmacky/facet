@@ -1,4 +1,4 @@
-import type { CropRect, EditSpec, FitMode, Trim } from "@reframe/core";
+import type { CropRect, EditSpec, FitMode, Trim } from "@facet/core";
 
 /**
  * web ローカルの切り抜き(Clip)モデル。

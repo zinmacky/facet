@@ -1,5 +1,5 @@
 {
-  "name": "@reframe/studio-web",
+  "name": "@facet/studio-web",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -13,8 +13,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "@tanstack/react-query": "^5.56.2",
-    "@reframe/core": "workspace:*",
-    "@reframe/contract": "workspace:*"
+    "@facet/core": "workspace:*",
+    "@facet/contract": "workspace:*"
   },
   "devDependencies": {
     "vite": "^5.4.8",

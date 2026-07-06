@@ -1,5 +1,5 @@
-import { jobManifest } from "@reframe/contract";
-import type { JobRecord } from "@reframe/contract";
+import { jobManifest } from "@facet/contract";
+import type { JobRecord } from "@facet/contract";
 import { Hono } from "hono";
 import type { Env } from "../env.js";
 

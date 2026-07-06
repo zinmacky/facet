@@ -1,5 +1,5 @@
-import type { EditSpec } from "@reframe/core";
-import type { JobCreateResponse, MediaType } from "@reframe/contract";
+import type { EditSpec } from "@facet/core";
+import type { JobCreateResponse, MediaType } from "@facet/contract";
 
 /**
  * studio server(:5178)への薄い fetch ラッパ。
@@ -69,7 +69,7 @@ export function fileDownloadUrl(path: string): string {
 }
 
 /** 複数ファイルを ZIP でまとめてダウンロードする。 */
-export async function downloadZip(paths: string[], name = "reframe-export.zip"): Promise<void> {
+export async function downloadZip(paths: string[], name = "facet-export.zip"): Promise<void> {
   const res = await fetch(`/files/zip`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -228,6 +228,6 @@ export function publishInstagram(
 }
 
 /** scheduler 上のジョブ状態を引く(Queue のポーリング用)。 */
-export function getJob(id: string): Promise<import("@reframe/contract").JobRecord> {
+export function getJob(id: string): Promise<import("@facet/contract").JobRecord> {
   return getJson(`/jobs/${encodeURIComponent(id)}`);
 }

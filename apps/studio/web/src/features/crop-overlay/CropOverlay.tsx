@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import type { CropRect } from "@reframe/core";
+import type { CropRect } from "@facet/core";
 import { clamp } from "../../lib/format";
 
 /** crop を目標比(正規化空間の w/h)へ合わせる。中心を保ちつつ境界内に収める。 */

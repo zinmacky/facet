@@ -1,4 +1,4 @@
-import type { FitMode } from "@reframe/core";
+import type { FitMode } from "@facet/core";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import type { Clip, OutputTarget } from "../../types";
@@ -543,7 +543,7 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
       if (paths.length === 0) {
         throw new Error("ダウンロードできる出力がありません(生成に失敗しました)。");
       }
-      await downloadZip(paths, "reframe-upload.zip");
+      await downloadZip(paths, "facet-upload.zip");
     },
   });
 

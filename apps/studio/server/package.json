@@ -1,5 +1,5 @@
 {
-  "name": "@reframe/studio-server",
+  "name": "@facet/studio-server",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -13,9 +13,9 @@
   "dependencies": {
     "hono": "^4.6.3",
     "@hono/node-server": "^1.13.1",
-    "@reframe/core": "workspace:*",
-    "@reframe/ffmpeg-runner": "workspace:*",
-    "@reframe/contract": "workspace:*",
+    "@facet/core": "workspace:*",
+    "@facet/ffmpeg-runner": "workspace:*",
+    "@facet/contract": "workspace:*",
     "zod": "^3.23.8",
     "googleapis": "^144.0.0",
     "aws4fetch": "^1.0.20",

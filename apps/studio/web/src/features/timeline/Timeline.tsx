@@ -1,6 +1,6 @@
 import { useCallback, useRef } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import type { Trim } from "@reframe/core";
+import type { Trim } from "@facet/core";
 import { clamp, formatTime } from "../../lib/format";
 
 interface TimelineProps {

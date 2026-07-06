@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { FilterPlan } from "@reframe/core";
+import type { FilterPlan } from "@facet/core";
 import { buildFfmpegArgs } from "./runner.js";
 
 /** テスト用のダミー FilterPlan。 */

@@ -1,6 +1,6 @@
-import type { FilterPlan } from "@reframe/core";
-import { run } from "@reframe/ffmpeg-runner";
-import type { EncodeOptions, RunHooks } from "@reframe/ffmpeg-runner";
+import type { FilterPlan } from "@facet/core";
+import { run } from "@facet/ffmpeg-runner";
+import type { EncodeOptions, RunHooks } from "@facet/ffmpeg-runner";
 
 /**
  * エンコードのゲート層。すべての ffmpeg 実行をここに通す。

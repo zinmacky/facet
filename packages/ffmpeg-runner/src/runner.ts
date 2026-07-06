@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { FilterPlan } from "@reframe/core";
+import type { FilterPlan } from "@facet/core";
 
 /** 対応する映像エンコーダ。 */
 export type Encoder = "h264_videotoolbox" | "hevc_videotoolbox" | "libx264";

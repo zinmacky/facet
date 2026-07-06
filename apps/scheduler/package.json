@@ -1,5 +1,5 @@
 {
-  "name": "@reframe/scheduler",
+  "name": "@facet/scheduler",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -8,12 +8,12 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "migrate:local": "wrangler d1 migrations apply reframe-jobs --local",
-    "migrate:remote": "wrangler d1 migrations apply reframe-jobs --remote"
+    "migrate:local": "wrangler d1 migrations apply facet-jobs --local",
+    "migrate:remote": "wrangler d1 migrations apply facet-jobs --remote"
   },
   "dependencies": {
     "hono": "^4.6.3",
-    "@reframe/contract": "workspace:*",
+    "@facet/contract": "workspace:*",
     "zod": "^3.23.8"
   },
   "devDependencies": {

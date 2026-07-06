@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { Readable } from "node:stream";
 import archiver from "archiver";
 import { Hono } from "hono";
-import { probe } from "@reframe/ffmpeg-runner";
+import { probe } from "@facet/ffmpeg-runner";
 
 const execFileAsync = promisify(execFile);
 
@@ -136,7 +136,7 @@ files.post("/files/zip", async (c) => {
   // finalize は待たずにストリームさせる。
   void archive.finalize();
 
-  const filename = body?.name && /\.zip$/i.test(body.name) ? body.name : "reframe-export.zip";
+  const filename = body?.name && /\.zip$/i.test(body.name) ? body.name : "facet-export.zip";
   return new Response(Readable.toWeb(archive) as ReadableStream, {
     status: 200,
     headers: {

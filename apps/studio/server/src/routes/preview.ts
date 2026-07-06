@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Hono } from "hono";
-import { compose, type EditSpec } from "@reframe/core";
+import { compose, type EditSpec } from "@facet/core";
 import { encode } from "../services/encode.js";
 import { config } from "../config.js";
 

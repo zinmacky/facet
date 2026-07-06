@@ -92,7 +92,7 @@ export function App() {
         <div className="flex items-center gap-2">
           <div className="h-4 w-4 rounded-sm bg-accent" />
           <span className="text-sm font-semibold tracking-tight text-neutral-100">
-            reframe <span className="text-neutral-500">studio</span>
+            Facet <span className="text-neutral-500">studio</span>
           </span>
         </div>
 

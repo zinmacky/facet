@@ -136,7 +136,7 @@ export function ExportModal({ open, source, clips, onClose, onProceedToUpload }:
   }, [clips, results]);
 
   const zipMutation = useMutation({
-    mutationFn: () => downloadZip(donePaths, "reframe-export.zip"),
+    mutationFn: () => downloadZip(donePaths, "facet-export.zip"),
   });
 
   // open 時、または選択中 clip が clips から消えたときは先頭 clip を選択する。

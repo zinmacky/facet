@@ -6,7 +6,7 @@ import { refreshTokens } from "./token-refresh.js";
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.get("/", (c) => c.text("reframe-scheduler"));
+app.get("/", (c) => c.text("facet-scheduler"));
 app.route("/jobs", jobsRoutes());
 
 export default {

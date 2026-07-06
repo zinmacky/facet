@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import type { EditSpec } from "@reframe/core";
+import type { EditSpec } from "@facet/core";
 import { config } from "../config.js";
 import {
   startExportJob,

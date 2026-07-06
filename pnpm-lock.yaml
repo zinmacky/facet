@@ -17,7 +17,7 @@ importers:
 
   apps/scheduler:
     dependencies:
-      '@reframe/contract':
+      '@facet/contract':
         specifier: workspace:*
         version: link:../../packages/contract
       hono:
@@ -42,18 +42,18 @@ importers:
 
   apps/studio/server:
     dependencies:
+      '@facet/contract':
+        specifier: workspace:*
+        version: link:../../../packages/contract
+      '@facet/core':
+        specifier: workspace:*
+        version: link:../../../packages/core
+      '@facet/ffmpeg-runner':
+        specifier: workspace:*
+        version: link:../../../packages/ffmpeg-runner
       '@hono/node-server':
         specifier: ^1.13.1
         version: 1.19.14(hono@4.12.27)
-      '@reframe/contract':
-        specifier: workspace:*
-        version: link:../../../packages/contract
-      '@reframe/core':
-        specifier: workspace:*
-        version: link:../../../packages/core
-      '@reframe/ffmpeg-runner':
-        specifier: workspace:*
-        version: link:../../../packages/ffmpeg-runner
       archiver:
         specifier: ^7.0.1
         version: 7.0.1
@@ -88,10 +88,10 @@ importers:
 
   apps/studio/web:
     dependencies:
-      '@reframe/contract':
+      '@facet/contract':
         specifier: workspace:*
         version: link:../../../packages/contract
-      '@reframe/core':
+      '@facet/core':
         specifier: workspace:*
         version: link:../../../packages/core
       '@tanstack/react-query':
@@ -153,7 +153,7 @@ importers:
 
   packages/ffmpeg-runner:
     dependencies:
-      '@reframe/core':
+      '@facet/core':
         specifier: workspace:*
         version: link:../core
     devDependencies:

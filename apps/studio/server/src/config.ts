@@ -19,7 +19,7 @@ const envSchema = z.object({
   R2_ACCOUNT_ID: z.string().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
-  R2_BUCKET: z.string().default("reframe-media"),
+  R2_BUCKET: z.string().default("facet-media"),
   R2_PUBLIC_BASE: z.string().optional(),
 
   // scheduler(クラウド側)

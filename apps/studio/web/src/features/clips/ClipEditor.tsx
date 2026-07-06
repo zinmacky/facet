@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import type { CropRect, Trim } from "@reframe/core";
+import type { CropRect, Trim } from "@facet/core";
 import type { ProbeResult } from "../../lib/api";
 import type { Clip } from "../../types";
 import { ASPECT_TEMPLATES, aspectRatio } from "../../types";

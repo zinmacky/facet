@@ -1,4 +1,4 @@
-import type { MediaType } from "@reframe/contract";
+import type { MediaType } from "@facet/contract";
 import type { Env } from "./env.js";
 
 /** コンテナの処理状態。Graph API の status_code に対応する。 */

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { compose, type EditSpec } from "@reframe/core";
-import type { Progress } from "@reframe/ffmpeg-runner";
+import { compose, type EditSpec } from "@facet/core";
+import type { Progress } from "@facet/ffmpeg-runner";
 import { encode } from "./encode.js";
 
 /**

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { AwsClient } from "aws4fetch";
-import { jobManifest, type JobManifest, type MediaType } from "@reframe/contract";
+import { jobManifest, type JobManifest, type MediaType } from "@facet/contract";
 import { config } from "../config.js";
 
 /**

@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { mediaType } from "@reframe/contract";
+import { mediaType } from "@facet/contract";
 import { uploadWithSchedule } from "../services/youtube.js";
 import { uploadToR2AndEnqueue } from "../services/scheduler-client.js";
 

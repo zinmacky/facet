@@ -1,4 +1,4 @@
-name = "reframe-scheduler"
+name = "facet-scheduler"
 main = "src/index.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 # D1: ジョブの永続ストア。database_id はデプロイ環境ごとに差し替える。
 [[d1_databases]]
 binding = "DB"
-database_name = "reframe-jobs"
+database_name = "facet-jobs"
 database_id = "REPLACE_WITH_D1_ID"
 migrations_dir = "migrations"
 
