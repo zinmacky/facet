@@ -5,6 +5,9 @@ import type { Clip, OutputTarget } from "../../types";
 import { FIT_OPTIONS, OUTPUT_TARGETS, finalSpec, targetById } from "../../types";
 import type { ExportEvent, ProbeResult } from "../../lib/api";
 import {
+  downloadZip,
+  fileDownloadUrl,
+  fileRawUrl,
   postExport,
   publishInstagram,
   publishYoutube,
@@ -59,6 +62,21 @@ interface UploadStatus {
   message?: string;
 }
 
+/** 最終レンダリング結果。プレビュー表示・DL・投稿で再利用する。 */
+interface RenderState {
+  rendering: boolean;
+  /** 生成済みファイルの絶対パス。 */
+  outputPath?: string;
+  /** 生成時の設定シグネチャ(clipId|targetId|fit)。現在値と異なれば要更新。 */
+  sig?: string;
+  error?: string;
+}
+
+/** アイテムの設定シグネチャ。これが変わったらレンダリングは古い(要更新)。 */
+function itemSig(item: UploadItem): string {
+  return `${item.clipId}|${item.targetId}|${item.fit}`;
+}
+
 const DEFAULT_TARGET_ID = "yt-shorts";
 const DEFAULT_FIT: FitMode = "crop";
 
@@ -74,6 +92,8 @@ const textareaClass =
 export function UploadModal({ open, source, clips, onClose, onBack }: UploadModalProps) {
   const [items, setItems] = useState<UploadItem[]>([]);
   const [statuses, setStatuses] = useState<Map<string, UploadStatus>>(new Map());
+  // itemId → 最終レンダリング結果(プレビュー/DL/投稿で共有)。
+  const [renders, setRenders] = useState<Map<string, RenderState>>(new Map());
 
   // 一括予約スケジュールの入力状態。
   const [startDate, setStartDate] = useState("");
@@ -222,6 +242,51 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
         });
     });
 
+  const setRender = (itemId: string, patch: Partial<RenderState>) => {
+    setRenders((prev) => {
+      const next = new Map(prev);
+      const base = next.get(itemId) ?? { rendering: false };
+      next.set(itemId, { ...base, ...patch });
+      return next;
+    });
+  };
+
+  /**
+   * 現在の設定でレンダリング済みなら再利用し、無い/古い場合のみ再レンダリングする。
+   * プレビュー生成・ダウンロード・投稿で共有する。
+   */
+  const ensureRendered = async (item: UploadItem): Promise<string> => {
+    if (!source) throw new Error("元動画が未選択です。");
+    const clip = clips.find((c) => c.id === item.clipId);
+    if (!clip) throw new Error("対象クリップが見つかりません。");
+    const target = targetById(item.targetId);
+    if (!target) throw new Error("出力ターゲットが無効です。");
+
+    const sig = itemSig(item);
+    const cached = renders.get(item.id);
+    if (cached?.outputPath && cached.sig === sig) return cached.outputPath;
+
+    setRender(item.id, { rendering: true, error: undefined });
+    try {
+      const spec = finalSpec(
+        clip,
+        { width: source.probe.width, height: source.probe.height },
+        target,
+        item.fit,
+      );
+      const output = `${clip.name}_${item.targetId}.mp4`;
+      const outputPath = await renderClip(spec, output);
+      setRender(item.id, { rendering: false, outputPath, sig, error: undefined });
+      return outputPath;
+    } catch (err) {
+      setRender(item.id, {
+        rendering: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+  };
+
   const publishOne = async (item: UploadItem): Promise<void> => {
     if (!source) return;
     const clip = clips.find((c) => c.id === item.clipId);
@@ -233,16 +298,9 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
     }
 
     try {
-      // 1. レンダリング。
+      // 1. レンダリング(生成済みなら再利用)。
       setStatus(item.id, { kind: "rendering" });
-      const spec = finalSpec(
-        clip,
-        { width: source.probe.width, height: source.probe.height },
-        target,
-        item.fit,
-      );
-      const output = `${clip.name}_${item.targetId}.mp4`;
-      const outputPath = await renderClip(spec, output);
+      const outputPath = await ensureRendered(item);
 
       // 2. 投稿。
       setStatus(item.id, { kind: "publishing" });
@@ -303,6 +361,23 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
 
   const busy = publishOneMutation.isPending || publishAllMutation.isPending;
 
+  // 現在設定と一致する(=最新の)生成済みファイル一覧。一括DL 対象。
+  const readyPaths = items
+    .map((it) => {
+      const r = renders.get(it.id);
+      return r?.outputPath && r.sig === itemSig(it) ? r.outputPath : null;
+    })
+    .filter((p): p is string => p !== null);
+
+  const bulkDownloadMutation = useMutation({
+    mutationFn: () => downloadZip(readyPaths, "reframe-upload.zip"),
+  });
+
+  // プレビュー生成(現在設定でレンダリング)。エラーは renders.error に反映。
+  const previewOne = (item: UploadItem) => {
+    void ensureRendered(item).catch(() => undefined);
+  };
+
   const footer = (
     <>
       <Button variant="ghost" onClick={onBack} disabled={busy}>
@@ -339,6 +414,22 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
           onAssign={assignSchedule}
         />
 
+        {items.length > 0 && (
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-neutral-500">
+              プレビュー生成済み: {readyPaths.length}/{items.length}
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => bulkDownloadMutation.mutate()}
+              disabled={readyPaths.length === 0 || bulkDownloadMutation.isPending}
+            >
+              {bulkDownloadMutation.isPending ? "生成中…" : "一括ダウンロード(ZIP)"}
+            </Button>
+          </div>
+        )}
+
         <div className="flex flex-col gap-3">
           {items.length === 0 && (
             <p className="rounded-md border border-dashed border-line px-3 py-6 text-center text-xs text-neutral-500">
@@ -353,10 +444,12 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
               total={items.length}
               clips={clips}
               status={statuses.get(item.id)}
+              render={renders.get(item.id)}
               busy={busy}
               onPatch={(patch) => patchItem(item.id, patch)}
               onMove={(dir) => moveItem(index, dir)}
               onRemove={() => removeItem(item.id)}
+              onPreview={() => previewOne(item)}
               onPublish={() => publishOneMutation.mutate(item)}
             />
           ))}
@@ -483,17 +576,25 @@ interface UploadItemCardProps {
   total: number;
   clips: Clip[];
   status: UploadStatus | undefined;
+  render: RenderState | undefined;
   busy: boolean;
   onPatch: (patch: Partial<UploadItem>) => void;
   onMove: (dir: -1 | 1) => void;
   onRemove: () => void;
+  onPreview: () => void;
   onPublish: () => void;
 }
 
 function UploadItemCard(props: UploadItemCardProps) {
-  const { item, index, total, clips, status, busy } = props;
+  const { item, index, total, clips, status, render, busy } = props;
   const platform = useMemo(() => targetById(item.targetId)?.platform, [item.targetId]);
   const datetimeValue = item.publishAt !== undefined ? msToLocalInput(item.publishAt) : "";
+
+  // 現在設定と生成済みファイルの整合。fresh=最新、stale=設定変更後で要更新。
+  const rendering = render?.rendering ?? false;
+  const outputPath = render?.outputPath;
+  const fresh = outputPath !== undefined && render?.sig === itemSig(item);
+  const stale = outputPath !== undefined && render?.sig !== itemSig(item);
 
   const onDatetimeChange = (value: string) => {
     const ms = localInputToMs(value);
@@ -623,6 +724,45 @@ function UploadItemCard(props: UploadItemCardProps) {
             onChange={(e) => onDatetimeChange(e.target.value)}
           />
         </label>
+      </div>
+
+      {/* 最終プレビュー + ダウンロード */}
+      <div className="mt-3 flex flex-col gap-2 rounded-md border border-line bg-elevated/40 p-2">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] text-neutral-400">
+            最終プレビュー
+            {stale && <span className="ml-1.5 text-amber-400">(設定変更あり・要更新)</span>}
+          </span>
+          <div className="flex items-center gap-2">
+            {fresh && outputPath && (
+              <a
+                href={fileDownloadUrl(outputPath)}
+                download
+                className="text-[11px] text-accent hover:underline"
+              >
+                ダウンロード
+              </a>
+            )}
+            <Button variant="ghost" size="sm" onClick={props.onPreview} disabled={rendering || busy}>
+              {rendering ? "生成中…" : outputPath ? "プレビュー更新" : "プレビュー生成"}
+            </Button>
+          </div>
+        </div>
+        {outputPath ? (
+          <video
+            src={fileRawUrl(outputPath)}
+            controls
+            className={cn(
+              "max-h-48 w-full rounded bg-black",
+              stale && "opacity-60",
+            )}
+          />
+        ) : (
+          <p className="py-2 text-center text-[11px] text-neutral-600">
+            「プレビュー生成」で最終アスペクト・フィットを確認できます。
+          </p>
+        )}
+        {render?.error && <p className="text-[11px] text-danger">{render.error}</p>}
       </div>
 
       <div className="mt-3 flex items-center justify-between">
