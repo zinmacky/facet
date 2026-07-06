@@ -995,7 +995,7 @@ function OutputCard(props: OutputCardProps) {
 
   return (
     <div className="rounded-lg border border-line bg-panel p-3">
-      <div className="flex gap-3">
+      <div className="flex items-start gap-3">
         {/* 左: 最終プレビュー + ダウンロード */}
         <div className="flex w-72 shrink-0 flex-col gap-2 rounded-md border border-line bg-elevated/40 p-2">
           <div className="flex items-center justify-between">
@@ -1093,20 +1093,20 @@ function OutputCard(props: OutputCardProps) {
                   onChange={(e) => props.onPatch({ title: e.target.value })}
                 />
               </label>
-              <label className="flex min-h-0 flex-1 flex-col gap-1 text-[11px] text-neutral-400">
+              <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
                 説明
                 <textarea
-                  className={cn(textareaClass, "min-h-0 flex-1")}
+                  className={cn(textareaClass, "min-h-[96px] resize-y")}
                   value={output.description}
                   onChange={(e) => props.onPatch({ description: e.target.value })}
                 />
               </label>
             </>
           ) : (
-            <label className="flex min-h-0 flex-1 flex-col gap-1 text-[11px] text-neutral-400">
+            <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
               キャプション
               <textarea
-                className={cn(textareaClass, "min-h-0 flex-1")}
+                className={cn(textareaClass, "min-h-[96px] resize-y")}
                 maxLength={2200}
                 value={output.caption}
                 onChange={(e) => props.onPatch({ caption: e.target.value })}
@@ -1114,7 +1114,7 @@ function OutputCard(props: OutputCardProps) {
             </label>
           )}
 
-          <div className="mt-auto flex items-center justify-between">
+          <div className="mt-1 flex items-center justify-between">
             <StatusBadge status={status} />
             <Button variant="primary" size="sm" onClick={props.onPublish} disabled={busy}>
               投稿
