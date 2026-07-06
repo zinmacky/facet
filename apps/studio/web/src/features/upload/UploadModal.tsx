@@ -888,7 +888,7 @@ function OutputCard(props: OutputCardProps) {
     <div className="rounded-lg border border-line bg-panel p-3">
       <div className="flex gap-3">
         {/* 左: 最終プレビュー + ダウンロード */}
-        <div className="flex w-52 shrink-0 flex-col gap-2 rounded-md border border-line bg-elevated/40 p-2">
+        <div className="flex w-72 shrink-0 flex-col gap-2 rounded-md border border-line bg-elevated/40 p-2">
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-neutral-400">
               最終プレビュー
@@ -908,7 +908,7 @@ function OutputCard(props: OutputCardProps) {
             <video
               src={fileRawUrl(outputPath)}
               controls
-              className={cn("max-h-52 w-full rounded bg-black", stale && "opacity-60")}
+              className={cn("max-h-64 w-full rounded bg-black", stale && "opacity-60")}
             />
           ) : (
             <p className="py-8 text-center text-[11px] text-neutral-600">
