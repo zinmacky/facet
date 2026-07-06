@@ -13,6 +13,8 @@ interface TimelineProps {
   onChange: (trim: Trim) => void;
   /** トラッククリックでシークしたいとき。 */
   onSeek?: (seconds: number) => void;
+  /** ハンドルのドラッグ完了時。確定したトリムを渡す(プレビュー再生に使う)。 */
+  onHandleRelease?: (handle: Handle, trim: Trim) => void;
 }
 
 type Handle = "start" | "end";
@@ -28,6 +30,7 @@ export function Timeline({
   currentTime,
   onChange,
   onSeek,
+  onHandleRelease,
 }: TimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const start = trim?.start ?? 0;
@@ -53,22 +56,25 @@ export function Timeline({
       e.preventDefault();
       e.currentTarget.setPointerCapture(e.pointerId);
 
+      // ドラッグ中に確定した最新トリムを保持し、release 時に親へ渡す。
+      let lastTrim: Trim = { start, end };
       const move = (ev: PointerEvent) => {
         const secs = pxToSeconds(ev.clientX);
-        if (handle === "start") {
-          onChange({ start: clamp(secs, 0, end - 0.05), end });
-        } else {
-          onChange({ start, end: clamp(secs, start + 0.05, duration) });
-        }
+        lastTrim =
+          handle === "start"
+            ? { start: clamp(secs, 0, end - 0.05), end }
+            : { start, end: clamp(secs, start + 0.05, duration) };
+        onChange(lastTrim);
       };
       const up = () => {
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", up);
+        onHandleRelease?.(handle, lastTrim);
       };
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);
     },
-    [disabled, duration, end, start, onChange, pxToSeconds],
+    [disabled, duration, end, start, onChange, onHandleRelease, pxToSeconds],
   );
 
   const startPct = duration > 0 ? (start / duration) * 100 : 0;

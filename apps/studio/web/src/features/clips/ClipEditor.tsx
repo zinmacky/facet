@@ -1,11 +1,15 @@
 import { useCallback, useRef, useState } from "react";
-import type { CropRect } from "@reframe/core";
+import type { CropRect, Trim } from "@reframe/core";
 import type { ProbeResult } from "../../lib/api";
 import type { Clip, VariantKind } from "../../types";
 import { aspectForVariant } from "../../types";
+import { formatTime } from "../../lib/format";
 import { Timeline } from "../timeline/Timeline";
 import { CropOverlay } from "../crop-overlay/CropOverlay";
 import { Card } from "../../components/ui/Card";
+
+/** 終了バーのプレビューで、終了点の手前から再生する秒数。 */
+const PREVIEW_LEAD_SECONDS = 5;
 
 interface ClipEditorProps {
   clip: Clip;
@@ -34,8 +38,11 @@ function firstActiveVariant(clip: Clip): VariantKind {
 export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
+  const [playing, setPlaying] = useState(false);
   // 注目領域は自由選択が既定。スナップは任意で有効化する。
   const [snapCrop, setSnapCrop] = useState(false);
+  // 区間プレビュー中の自動停止位置(秒)。手動再生中は null。
+  const stopAtRef = useRef<number | null>(null);
 
   const crop = clip.crop ?? FULL_CROP;
   const aspect = aspectForVariant(firstActiveVariant(clip));
@@ -51,8 +58,44 @@ export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
   const onSeek = useCallback((seconds: number) => {
     const v = videoRef.current;
     if (v) {
+      // トラッククリックでのシークは区間プレビューを解除する。
+      stopAtRef.current = null;
       v.currentTime = seconds;
       setCurrentTime(seconds);
+    }
+  }, []);
+
+  // 指定位置から再生し、stopAt に達したら自動停止する(区間プレビュー)。
+  const previewSegment = useCallback((fromSec: number, stopSec: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    stopAtRef.current = stopSec;
+    v.currentTime = fromSec;
+    setCurrentTime(fromSec);
+    void v.play();
+  }, []);
+
+  // ハンドルのドラッグ完了 → プレビュー再生。
+  // 開始バー: その位置から。終了バー: 5秒前(開始未満なら開始位置)から。いずれも終了点で停止。
+  const handleHandleRelease = useCallback(
+    (handle: "start" | "end", trim: Trim) => {
+      const from =
+        handle === "start"
+          ? trim.start
+          : Math.max(trim.start, trim.end - PREVIEW_LEAD_SECONDS);
+      previewSegment(from, trim.end);
+    },
+    [previewSegment],
+  );
+
+  const togglePlay = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) {
+      stopAtRef.current = null; // 手動再生は自動停止しない。
+      void v.play();
+    } else {
+      v.pause();
     }
   }, []);
 
@@ -61,13 +104,21 @@ export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
       {/* プレビュー + クロップ枠(min-w-0 + overflow-hidden で枠内に確実に収める) */}
       <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-line bg-black/60 p-2">
         <div className="relative inline-block max-h-full max-w-full">
+          {/* ネイティブ controls は使わない(シークは Timeline、再生は下のボタン)。
+              クロップ枠が全面を覆うため、動画上の操作系は載せない。 */}
           <video
             ref={videoRef}
             src={probe.url}
-            controls
-            onTimeUpdate={(e) =>
-              setCurrentTime((e.target as HTMLVideoElement).currentTime)
-            }
+            onTimeUpdate={(e) => {
+              const v = e.currentTarget;
+              setCurrentTime(v.currentTime);
+              if (stopAtRef.current !== null && v.currentTime >= stopAtRef.current) {
+                v.pause();
+                stopAtRef.current = null;
+              }
+            }}
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
             className="block max-h-[52vh] max-w-full rounded"
           />
           <CropOverlay
@@ -79,8 +130,30 @@ export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
         </div>
       </div>
 
-      {/* クロップ補助トグル */}
-      <div className="flex items-center justify-end px-1">
+      {/* プレビュー操作: 再生/一時停止 + 時刻 と クロップ補助トグル */}
+      <div className="flex items-center justify-between px-1">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={togglePlay}
+            aria-label={playing ? "一時停止" : "再生"}
+            className="flex h-7 w-7 items-center justify-center rounded-md border border-line bg-elevated text-neutral-200 hover:border-accent hover:text-accent"
+          >
+            {playing ? (
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+                <rect x="2" y="1.5" width="3" height="9" rx="0.5" />
+                <rect x="7" y="1.5" width="3" height="9" rx="0.5" />
+              </svg>
+            ) : (
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+                <path d="M3 1.8v8.4a.5.5 0 0 0 .77.42l6.5-4.2a.5.5 0 0 0 0-.84l-6.5-4.2A.5.5 0 0 0 3 1.8Z" />
+              </svg>
+            )}
+          </button>
+          <span className="font-mono text-xs tabular-nums text-neutral-400">
+            {formatTime(currentTime)} / {formatTime(probe.duration)}
+          </span>
+        </div>
         <label className="flex items-center gap-2 text-xs text-neutral-400">
           <input
             type="checkbox"
@@ -88,7 +161,7 @@ export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
             onChange={(e) => setSnapCrop(e.target.checked)}
             className="accent-accent"
           />
-          注目領域をバリアント比にスナップ
+          切り抜き枠を仕上がりの形(9:16など)に合わせる
         </label>
       </div>
 
@@ -100,6 +173,7 @@ export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
           currentTime={currentTime}
           onChange={(trim) => onChange({ ...clip, trim })}
           onSeek={onSeek}
+          onHandleRelease={handleHandleRelease}
         />
       </Card>
 
