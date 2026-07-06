@@ -19,6 +19,16 @@ export interface Source {
 
 type ModalKind = "none" | "export" | "upload";
 
+/** ソースから新しい Clip を作る(連番付き)。 */
+function createClip(source: Source, index: number): Clip {
+  return {
+    id: crypto.randomUUID(),
+    name: `${sourceBaseName(source.inputPath)}_${index}`,
+    trim: { start: 0, end: source.probe.duration },
+    aspect: "16:9",
+  };
+}
+
 /**
  * アプリの状態オーナー。
  * 元画面ではソース選択と切り抜き(trim + クロップ枠 + アスペクト比)を編集する。
@@ -39,22 +49,18 @@ export function App() {
     },
     onSuccess: (result) => {
       if (!result) return;
+      // ファイル選択時に自動で 1 本目の切り抜きを追加して選択状態にする。
+      const first = createClip(result, 1);
       setSource(result);
-      setClips([]);
-      setSelectedClipId(null);
+      setClips([first]);
+      setSelectedClipId(first.id);
     },
   });
 
   const addClip = useCallback(() => {
     if (!source) return;
-    const base = sourceBaseName(source.inputPath);
     setClips((prev) => {
-      const clip: Clip = {
-        id: crypto.randomUUID(),
-        name: `${base}_${prev.length + 1}`,
-        trim: { start: 0, end: source.probe.duration },
-        aspect: "16:9",
-      };
+      const clip = createClip(source, prev.length + 1);
       setSelectedClipId(clip.id);
       return [...prev, clip];
     });

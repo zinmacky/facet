@@ -94,6 +94,8 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
   const [statuses, setStatuses] = useState<Map<string, UploadStatus>>(new Map());
   // itemId → 最終レンダリング結果(プレビュー/DL/投稿で共有)。
   const [renders, setRenders] = useState<Map<string, RenderState>>(new Map());
+  // 中央詳細に表示する item の選択状態。
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
   // 一括予約スケジュールの入力状態。
   const [startDate, setStartDate] = useState("");
@@ -108,6 +110,7 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
     setItems([]);
     setStatuses(new Map());
     setRenders(new Map());
+    setSelectedItemId(null);
     setStartDate("");
     setEndDate("");
     setWeekdays([]);
@@ -120,7 +123,7 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
     if (!open) return;
     setItems((prev) => {
       if (prev.length > 0) return prev;
-      return clips.map((clip) => ({
+      const created = clips.map((clip) => ({
         id: crypto.randomUUID(),
         clipId: clip.id,
         targetId: DEFAULT_TARGET_ID,
@@ -129,8 +132,22 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
         description: "",
         caption: "",
       }));
+      // 初期化直後は先頭 item を選択する。
+      setSelectedItemId(created[0]?.id ?? null);
+      return created;
     });
   }, [open, clips]);
+
+  // 選択中 id が items に無い場合は先頭へ補正する(削除・並び替え時の担保)。
+  useEffect(() => {
+    if (items.length === 0) {
+      if (selectedItemId !== null) setSelectedItemId(null);
+      return;
+    }
+    if (!items.some((it) => it.id === selectedItemId)) {
+      setSelectedItemId(items[0]?.id ?? null);
+    }
+  }, [items, selectedItemId]);
 
   const setStatus = (itemId: string, status: UploadStatus) => {
     setStatuses((prev) => {
@@ -147,7 +164,16 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
   };
 
   const removeItem = (itemId: string) => {
-    setItems((prev) => prev.filter((it) => it.id !== itemId));
+    setItems((prev) => {
+      const idx = prev.findIndex((it) => it.id === itemId);
+      const next = prev.filter((it) => it.id !== itemId);
+      // 削除対象が選択中なら隣接(なければ null)を選択する。
+      if (itemId === selectedItemId) {
+        const neighbor = next[idx] ?? next[idx - 1] ?? null;
+        setSelectedItemId(neighbor?.id ?? null);
+      }
+      return next;
+    });
     setStatuses((prev) => {
       const next = new Map(prev);
       next.delete(itemId);
@@ -172,18 +198,18 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
   const addItem = () => {
     const firstClip = clips[0];
     if (!firstClip) return;
-    setItems((prev) => [
-      ...prev,
-      {
-        id: crypto.randomUUID(),
-        clipId: firstClip.id,
-        targetId: DEFAULT_TARGET_ID,
-        fit: DEFAULT_FIT,
-        title: "",
-        description: "",
-        caption: "",
-      },
-    ]);
+    const created: UploadItem = {
+      id: crypto.randomUUID(),
+      clipId: firstClip.id,
+      targetId: DEFAULT_TARGET_ID,
+      fit: DEFAULT_FIT,
+      title: "",
+      description: "",
+      caption: "",
+    };
+    setItems((prev) => [...prev, created]);
+    // 追加した item を選択する。
+    setSelectedItemId(created.id);
   };
 
   // ---- 時刻リスト操作 ------------------------------------------------------
@@ -409,8 +435,11 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
     </>
   );
 
+  // 中央詳細に表示する選択中の item。
+  const selectedItem = items.find((it) => it.id === selectedItemId) ?? null;
+
   return (
-    <Modal open={open} title="アップロード" onClose={onClose} footer={footer} widthClass="max-w-4xl">
+    <Modal open={open} title="アップロード" onClose={onClose} footer={footer} widthClass="max-w-5xl">
       <div className="flex flex-col gap-4">
         <BulkSchedule
           startDate={startDate}
@@ -427,51 +456,69 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
           onAssign={assignSchedule}
         />
 
-        {items.length > 0 && (
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] text-neutral-500">
-              プレビュー生成済み: {readyPaths.length}/{items.length}
-            </span>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => bulkDownloadMutation.mutate()}
-              disabled={readyPaths.length === 0 || bulkDownloadMutation.isPending}
-            >
-              {bulkDownloadMutation.isPending ? "生成中…" : "一括ダウンロード(ZIP)"}
-            </Button>
+        <div className="flex min-h-[52vh] gap-3">
+          {/* 中央: 選択中 item の詳細 */}
+          <div className="flex-1 min-w-0 overflow-y-auto">
+            {selectedItem ? (
+              <UploadItemCard
+                key={selectedItem.id}
+                item={selectedItem}
+                clips={clips}
+                status={statuses.get(selectedItem.id)}
+                render={renders.get(selectedItem.id)}
+                busy={busy}
+                onPatch={(patch) => patchItem(selectedItem.id, patch)}
+                onPreview={() => previewOne(selectedItem)}
+                onPublish={() => publishOneMutation.mutate(selectedItem)}
+              />
+            ) : (
+              <p className="rounded-md border border-dashed border-line px-3 py-10 text-center text-xs text-neutral-500">
+                右の一覧から出力を選択してください。
+              </p>
+            )}
           </div>
-        )}
 
-        <div className="flex flex-col gap-3">
-          {items.length === 0 && (
-            <p className="rounded-md border border-dashed border-line px-3 py-6 text-center text-xs text-neutral-500">
-              投稿する出力がありません。「+ 出力を追加」で追加してください。
-            </p>
-          )}
-          {items.map((item, index) => (
-            <UploadItemCard
-              key={item.id}
-              item={item}
-              index={index}
-              total={items.length}
-              clips={clips}
-              status={statuses.get(item.id)}
-              render={renders.get(item.id)}
-              busy={busy}
-              onPatch={(patch) => patchItem(item.id, patch)}
-              onMove={(dir) => moveItem(index, dir)}
-              onRemove={() => removeItem(item.id)}
-              onPreview={() => previewOne(item)}
-              onPublish={() => publishOneMutation.mutate(item)}
-            />
-          ))}
-        </div>
+          {/* 右: 出力一覧 */}
+          <div className="w-64 shrink-0 border-l border-line pl-3 overflow-y-auto">
+            <div className="flex flex-col gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => bulkDownloadMutation.mutate()}
+                disabled={readyPaths.length === 0 || bulkDownloadMutation.isPending}
+              >
+                {bulkDownloadMutation.isPending ? "生成中…" : "一括ダウンロード(ZIP)"}
+              </Button>
+              <span className="text-[11px] text-neutral-500">
+                生成済み {readyPaths.length}/{items.length}
+              </span>
+              <Button variant="secondary" size="sm" onClick={addItem} disabled={clips.length === 0}>
+                + 出力を追加
+              </Button>
+            </div>
 
-        <div>
-          <Button variant="secondary" size="sm" onClick={addItem} disabled={clips.length === 0}>
-            + 出力を追加
-          </Button>
+            <div className="mt-3 flex flex-col gap-1.5">
+              {items.length === 0 && (
+                <p className="rounded-md border border-dashed border-line px-2 py-4 text-center text-[11px] text-neutral-500">
+                  出力がありません。
+                </p>
+              )}
+              {items.map((item, index) => (
+                <UploadItemRow
+                  key={item.id}
+                  item={item}
+                  index={index}
+                  total={items.length}
+                  clips={clips}
+                  status={statuses.get(item.id)}
+                  selected={item.id === selectedItemId}
+                  onSelect={() => setSelectedItemId(item.id)}
+                  onMove={(dir) => moveItem(index, dir)}
+                  onRemove={() => removeItem(item.id)}
+                />
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </Modal>
@@ -585,21 +632,17 @@ function BulkSchedule(props: BulkScheduleProps) {
 
 interface UploadItemCardProps {
   item: UploadItem;
-  index: number;
-  total: number;
   clips: Clip[];
   status: UploadStatus | undefined;
   render: RenderState | undefined;
   busy: boolean;
   onPatch: (patch: Partial<UploadItem>) => void;
-  onMove: (dir: -1 | 1) => void;
-  onRemove: () => void;
   onPreview: () => void;
   onPublish: () => void;
 }
 
 function UploadItemCard(props: UploadItemCardProps) {
-  const { item, index, total, clips, status, render, busy } = props;
+  const { item, clips, status, render, busy } = props;
   const platform = useMemo(() => targetById(item.targetId)?.platform, [item.targetId]);
   const datetimeValue = item.publishAt !== undefined ? msToLocalInput(item.publishAt) : "";
 
@@ -616,38 +659,6 @@ function UploadItemCard(props: UploadItemCardProps) {
 
   return (
     <div className="rounded-lg border border-line bg-panel p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-[11px] font-medium text-neutral-500">#{index + 1}</span>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            aria-label="上へ"
-            disabled={index === 0}
-            onClick={() => props.onMove(-1)}
-            className="flex h-6 w-6 items-center justify-center rounded border border-line bg-elevated text-neutral-400 hover:text-neutral-100 disabled:opacity-30"
-          >
-            ↑
-          </button>
-          <button
-            type="button"
-            aria-label="下へ"
-            disabled={index === total - 1}
-            onClick={() => props.onMove(1)}
-            className="flex h-6 w-6 items-center justify-center rounded border border-line bg-elevated text-neutral-400 hover:text-neutral-100 disabled:opacity-30"
-          >
-            ↓
-          </button>
-          <button
-            type="button"
-            aria-label="削除"
-            onClick={props.onRemove}
-            className="flex h-6 w-6 items-center justify-center rounded border border-line bg-elevated text-neutral-500 hover:border-danger hover:text-danger"
-          >
-            ✕
-          </button>
-        </div>
-      </div>
-
       <div className="grid grid-cols-3 gap-2">
         <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
           対象 clip
@@ -788,6 +799,96 @@ function UploadItemCard(props: UploadItemCardProps) {
         >
           投稿
         </Button>
+      </div>
+    </div>
+  );
+}
+
+// ---- 出力一覧の行 -----------------------------------------------------------
+
+interface UploadItemRowProps {
+  item: UploadItem;
+  index: number;
+  total: number;
+  clips: Clip[];
+  status: UploadStatus | undefined;
+  selected: boolean;
+  onSelect: () => void;
+  onMove: (dir: -1 | 1) => void;
+  onRemove: () => void;
+}
+
+function UploadItemRow(props: UploadItemRowProps) {
+  const { item, index, total, clips, status, selected } = props;
+  const clipName = clips.find((c) => c.id === item.clipId)?.name ?? "(不明な clip)";
+  const targetLabel = targetById(item.targetId)?.label ?? "(不明なターゲット)";
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={props.onSelect}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          props.onSelect();
+        }
+      }}
+      className={cn(
+        "cursor-pointer rounded-md border p-2 transition-colors",
+        selected
+          ? "border-accent bg-accent/10"
+          : "border-line bg-panel hover:border-accent/60",
+      )}
+    >
+      <div className="flex items-start justify-between gap-1">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] font-medium text-neutral-500">#{index + 1}</span>
+            <span className="truncate text-xs text-neutral-200">{clipName}</span>
+          </div>
+          <span className="mt-0.5 block truncate text-[11px] text-neutral-400">{targetLabel}</span>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            aria-label="上へ"
+            disabled={index === 0}
+            onClick={(e) => {
+              e.stopPropagation();
+              props.onMove(-1);
+            }}
+            className="flex h-6 w-6 items-center justify-center rounded border border-line bg-elevated text-neutral-400 hover:text-neutral-100 disabled:opacity-30"
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            aria-label="下へ"
+            disabled={index === total - 1}
+            onClick={(e) => {
+              e.stopPropagation();
+              props.onMove(1);
+            }}
+            className="flex h-6 w-6 items-center justify-center rounded border border-line bg-elevated text-neutral-400 hover:text-neutral-100 disabled:opacity-30"
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            aria-label="削除"
+            onClick={(e) => {
+              e.stopPropagation();
+              props.onRemove();
+            }}
+            className="flex h-6 w-6 items-center justify-center rounded border border-line bg-elevated text-neutral-500 hover:border-danger hover:text-danger"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+      <div className="mt-1">
+        <StatusBadge status={status} />
       </div>
     </div>
   );
