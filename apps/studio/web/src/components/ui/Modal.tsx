@@ -1,6 +1,13 @@
 import type { ReactNode } from "react";
 import { useEffect } from "react";
 import { cn } from "./cn";
+import { CloseIcon } from "./icons";
+
+/**
+ * 開いているモーダルのスタック。Esc は最前面(スタック末尾)のモーダルだけが処理する。
+ * 確認ダイアログを別モーダルの上に重ねたとき、Esc で下のモーダルまで閉じるのを防ぐ。
+ */
+const modalStack: symbol[] = [];
 
 interface ModalProps {
 	open: boolean;
@@ -16,6 +23,11 @@ interface ModalProps {
 	 * false のとき本文は overflow-hidden になり、子側でブロックごとにスクロールを制御する。
 	 */
 	scrollBody?: boolean;
+	/**
+	 * Esc / オーバーレイクリック / ✕ で閉じられるか。既定 true。
+	 * 処理中(投稿・レンダリング等)は false にして誤操作での中断を防ぐ。
+	 */
+	dismissable?: boolean;
 }
 
 /**
@@ -30,15 +42,26 @@ export function Modal({
 	footer,
 	widthClass = "max-w-3xl",
 	scrollBody = true,
+	dismissable = true,
 }: ModalProps) {
 	useEffect(() => {
 		if (!open) return;
+		// 開いている間だけスタックへ登録(dismissable でなくても重なり順の管理には積む)。
+		const id = Symbol("modal");
+		modalStack.push(id);
 		const onKey = (e: KeyboardEvent) => {
-			if (e.key === "Escape") onClose();
+			if (e.key !== "Escape" || !dismissable) return;
+			// 最前面のモーダルのみ Esc を処理する。
+			if (modalStack[modalStack.length - 1] !== id) return;
+			onClose();
 		};
 		window.addEventListener("keydown", onKey);
-		return () => window.removeEventListener("keydown", onKey);
-	}, [open, onClose]);
+		return () => {
+			const i = modalStack.indexOf(id);
+			if (i !== -1) modalStack.splice(i, 1);
+			window.removeEventListener("keydown", onKey);
+		};
+	}, [open, dismissable, onClose]);
 
 	if (!open) return null;
 	return (
@@ -50,7 +73,8 @@ export function Modal({
 			<button
 				type="button"
 				aria-label="閉じる"
-				className="absolute inset-0 bg-black/70"
+				disabled={!dismissable}
+				className="absolute inset-0 bg-black/70 disabled:cursor-default"
 				onClick={onClose}
 			/>
 			<div
@@ -64,10 +88,11 @@ export function Modal({
 					<button
 						type="button"
 						onClick={onClose}
+						disabled={!dismissable}
 						aria-label="閉じる"
-						className="rounded p-1 text-neutral-400 hover:bg-elevated hover:text-neutral-100"
+						className="rounded p-1.5 text-neutral-400 hover:bg-elevated hover:text-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:pointer-events-none disabled:opacity-30"
 					>
-						✕
+						<CloseIcon size={14} />
 					</button>
 				</header>
 				<div

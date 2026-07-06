@@ -26,6 +26,13 @@ import {
 } from "../../lib/schedule";
 import { Modal } from "../../components/ui/Modal";
 import { Button } from "../../components/ui/Button";
+import { IconButton } from "../../components/ui/IconButton";
+import {
+	ChevronDownIcon,
+	ChevronUpIcon,
+	TrashIcon,
+} from "../../components/ui/icons";
+import { useConfirm } from "../../components/ui/confirm";
 import { cn } from "../../components/ui/cn";
 
 /**
@@ -139,6 +146,7 @@ export function UploadModal({
 	);
 	// output.id → 最終レンダリング結果(プレビュー/DL/投稿で共有)。
 	const [renders, setRenders] = useState<Map<string, RenderState>>(new Map());
+	const confirm = useConfirm();
 
 	// 一括予約スケジュールの入力状態。
 	const [startDate, setStartDate] = useState("");
@@ -200,7 +208,16 @@ export function UploadModal({
 		);
 	};
 
-	const removePost = (postId: string) => {
+	const removePost = async (postId: string) => {
+		const post = posts.find((p) => p.id === postId);
+		const clipName = clips.find((c) => c.id === post?.clipId)?.name;
+		const ok = await confirm({
+			title: "投稿を削除",
+			body: `この投稿(${clipName ?? "対象 clip 不明"})を削除します。この操作は取り消せません。`,
+			confirmLabel: "削除",
+			tone: "danger",
+		});
+		if (!ok) return;
 		setPosts((prev) => {
 			const idx = prev.findIndex((p) => p.id === postId);
 			const next = prev.filter((p) => p.id !== postId);
@@ -265,7 +282,16 @@ export function UploadModal({
 		);
 	};
 
-	const removeOutput = (postId: string, outputId: string) => {
+	const removeOutput = async (postId: string, outputId: string) => {
+		const post = posts.find((p) => p.id === postId);
+		if (post && post.outputs.length <= 1) return; // 最低 1 つは残す。
+		const ok = await confirm({
+			title: "出力先を削除",
+			body: "この出力先(ターゲット・メタデータ)を削除します。この操作は取り消せません。",
+			confirmLabel: "削除",
+			tone: "danger",
+		});
+		if (!ok) return;
 		setPosts((prev) =>
 			prev.map((p) => {
 				if (p.id !== postId) return p;
@@ -362,8 +388,15 @@ export function UploadModal({
 
 	// テンプレートの (ターゲット×フィット) 一式を全 Post の出力先として一括適用する。
 	// 各 Post の出力先を作り直す(メタデータはリセット)。
-	const applyPresets = () => {
+	const applyPresets = async () => {
 		if (outputPresets.length === 0) return;
+		const ok = await confirm({
+			title: "出力先を一括適用",
+			body: `全 ${posts.length} 投稿の出力先をこの組み合わせで作り直します。入力済みのタイトル・キャプションはリセットされます。`,
+			confirmLabel: "適用",
+			tone: "danger",
+		});
+		if (!ok) return;
 		setPosts((prev) =>
 			prev.map((p) => ({
 				...p,
@@ -637,6 +670,7 @@ export function UploadModal({
 			footer={footer}
 			widthClass="max-w-7xl"
 			scrollBody={false}
+			dismissable={!busy}
 		>
 			<div className="flex min-h-0 flex-1 flex-col gap-3">
 				<div className="shrink-0">
@@ -691,7 +725,7 @@ export function UploadModal({
 								onPublishPost={() => publishPostMutation.mutate(selectedPost)}
 							/>
 						) : (
-							<p className="rounded-md border border-dashed border-line px-3 py-10 text-center text-xs text-neutral-500">
+							<p className="rounded-md border border-dashed border-line px-3 py-10 text-center text-xs text-neutral-400">
 								右の一覧から投稿を選択してください。
 							</p>
 						)}
@@ -727,7 +761,7 @@ export function UploadModal({
 
 						<div className="mt-3 flex flex-col gap-1.5">
 							{posts.length === 0 && (
-								<p className="rounded-md border border-dashed border-line px-2 py-4 text-center text-[11px] text-neutral-500">
+								<p className="rounded-md border border-dashed border-line px-2 py-4 text-center text-[11px] text-neutral-400">
 									投稿がありません。
 								</p>
 							)}
@@ -791,7 +825,7 @@ function BulkSettings(props: BulkSettingsProps) {
 				aria-expanded={expanded}
 				className="flex w-full items-center gap-1.5 text-left text-xs font-semibold text-neutral-200"
 			>
-				<span className="text-[10px] text-neutral-500">
+				<span className="text-[11px] text-neutral-400">
 					{expanded ? "▼" : "▶"}
 				</span>
 				一括設定
@@ -836,14 +870,14 @@ function BulkSettings(props: BulkSettingsProps) {
 										))}
 									</select>
 									{props.outputPresets.length > 1 && (
-										<button
-											type="button"
+										<IconButton
+											tone="danger"
+											size="md"
 											aria-label="組み合わせを削除"
 											onClick={() => props.onRemovePreset(index)}
-											className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-line bg-elevated text-neutral-500 hover:border-danger hover:text-danger"
 										>
-											✕
-										</button>
+											<TrashIcon />
+										</IconButton>
 									)}
 								</div>
 							))}
@@ -865,7 +899,7 @@ function BulkSettings(props: BulkSettingsProps) {
 								</span>
 							)}
 						</div>
-						<p className="text-[11px] text-neutral-600">
+						<p className="text-[11px] text-neutral-400">
 							適用すると各投稿の出力先をこの組み合わせで作り直します(メタデータはリセット)。
 						</p>
 					</div>
@@ -921,7 +955,7 @@ function BulkSettings(props: BulkSettingsProps) {
 
 					{/* 曜日ごとの時刻(曜日ごとに異なる複数時刻を設定できる) */}
 					{selectedDays.length === 0 ? (
-						<p className="text-[11px] text-neutral-600">
+						<p className="text-[11px] text-neutral-400">
 							曜日を選ぶと、その曜日の時刻を設定できます。
 						</p>
 					) : (
@@ -945,14 +979,13 @@ function BulkSettings(props: BulkSettingsProps) {
 													}
 												/>
 												{list.length > 1 && (
-													<button
-														type="button"
+													<IconButton
+														tone="danger"
 														aria-label="時刻を削除"
 														onClick={() => props.onRemoveTime(day, index)}
-														className="flex h-7 w-7 items-center justify-center rounded-md border border-line bg-elevated text-neutral-500 hover:border-danger hover:text-danger"
 													>
-														✕
-													</button>
+														<TrashIcon />
+													</IconButton>
 												)}
 											</div>
 										))}
@@ -1002,6 +1035,13 @@ interface PostDetailProps {
 
 function PostDetail(props: PostDetailProps) {
 	const { post, clips, busy } = props;
+	const postClip = clips.find((c) => c.id === post.clipId);
+	// 元画面で決めたクロップ比。出力先アスペクトとの関係を示すために表示する。
+	const clipAspectLabel = postClip
+		? postClip.aspect === "free"
+			? "自由"
+			: postClip.aspect
+		: "—";
 	const datetimeValue =
 		post.publishAt !== undefined ? msToLocalInput(post.publishAt) : "";
 
@@ -1065,6 +1105,7 @@ function PostDetail(props: PostDetailProps) {
 						key={output.id}
 						post={post}
 						output={output}
+						clipAspectLabel={clipAspectLabel}
 						canRemove={post.outputs.length > 1}
 						render={props.renders.get(output.id)}
 						status={props.pubStatuses.get(output.id)}
@@ -1088,6 +1129,8 @@ function PostDetail(props: PostDetailProps) {
 interface OutputCardProps {
 	post: UploadPost;
 	output: UploadOutput;
+	/** 元画面で決めたクロップ比のラベル(由来表示用)。 */
+	clipAspectLabel: string;
 	canRemove: boolean;
 	render: RenderState | undefined;
 	status: PubStatus | undefined;
@@ -1143,7 +1186,7 @@ function OutputCard(props: OutputCardProps) {
 							)}
 						/>
 					) : (
-						<p className="py-8 text-center text-[11px] text-neutral-600">
+						<p className="py-8 text-center text-[11px] text-neutral-400">
 							「生成」で最終アスペクト・フィットを確認できます。
 						</p>
 					)}
@@ -1204,16 +1247,27 @@ function OutputCard(props: OutputCardProps) {
 						</label>
 
 						{props.canRemove && (
-							<button
-								type="button"
+							<IconButton
+								tone="danger"
+								size="md"
 								aria-label="出力先を削除"
 								onClick={props.onRemove}
-								className="flex h-8 w-8 items-center justify-center rounded-md border border-line bg-elevated text-neutral-500 hover:border-danger hover:text-danger"
 							>
-								✕
-							</button>
+								<TrashIcon />
+							</IconButton>
 						)}
 					</div>
+
+					<p className="text-[11px] text-neutral-400">
+						元クロップ{" "}
+						<span className="font-medium text-neutral-200">
+							{props.clipAspectLabel}
+						</span>{" "}
+						を、選んだ出力先アスペクトへ「
+						{FIT_OPTIONS.find((o) => o.value === output.fit)?.label ??
+							output.fit}
+						」で合わせます。
+					</p>
 
 					{/* メタデータ */}
 					{platform === "youtube" ? (
@@ -1311,7 +1365,7 @@ function PostRow(props: PostRowProps) {
 			<div className="flex items-start justify-between gap-1">
 				<div className="min-w-0">
 					<div className="flex items-center gap-1.5">
-						<span className="text-[11px] font-medium text-neutral-500">
+						<span className="text-[11px] font-medium text-neutral-400">
 							#{index + 1}
 						</span>
 						<span
@@ -1328,47 +1382,42 @@ function PostRow(props: PostRowProps) {
 						>
 							{scheduleLabel}
 						</span>
-						<span className="shrink-0 rounded bg-elevated px-1 text-[10px] text-neutral-400">
+						<span className="shrink-0 rounded bg-elevated px-1 text-[11px] text-neutral-300">
 							{post.outputs.length} 出力
 						</span>
 					</div>
 				</div>
 				<div className="flex shrink-0 items-center gap-1">
-					<button
-						type="button"
+					<IconButton
 						aria-label="上へ"
 						disabled={index === 0}
 						onClick={(e) => {
 							e.stopPropagation();
 							props.onMove(-1);
 						}}
-						className="flex h-6 w-6 items-center justify-center rounded border border-line bg-elevated text-neutral-400 hover:text-neutral-100 disabled:opacity-30"
 					>
-						↑
-					</button>
-					<button
-						type="button"
+						<ChevronUpIcon />
+					</IconButton>
+					<IconButton
 						aria-label="下へ"
 						disabled={index === total - 1}
 						onClick={(e) => {
 							e.stopPropagation();
 							props.onMove(1);
 						}}
-						className="flex h-6 w-6 items-center justify-center rounded border border-line bg-elevated text-neutral-400 hover:text-neutral-100 disabled:opacity-30"
 					>
-						↓
-					</button>
-					<button
-						type="button"
+						<ChevronDownIcon />
+					</IconButton>
+					<IconButton
+						tone="danger"
 						aria-label="削除"
 						onClick={(e) => {
 							e.stopPropagation();
 							props.onRemove();
 						}}
-						className="flex h-6 w-6 items-center justify-center rounded border border-line bg-elevated text-neutral-500 hover:border-danger hover:text-danger"
 					>
-						✕
-					</button>
+						<TrashIcon />
+					</IconButton>
 				</div>
 			</div>
 		</div>
@@ -1387,10 +1436,10 @@ function StatusBadge({ status }: { status: PubStatus | undefined }) {
 		error: "エラー",
 	};
 	const tone: Record<PubStatusKind, string> = {
-		idle: "text-neutral-500",
+		idle: "text-neutral-400",
 		rendering: "text-accent",
 		publishing: "text-accent",
-		success: "text-emerald-400",
+		success: "text-ok",
 		error: "text-danger",
 	};
 	return (

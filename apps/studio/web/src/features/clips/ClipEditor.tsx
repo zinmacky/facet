@@ -7,6 +7,8 @@ import { formatTime } from "../../lib/format";
 import { Timeline } from "../timeline/Timeline";
 import { CropOverlay } from "../crop-overlay/CropOverlay";
 import { Card } from "../../components/ui/Card";
+import { IconButton } from "../../components/ui/IconButton";
+import { PauseIcon, PlayIcon, SpinnerIcon } from "../../components/ui/icons";
 import { cn } from "../../components/ui/cn";
 
 /** 終了バーのプレビューで、終了点の手前から再生する秒数。 */
@@ -35,6 +37,7 @@ export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
 	const videoRef = useRef<HTMLVideoElement>(null);
 	const [currentTime, setCurrentTime] = useState(0);
 	const [playing, setPlaying] = useState(false);
+	const [videoLoading, setVideoLoading] = useState(true);
 	const stopAtRef = useRef<number | null>(null);
 
 	const crop = clip.crop ?? FULL_CROP;
@@ -110,6 +113,11 @@ export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
 						}}
 						onPlay={() => setPlaying(true)}
 						onPause={() => setPlaying(false)}
+						onLoadStart={() => setVideoLoading(true)}
+						onLoadedData={() => setVideoLoading(false)}
+						onWaiting={() => setVideoLoading(true)}
+						onPlaying={() => setVideoLoading(false)}
+						onCanPlay={() => setVideoLoading(false)}
 						className="block max-h-[52vh] max-w-full rounded"
 					/>
 					<CropOverlay
@@ -118,41 +126,24 @@ export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
 						aspect={ratio ?? undefined}
 						snap={snap}
 					/>
+					{videoLoading && (
+						<div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+							<SpinnerIcon size={28} className="text-neutral-300" />
+						</div>
+					)}
 				</div>
 			</div>
 
 			{/* プレビュー操作 + クロップ比テンプレート */}
 			<div className="flex items-center justify-between gap-3 px-1">
 				<div className="flex items-center gap-3">
-					<button
-						type="button"
+					<IconButton
+						tone="accent"
 						onClick={togglePlay}
 						aria-label={playing ? "一時停止" : "再生"}
-						className="flex h-7 w-7 items-center justify-center rounded-md border border-line bg-elevated text-neutral-200 hover:border-accent hover:text-accent"
 					>
-						{playing ? (
-							<svg
-								width="12"
-								height="12"
-								viewBox="0 0 12 12"
-								fill="currentColor"
-								aria-hidden="true"
-							>
-								<rect x="2" y="1.5" width="3" height="9" rx="0.5" />
-								<rect x="7" y="1.5" width="3" height="9" rx="0.5" />
-							</svg>
-						) : (
-							<svg
-								width="12"
-								height="12"
-								viewBox="0 0 12 12"
-								fill="currentColor"
-								aria-hidden="true"
-							>
-								<path d="M3 1.8v8.4a.5.5 0 0 0 .77.42l6.5-4.2a.5.5 0 0 0 0-.84l-6.5-4.2A.5.5 0 0 0 3 1.8Z" />
-							</svg>
-						)}
-					</button>
+						{playing ? <PauseIcon /> : <PlayIcon />}
+					</IconButton>
 					<span className="font-mono text-xs tabular-nums text-neutral-400">
 						{formatTime(currentTime)} / {formatTime(probe.duration)}
 					</span>
@@ -168,10 +159,10 @@ export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
 								type="button"
 								onClick={() => onChange({ ...clip, aspect: t.value })}
 								className={cn(
-									"rounded px-2 py-1 text-[11px] font-medium",
+									"rounded px-2 py-1 text-[11px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
 									clip.aspect === t.value
 										? "bg-accent text-white"
-										: "border border-line bg-panel text-neutral-400 hover:border-accent",
+										: "border border-line bg-panel text-neutral-300 hover:border-accent",
 								)}
 							>
 								{t.label}

@@ -1,7 +1,14 @@
+// biome-ignore-all lint/a11y/noNoninteractiveTabindex: クロップ枠は role="application" の 2D 可動/可変コントロールで、キー操作のため意図的にフォーカス可能にする
 import { useCallback, useEffect, useRef } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type {
+	KeyboardEvent as ReactKeyboardEvent,
+	PointerEvent as ReactPointerEvent,
+} from "react";
 import type { CropRect } from "@facet/core";
 import { clamp } from "../../lib/format";
+
+/** キーボード操作 1 回あたりの移動/リサイズ量(正規化)。 */
+const KEY_STEP = 0.02;
 
 /** crop を目標比(正規化空間の w/h)へ合わせる。中心を保ちつつ境界内に収める。 */
 function snapRectToRatio(c: CropRect, targetNormRatio: number): CropRect {
@@ -196,6 +203,61 @@ export function CropOverlay({
 		[crop, onChange, snap, aspect, containerAspectRatio],
 	);
 
+	// キーボード操作: 矢印で移動、Shift+矢印でリサイズ。
+	// snap 有効時は幅の増減に対して比率を維持する(高さは自動追従)。
+	const onKeyDown = useCallback(
+		(e: ReactKeyboardEvent<HTMLDivElement>) => {
+			const c = crop;
+			if (e.shiftKey) {
+				const grow = e.key === "ArrowRight" || e.key === "ArrowDown";
+				const shrink = e.key === "ArrowLeft" || e.key === "ArrowUp";
+				if (!grow && !shrink) return;
+				e.preventDefault();
+				const delta = grow ? KEY_STEP : -KEY_STEP;
+				if (snap && aspect && aspect > 0) {
+					const target = aspect / containerAspectRatio();
+					const nextW = clamp(c.width + delta, 0.05, 1);
+					onChange(snapRectToRatio({ ...c, width: nextW }, target));
+					return;
+				}
+				// 自由比: 押した方向の辺だけを増減する。
+				const horizontal = e.key === "ArrowLeft" || e.key === "ArrowRight";
+				const w = horizontal ? clamp(c.width + delta, 0.05, 1 - c.x) : c.width;
+				const h = horizontal
+					? c.height
+					: clamp(c.height + delta, 0.05, 1 - c.y);
+				onChange({ x: c.x, y: c.y, width: w, height: h });
+				return;
+			}
+
+			let dx = 0;
+			let dy = 0;
+			switch (e.key) {
+				case "ArrowLeft":
+					dx = -KEY_STEP;
+					break;
+				case "ArrowRight":
+					dx = KEY_STEP;
+					break;
+				case "ArrowUp":
+					dy = -KEY_STEP;
+					break;
+				case "ArrowDown":
+					dy = KEY_STEP;
+					break;
+				default:
+					return;
+			}
+			e.preventDefault();
+			onChange({
+				...c,
+				x: clamp(c.x + dx, 0, 1 - c.width),
+				y: clamp(c.y + dy, 0, 1 - c.height),
+			});
+		},
+		[crop, onChange, snap, aspect, containerAspectRatio],
+	);
+
 	return (
 		<div ref={containerRef} className="pointer-events-none absolute inset-0">
 			{/* 外側の暗幕(4 分割で crop 矩形をくり抜く) */}
@@ -203,7 +265,10 @@ export function CropOverlay({
 
 			{/* crop 矩形本体 */}
 			<div
-				className="pointer-events-auto absolute cursor-move ring-1 ring-white/80"
+				role="application"
+				tabIndex={0}
+				aria-label="クロップ枠。矢印キーで移動、Shift+矢印でサイズ変更。"
+				className="pointer-events-auto absolute cursor-move ring-1 ring-white/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
 				style={{
 					left: `${crop.x * 100}%`,
 					top: `${crop.y * 100}%`,
@@ -211,6 +276,7 @@ export function CropOverlay({
 					height: `${crop.height * 100}%`,
 				}}
 				onPointerDown={beginMove}
+				onKeyDown={onKeyDown}
 			>
 				{/* 三分割ガイド */}
 				<div className="pointer-events-none absolute inset-0">

@@ -10,6 +10,9 @@ import { ExportModal } from "./features/export/ExportModal";
 import { UploadModal } from "./features/upload/UploadModal";
 import { Card } from "./components/ui/Card";
 import { Button } from "./components/ui/Button";
+import { IconButton } from "./components/ui/IconButton";
+import { PlusIcon } from "./components/ui/icons";
+import { useConfirm } from "./components/ui/confirm";
 
 /** 選択済みソース(実パス + probe 結果)。 */
 export interface Source {
@@ -42,6 +45,7 @@ export function App() {
 	const [modal, setModal] = useState<ModalKind>("none");
 	// 連番カウンタ。削除後の再採番でも名前が衝突しないよう、単調増加させる。
 	const clipSeqRef = useRef(1);
+	const confirm = useConfirm();
 
 	const pickMutation = useMutation({
 		mutationFn: async (): Promise<Source | null> => {
@@ -71,13 +75,24 @@ export function App() {
 		setSelectedClipId(clip.id);
 	}, [source]);
 
-	const removeClip = useCallback((id: string) => {
-		setClips((prev) => {
-			const next = prev.filter((c) => c.id !== id);
-			setSelectedClipId((sel) => (sel === id ? (next[0]?.id ?? null) : sel));
-			return next;
-		});
-	}, []);
+	const removeClip = useCallback(
+		async (id: string) => {
+			const target = clips.find((c) => c.id === id);
+			const ok = await confirm({
+				title: "切り抜きを削除",
+				body: `「${target?.name ?? "この切り抜き"}」を削除します。この操作は取り消せません。`,
+				confirmLabel: "削除",
+				tone: "danger",
+			});
+			if (!ok) return;
+			setClips((prev) => {
+				const next = prev.filter((c) => c.id !== id);
+				setSelectedClipId((sel) => (sel === id ? (next[0]?.id ?? null) : sel));
+				return next;
+			});
+		},
+		[clips, confirm],
+	);
 
 	const changeClip = useCallback((clip: Clip) => {
 		setClips((prev) => prev.map((c) => (c.id === clip.id ? clip : c)));
@@ -151,26 +166,16 @@ export function App() {
 						title="Clips"
 						className="min-h-0 flex-1"
 						actions={
-							<button
-								type="button"
+							<IconButton
+								tone="accent"
 								onClick={addClip}
 								disabled={!source}
 								aria-label="切り抜きを追加"
 								title="切り抜きを追加"
-								className="flex h-6 w-6 items-center justify-center rounded-full border border-line bg-elevated text-neutral-300 hover:border-accent hover:text-accent disabled:opacity-40"
+								className="rounded-full"
 							>
-								<svg
-									width="12"
-									height="12"
-									viewBox="0 0 12 12"
-									fill="none"
-									stroke="currentColor"
-									strokeWidth="1.5"
-									aria-hidden="true"
-								>
-									<path d="M6 2.5v7M2.5 6h7" strokeLinecap="round" />
-								</svg>
-							</button>
+								<PlusIcon />
+							</IconButton>
 						}
 					>
 						<ClipList
@@ -213,8 +218,8 @@ export function App() {
 
 function Placeholder({ text }: { text: string }) {
 	return (
-		<div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-neutral-700 text-neutral-600">
-			<div className="h-10 w-10 rounded-md border-2 border-dashed border-neutral-700" />
+		<div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-neutral-700 text-neutral-400">
+			<div className="h-10 w-10 rounded-md border-2 border-dashed border-neutral-600" />
 			<p className="text-sm">{text}</p>
 		</div>
 	);

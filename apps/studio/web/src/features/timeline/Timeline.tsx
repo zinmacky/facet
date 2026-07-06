@@ -1,7 +1,11 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { Trim } from "@facet/core";
 import { clamp, formatTime } from "../../lib/format";
+
+/** ハンドルのキーボード操作 1 回あたりの移動量(秒)。Shift 併用で粗く動かす。 */
+const KEY_STEP_FINE = 0.1;
+const KEY_STEP_COARSE = 1;
 
 interface TimelineProps {
 	/** ソース総尺(秒)。0 のときは無効表示。 */
@@ -128,14 +132,24 @@ export function Timeline({
 
 				{/* start ハンドル */}
 				<Handle
+					label="開始点"
 					pct={startPct}
+					seconds={start}
+					min={0}
+					max={end - 0.05}
 					onPointerDown={beginDrag("start")}
+					onKeyCommit={(v) => onChange({ start: v, end })}
 					disabled={disabled}
 				/>
 				{/* end ハンドル */}
 				<Handle
+					label="終了点"
 					pct={endPct}
+					seconds={end}
+					min={start + 0.05}
+					max={duration}
 					onPointerDown={beginDrag("end")}
+					onKeyCommit={(v) => onChange({ start, end: v })}
 					disabled={disabled}
 				/>
 			</div>
@@ -164,23 +178,36 @@ export function Timeline({
 }
 
 function Handle({
+	label,
 	pct,
+	seconds,
+	min,
+	max,
 	onPointerDown,
+	onKeyCommit,
 	disabled,
 }: {
+	label: string;
 	pct: number;
+	seconds: number;
+	min: number;
+	max: number;
 	onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
+	/** キーボード操作で確定した秒。 */
+	onKeyCommit: (seconds: number) => void;
 	disabled: boolean;
 }) {
 	return (
 		<div
 			role="slider"
-			aria-valuenow={pct}
-			aria-valuemin={0}
-			aria-valuemax={100}
+			aria-label={label}
+			aria-valuenow={Number(seconds.toFixed(2))}
+			aria-valuemin={Number(min.toFixed(2))}
+			aria-valuemax={Number(max.toFixed(2))}
+			aria-valuetext={formatTime(seconds)}
 			tabIndex={disabled ? -1 : 0}
 			className={
-				"absolute top-1/2 z-10 h-8 w-3 -translate-x-1/2 -translate-y-1/2 rounded-sm border border-accent bg-accent " +
+				"absolute top-1/2 z-10 h-8 w-3 -translate-x-1/2 -translate-y-1/2 rounded-sm border border-accent bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 " +
 				(disabled
 					? "cursor-not-allowed opacity-40"
 					: "cursor-ew-resize hover:bg-accent-hover")
@@ -189,6 +216,31 @@ function Handle({
 			onPointerDown={(e) => {
 				e.stopPropagation();
 				onPointerDown(e);
+			}}
+			onKeyDown={(e) => {
+				if (disabled) return;
+				const step = e.shiftKey ? KEY_STEP_COARSE : KEY_STEP_FINE;
+				let next: number;
+				switch (e.key) {
+					case "ArrowLeft":
+					case "ArrowDown":
+						next = seconds - step;
+						break;
+					case "ArrowRight":
+					case "ArrowUp":
+						next = seconds + step;
+						break;
+					case "Home":
+						next = min;
+						break;
+					case "End":
+						next = max;
+						break;
+					default:
+						return;
+				}
+				e.preventDefault();
+				onKeyCommit(clamp(next, min, max));
 			}}
 		/>
 	);
@@ -209,23 +261,51 @@ function SecondsInput({
 	disabled: boolean;
 	onCommit: (seconds: number) => void;
 }) {
+	// 打鍵ごとに clamp すると途中値を打てないため、ローカルに保持し blur/Enter で確定する。
+	const canonical = () => String(Number(value.toFixed(2)));
+	const [text, setText] = useState(canonical);
+	const [editing, setEditing] = useState(false);
+
+	// 外部から値が変わったら(編集中でなければ)表示へ反映する。
+	// biome-ignore lint/correctness/useExhaustiveDependencies: canonical は value から導出され value 変化のみで再評価すればよい
+	useEffect(() => {
+		if (!editing) setText(canonical());
+	}, [value, editing]);
+
+	const commit = () => {
+		const v = Number(text);
+		if (text.trim() !== "" && Number.isFinite(v)) onCommit(clamp(v, min, max));
+		setText(canonical());
+		setEditing(false);
+	};
+
 	return (
 		<label className="flex items-center gap-1.5">
-			<span className="text-neutral-500">{label}</span>
+			<span className="text-neutral-400">{label}</span>
 			<input
 				type="number"
 				step={0.1}
 				min={min}
 				max={max}
-				value={Number(value.toFixed(2))}
+				value={text}
 				disabled={disabled}
-				onChange={(e) => {
-					const v = Number(e.target.value);
-					if (Number.isFinite(v)) onCommit(clamp(v, min, max));
+				onFocus={() => setEditing(true)}
+				onChange={(e) => setText(e.target.value)}
+				onBlur={commit}
+				onKeyDown={(e) => {
+					if (e.key === "Enter") {
+						e.preventDefault();
+						commit();
+						e.currentTarget.blur();
+					} else if (e.key === "Escape") {
+						setText(canonical());
+						setEditing(false);
+						e.currentTarget.blur();
+					}
 				}}
 				className="w-20 rounded border border-line bg-panel px-2 py-1 font-mono tabular-nums text-neutral-200 outline-none focus:border-accent disabled:opacity-40"
 			/>
-			<span className="text-neutral-600">s</span>
+			<span className="text-neutral-500">s</span>
 		</label>
 	);
 }
