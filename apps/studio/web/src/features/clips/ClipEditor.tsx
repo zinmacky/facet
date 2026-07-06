@@ -58,8 +58,8 @@ export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
 
   return (
     <div className="flex min-h-0 flex-col gap-3">
-      {/* プレビュー + クロップ枠 */}
-      <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg border border-line bg-black/60">
+      {/* プレビュー + クロップ枠(min-w-0 + overflow-hidden で枠内に確実に収める) */}
+      <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-line bg-black/60 p-2">
         <div className="relative inline-block max-h-full max-w-full">
           <video
             ref={videoRef}

@@ -126,8 +126,8 @@ export function App() {
 
       {/* メイン: 左(選択中 Clip 編集) / 右(Clip 一覧 + 書き出し) */}
       <div className="grid min-h-0 flex-1 grid-cols-[1fr_340px]">
-        {/* 左カラム */}
-        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto p-3">
+        {/* 左カラム(min-w-0: grid 子の min-width:auto を無効化しはみ出しを防ぐ) */}
+        <div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto p-3">
           {!source ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-neutral-700 text-neutral-600">
               <div className="h-10 w-10 rounded-md border-2 border-dashed border-neutral-700" />
