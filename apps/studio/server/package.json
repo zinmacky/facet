@@ -1,0 +1,29 @@
+{
+  "name": "@reframe/studio-server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "hono": "^4.6.3",
+    "@hono/node-server": "^1.13.1",
+    "@reframe/core": "workspace:*",
+    "@reframe/ffmpeg-runner": "workspace:*",
+    "@reframe/contract": "workspace:*",
+    "zod": "^3.23.8",
+    "googleapis": "^144.0.0",
+    "aws4fetch": "^1.0.20"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.2",
+    "tsx": "^4.19.1",
+    "@types/node": "^22.5.0",
+    "vitest": "^2.0.5"
+  }
+}

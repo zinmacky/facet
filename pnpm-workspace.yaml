@@ -1,0 +1,5 @@
+packages:
+  - "packages/*"
+  - "apps/studio/server"
+  - "apps/studio/web"
+  - "apps/scheduler"
