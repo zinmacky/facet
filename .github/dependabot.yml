@@ -1,0 +1,27 @@
+version: 2
+updates:
+  # npm(pnpm ワークスペース)。ルートの pnpm-lock.yaml を基準に更新する。
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    # PR ノイズを抑えるため dev/prod でまとめる
+    groups:
+      dev-dependencies:
+        dependency-type: development
+      production-dependencies:
+        dependency-type: production
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+
+  # GitHub Actions の workflow で使う action も更新対象にする
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "ci"
