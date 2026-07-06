@@ -453,7 +453,7 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
   const selectedItem = items.find((it) => it.id === selectedItemId) ?? null;
 
   return (
-    <Modal open={open} title="アップロード" onClose={onClose} footer={footer} widthClass="max-w-5xl">
+    <Modal open={open} title="アップロード" onClose={onClose} footer={footer} widthClass="max-w-7xl">
       <div className="flex flex-col gap-4">
         <BulkSchedule
           startDate={startDate}
@@ -493,7 +493,7 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
           </div>
 
           {/* 右: 出力一覧 */}
-          <div className="w-64 shrink-0 border-l border-line pl-3 overflow-y-auto">
+          <div className="w-72 shrink-0 border-l border-line pl-3 overflow-y-auto">
             <div className="flex flex-col gap-2">
               <Button
                 variant="secondary"
@@ -864,9 +864,16 @@ function UploadItemRow(props: UploadItemRowProps) {
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
             <span className="text-[11px] font-medium text-neutral-500">#{index + 1}</span>
-            <span className="truncate text-xs text-neutral-200">{clipName}</span>
+            <span className="truncate text-xs text-neutral-200" title={clipName}>
+              {clipName}
+            </span>
           </div>
-          <span className="mt-0.5 block truncate text-[11px] text-neutral-400">{targetLabel}</span>
+          <span
+            className="mt-0.5 block truncate text-[11px] text-neutral-400"
+            title={targetLabel}
+          >
+            {targetLabel}
+          </span>
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <button

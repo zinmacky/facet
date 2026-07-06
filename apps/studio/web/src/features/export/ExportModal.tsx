@@ -147,7 +147,7 @@ export function ExportModal({ open, source, clips, onClose, onProceedToUpload }:
   const selectedClip = clips.find((clip) => clip.id === selectedClipId) ?? null;
 
   return (
-    <Modal open={open} title="書き出し(クロップ内容)" onClose={onClose} widthClass="max-w-5xl"
+    <Modal open={open} title="書き出し(クロップ内容)" onClose={onClose} widthClass="max-w-7xl"
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
@@ -170,7 +170,7 @@ export function ExportModal({ open, source, clips, onClose, onProceedToUpload }:
         </div>
 
         {/* 右: 一括DL + clip 一覧 */}
-        <div className="flex w-56 shrink-0 flex-col gap-3 border-l border-line pl-3">
+        <div className="flex w-64 shrink-0 flex-col gap-3 border-l border-line pl-3">
           <div className="flex flex-col gap-1.5">
             <Button
               size="sm"
@@ -231,7 +231,12 @@ function ExportListItem({
           : "border-transparent hover:bg-elevated",
       )}
     >
-      <span className="truncate font-mono text-xs text-neutral-200">{clip.name}.mp4</span>
+      <span
+        className="truncate font-mono text-xs text-neutral-200"
+        title={`${clip.name}.mp4`}
+      >
+        {clip.name}.mp4
+      </span>
       <span
         className={cn(
           "shrink-0 text-[11px]",
