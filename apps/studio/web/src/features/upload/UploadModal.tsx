@@ -100,8 +100,10 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
   // 一括予約スケジュールの入力状態。
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
-  const [weekdays, setWeekdays] = useState<number[]>([]);
-  const [times, setTimes] = useState<string[]>(["20:00"]);
+  // 曜日ごとの時刻リスト(曜日ごとに異なる複数時刻を設定できる)。
+  const [weekdayTimes, setWeekdayTimes] = useState<Record<number, string[]>>({});
+  // 1 スロット(同一日時)に割り当てる本数。2 なら YT+Insta を同時刻に、など。
+  const [perSlot, setPerSlot] = useState(1);
   const [assignNote, setAssignNote] = useState<string | null>(null);
 
   // 閉じたら内部状態を初期化する(再度開いたときは現在の clips から作り直す)。
@@ -113,8 +115,8 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
     setSelectedItemId(null);
     setStartDate("");
     setEndDate("");
-    setWeekdays([]);
-    setTimes(["20:00"]);
+    setWeekdayTimes({});
+    setPerSlot(1);
     setAssignNote(null);
   }, [open]);
 
@@ -212,41 +214,53 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
     setSelectedItemId(created.id);
   };
 
-  // ---- 時刻リスト操作 ------------------------------------------------------
+  // ---- 曜日・時刻リスト操作 ------------------------------------------------
 
-  const addTime = () => setTimes((prev) => [...prev, "20:00"]);
-  const removeTime = (index: number) =>
-    setTimes((prev) => prev.filter((_, i) => i !== index));
-  const setTime = (index: number, value: string) =>
-    setTimes((prev) => prev.map((t, i) => (i === index ? value : t)));
-
+  // 曜日の選択トグル。選択時は既定時刻 20:00 を 1 つ入れる。
   const toggleWeekday = (day: number) =>
-    setWeekdays((prev) =>
-      prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day],
-    );
+    setWeekdayTimes((prev) => {
+      const next = { ...prev };
+      if (day in next) delete next[day];
+      else next[day] = ["20:00"];
+      return next;
+    });
 
-  // 生成した予約日時を items の並び順(上から昇順)へ割り当てる。
+  const addTimeFor = (day: number) =>
+    setWeekdayTimes((prev) => ({ ...prev, [day]: [...(prev[day] ?? []), "20:00"] }));
+
+  const removeTimeFor = (day: number, index: number) =>
+    setWeekdayTimes((prev) => {
+      const list = prev[day];
+      if (!list || list.length <= 1) return prev; // 最低 1 つは残す
+      return { ...prev, [day]: list.filter((_, i) => i !== index) };
+    });
+
+  const setTimeFor = (day: number, index: number, value: string) =>
+    setWeekdayTimes((prev) => {
+      const list = prev[day];
+      if (!list) return prev;
+      return { ...prev, [day]: list.map((t, i) => (i === index ? value : t)) };
+    });
+
+  // 生成した予約日時を items の並び順へ割り当てる。
+  // perSlot 本ごとに同じ日時を割り当てる(複数動画を同時刻に投稿できる)。
   const assignSchedule = () => {
-    const slots = generateSchedule({ startDate, endDate, weekdays, times });
+    const slots = generateSchedule({ startDate, endDate, weekdayTimes });
+    const per = Math.max(1, perSlot);
     setItems((prev) =>
       prev.map((it, i) => {
-        const slot = slots[i];
+        const slot = slots[Math.floor(i / per)];
         return slot !== undefined ? { ...it, publishAt: slot } : it;
       }),
     );
-    const assigned = Math.min(slots.length, items.length);
+    const capacity = slots.length * per;
+    const assigned = Math.min(items.length, capacity);
     if (slots.length === 0) {
       setAssignNote("枠が生成されませんでした(期間・曜日・時刻を確認してください)。");
-    } else if (slots.length < items.length) {
-      setAssignNote(
-        `${assigned} 件へ割当。枠が ${items.length - slots.length} 件不足しています。`,
-      );
-    } else if (slots.length > items.length) {
-      setAssignNote(
-        `${assigned} 件へ割当。枠が ${slots.length - items.length} 件余っています。`,
-      );
+    } else if (capacity < items.length) {
+      setAssignNote(`${assigned} 件へ割当。枠が ${items.length - capacity} 件分不足しています。`);
     } else {
-      setAssignNote(`${assigned} 件へ割当(枠ちょうど)。`);
+      setAssignNote(`${assigned} 件へ割当(1 スロット ${per} 本 × ${slots.length} スロット)。`);
     }
   };
 
@@ -458,15 +472,16 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
         <BulkSchedule
           startDate={startDate}
           endDate={endDate}
-          weekdays={weekdays}
-          times={times}
+          weekdayTimes={weekdayTimes}
+          perSlot={perSlot}
           note={assignNote}
           onStartDate={setStartDate}
           onEndDate={setEndDate}
           onToggleWeekday={toggleWeekday}
-          onAddTime={addTime}
-          onRemoveTime={removeTime}
-          onSetTime={setTime}
+          onAddTime={addTimeFor}
+          onRemoveTime={removeTimeFor}
+          onSetTime={setTimeFor}
+          onPerSlot={setPerSlot}
           onAssign={assignSchedule}
         />
 
@@ -549,19 +564,24 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
 interface BulkScheduleProps {
   startDate: string;
   endDate: string;
-  weekdays: number[];
-  times: string[];
+  weekdayTimes: Record<number, string[]>;
+  perSlot: number;
   note: string | null;
   onStartDate: (v: string) => void;
   onEndDate: (v: string) => void;
   onToggleWeekday: (day: number) => void;
-  onAddTime: () => void;
-  onRemoveTime: (index: number) => void;
-  onSetTime: (index: number, value: string) => void;
+  onAddTime: (day: number) => void;
+  onRemoveTime: (day: number, index: number) => void;
+  onSetTime: (day: number, index: number, value: string) => void;
+  onPerSlot: (n: number) => void;
   onAssign: () => void;
 }
 
 function BulkSchedule(props: BulkScheduleProps) {
+  const selectedDays = Object.keys(props.weekdayTimes)
+    .map(Number)
+    .sort((a, b) => a - b);
+
   return (
     <section className="rounded-lg border border-line bg-elevated/40 p-3">
       <h3 className="mb-2 text-xs font-semibold text-neutral-200">一括予約スケジュール</h3>
@@ -590,7 +610,7 @@ function BulkSchedule(props: BulkScheduleProps) {
         <div className="flex items-center gap-1.5">
           <span className="text-[11px] text-neutral-400">曜日</span>
           {WEEKDAY_LABELS.map((label, day) => {
-            const active = props.weekdays.includes(day);
+            const active = day in props.weekdayTimes;
             return (
               <button
                 key={label}
@@ -609,31 +629,61 @@ function BulkSchedule(props: BulkScheduleProps) {
           })}
         </div>
 
-        <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] text-neutral-400">時刻</span>
-          <div className="flex flex-wrap items-center gap-2">
-            {props.times.map((time, index) => (
-              <div key={index} className="flex items-center gap-1">
-                <input
-                  type="time"
-                  className={inputClass}
-                  value={time}
-                  onChange={(e) => props.onSetTime(index, e.target.value)}
-                />
-                <button
-                  type="button"
-                  aria-label="時刻を削除"
-                  onClick={() => props.onRemoveTime(index)}
-                  className="flex h-7 w-7 items-center justify-center rounded-md border border-line bg-elevated text-neutral-500 hover:border-danger hover:text-danger"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-            <Button variant="ghost" size="sm" onClick={props.onAddTime}>
-              + 時刻を追加
-            </Button>
+        {/* 曜日ごとの時刻(曜日ごとに異なる複数時刻を設定できる) */}
+        {selectedDays.length === 0 ? (
+          <p className="text-[11px] text-neutral-600">曜日を選ぶと、その曜日の時刻を設定できます。</p>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {selectedDays.map((day) => {
+              const list = props.weekdayTimes[day] ?? [];
+              return (
+                <div key={day} className="flex flex-wrap items-center gap-2">
+                  <span className="w-5 text-center text-[11px] font-semibold text-accent">
+                    {WEEKDAY_LABELS[day] ?? ""}
+                  </span>
+                  {list.map((time, index) => (
+                    <div key={index} className="flex items-center gap-1">
+                      <input
+                        type="time"
+                        className={inputClass}
+                        value={time}
+                        onChange={(e) => props.onSetTime(day, index, e.target.value)}
+                      />
+                      {list.length > 1 && (
+                        <button
+                          type="button"
+                          aria-label="時刻を削除"
+                          onClick={() => props.onRemoveTime(day, index)}
+                          className="flex h-7 w-7 items-center justify-center rounded-md border border-line bg-elevated text-neutral-500 hover:border-danger hover:text-danger"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  <Button variant="ghost" size="sm" onClick={() => props.onAddTime(day)}>
+                    + 時刻
+                  </Button>
+                </div>
+              );
+            })}
           </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+            同時刻に投稿する本数
+            <input
+              type="number"
+              min={1}
+              className={cn(inputClass, "w-16")}
+              value={props.perSlot}
+              onChange={(e) => props.onPerSlot(Math.max(1, Math.floor(Number(e.target.value)) || 1))}
+            />
+          </label>
+          <span className="text-[11px] text-neutral-600">
+            上から N 本ずつ同じ日時に割り当てます(例: 2 で YT と Insta を同時刻)。
+          </span>
         </div>
 
         <div className="flex items-center gap-3">

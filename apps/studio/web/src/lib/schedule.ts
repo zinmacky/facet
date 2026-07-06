@@ -9,25 +9,16 @@ export interface ScheduleSpec {
   startDate: string;
   /** 終了日 "YYYY-MM-DD"(この日を含む)。 */
   endDate: string;
-  /** 対象曜日。0=日 .. 6=土。 */
-  weekdays: number[];
-  /** 各日に割り当てる時刻 "HH:MM"(複数可)。 */
-  times: string[];
+  /** 曜日(0=日 .. 6=土)ごとの時刻リスト "HH:MM"。曜日ごとに異なる時刻を持てる。 */
+  weekdayTimes: Record<number, string[]>;
 }
 
-/** 期間内で条件に合う日時(unix ms)を昇順で返す。 */
+/** 期間内で、各曜日に設定された時刻の日時(unix ms)を昇順で返す。 */
 export function generateSchedule(spec: ScheduleSpec): number[] {
-  const { startDate, endDate, weekdays, times } = spec;
+  const { startDate, endDate, weekdayTimes } = spec;
   const start = parseYmd(startDate);
   const end = parseYmd(endDate);
-  if (!start || !end || end < start || weekdays.length === 0 || times.length === 0) {
-    return [];
-  }
-  const wdSet = new Set(weekdays);
-  const parsedTimes = times
-    .map(parseHm)
-    .filter((t): t is [number, number] => t !== null);
-  if (parsedTimes.length === 0) return [];
+  if (!start || !end || end < start) return [];
 
   const out: number[] = [];
   const cur = new Date(start);
@@ -35,9 +26,13 @@ export function generateSchedule(spec: ScheduleSpec): number[] {
   let guard = 0;
   while (cur <= end && guard < 2000) {
     guard++;
-    if (wdSet.has(cur.getDay())) {
-      for (const [h, m] of parsedTimes) {
-        out.push(new Date(cur.getFullYear(), cur.getMonth(), cur.getDate(), h, m, 0, 0).getTime());
+    const times = weekdayTimes[cur.getDay()];
+    if (times && times.length > 0) {
+      for (const t of times) {
+        const hm = parseHm(t);
+        if (hm) {
+          out.push(new Date(cur.getFullYear(), cur.getMonth(), cur.getDate(), hm[0], hm[1], 0, 0).getTime());
+        }
       }
     }
     cur.setDate(cur.getDate() + 1);
