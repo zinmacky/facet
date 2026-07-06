@@ -56,6 +56,40 @@ export async function pickFile(): Promise<PickResult> {
   return postJson<PickResult>("/files/pick", {});
 }
 
+// ---- ファイル配信 / ダウンロード -------------------------------------------
+
+/** ローカルファイルの配信 URL(<video> src 用)。/files は dev proxy 経由。 */
+export function fileRawUrl(path: string): string {
+  return `/files/raw?path=${encodeURIComponent(path)}`;
+}
+
+/** ダウンロード用 URL(Content-Disposition attachment)。 */
+export function fileDownloadUrl(path: string): string {
+  return `${fileRawUrl(path)}&download=1`;
+}
+
+/** 複数ファイルを ZIP でまとめてダウンロードする。 */
+export async function downloadZip(paths: string[], name = "reframe-export.zip"): Promise<void> {
+  const res = await fetch(`/files/zip`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ paths, name }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new ApiError(res.status, detail || res.statusText);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 // ---- probe -----------------------------------------------------------------
 
 /** ffprobe 由来のソースメタ。UI は width/height/duration を主に使う。 */

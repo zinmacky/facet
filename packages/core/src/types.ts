@@ -1,6 +1,7 @@
 /** ターゲットの出力形状。fit で「はみ出しをどう埋めるか」を決める。 */
 export interface Preset {
-  name: PresetName;
+  /** 表示・ファイル名用のラベル。ロジックは width/height/fit のみ使う。 */
+  name: string;
   width: number;
   height: number;
   /**

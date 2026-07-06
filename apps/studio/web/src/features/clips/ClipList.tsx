@@ -1,4 +1,5 @@
-import type { Clip, VariantKind } from "../../types";
+import type { Clip } from "../../types";
+import { formatTime } from "../../lib/format";
 import { Button } from "../../components/ui/Button";
 import { cn } from "../../components/ui/cn";
 
@@ -12,23 +13,14 @@ interface ClipListProps {
 }
 
 /**
- * 切り抜き一覧。各行で名前の inline 編集・バリアント選択・削除・選択を行う。
- * バリアントは少なくとも 1 つ必須。両方を false にする操作は無効化する。
+ * 切り抜き一覧。各行で名前の inline 編集・選択・削除を行う。
+ * クロップ比と長さはバッジで表示する(詳細編集は ClipEditor)。
  */
-export function ClipList({
-  clips,
-  selectedClipId,
-  onSelect,
-  onAdd,
-  onRemove,
-  onChange,
-}: ClipListProps) {
+export function ClipList({ clips, selectedClipId, onSelect, onAdd, onRemove, onChange }: ClipListProps) {
   return (
     <div className="flex flex-col gap-2 p-3">
       {clips.length === 0 && (
-        <p className="px-1 py-2 text-xs text-neutral-600">
-          切り抜きがありません。追加してください。
-        </p>
+        <p className="px-1 py-2 text-xs text-neutral-600">切り抜きがありません。追加してください。</p>
       )}
 
       {clips.map((clip) => (
@@ -62,21 +54,13 @@ function ClipRow({
   onRemove: () => void;
   onChange: (clip: Clip) => void;
 }) {
-  // バリアント切り替え。両方 false になる操作は無効化する(直近操作を打ち消す)。
-  const toggleVariant = (kind: VariantKind, checked: boolean) => {
-    const next = { ...clip.variants, [kind]: checked };
-    if (!next.short && !next.insta) return; // 少なくとも 1 つ必須。
-    onChange({ ...clip, variants: next });
-  };
-
+  const length = Math.max(0, clip.trim.end - clip.trim.start);
   return (
     <div
       onClick={onSelect}
       className={cn(
         "flex cursor-pointer flex-col gap-2 rounded-md border p-2.5 transition-colors",
-        selected
-          ? "border-accent bg-accent/10"
-          : "border-line bg-elevated hover:border-neutral-600",
+        selected ? "border-accent bg-accent/10" : "border-line bg-elevated hover:border-neutral-600",
       )}
     >
       <div className="flex items-center gap-2">
@@ -99,43 +83,12 @@ function ClipRow({
         </button>
       </div>
 
-      <div className="flex items-center gap-4">
-        <VariantCheckbox
-          label="ショート 9:16"
-          checked={clip.variants.short}
-          onChange={(c) => toggleVariant("short", c)}
-        />
-        <VariantCheckbox
-          label="insta 1:1"
-          checked={clip.variants.insta}
-          onChange={(c) => toggleVariant("insta", c)}
-        />
+      <div className="flex items-center gap-2 text-[11px] text-neutral-500">
+        <span className="rounded bg-panel px-1.5 py-0.5 font-medium text-neutral-400">
+          {clip.aspect === "free" ? "自由" : clip.aspect}
+        </span>
+        <span className="font-mono tabular-nums">{formatTime(length)}</span>
       </div>
     </div>
-  );
-}
-
-function VariantCheckbox({
-  label,
-  checked,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-}) {
-  return (
-    <label
-      className="flex items-center gap-1.5 text-[11px] text-neutral-300"
-      onClick={(e) => e.stopPropagation()}
-    >
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="accent-accent"
-      />
-      {label}
-    </label>
   );
 }

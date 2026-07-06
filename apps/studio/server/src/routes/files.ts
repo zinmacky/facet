@@ -5,6 +5,7 @@ import { basename, resolve } from "node:path";
 import { platform } from "node:os";
 import { promisify } from "node:util";
 import { Readable } from "node:stream";
+import archiver from "archiver";
 import { Hono } from "hono";
 import { probe } from "@reframe/ffmpeg-runner";
 
@@ -91,6 +92,58 @@ files.post("/probe", async (c) => {
     const message = err instanceof Error ? err.message : String(err);
     return c.json({ error: message }, 500);
   }
+});
+
+/**
+ * POST /files/zip { paths, name? } : 複数ファイルを ZIP でまとめてダウンロードさせる。
+ * mp4 は既に圧縮済みなので store(無圧縮)でまとめる。存在するファイルのみ含める。
+ */
+files.post("/files/zip", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as
+    | { paths?: string[]; name?: string }
+    | null;
+  const paths = body?.paths;
+  if (!paths || !Array.isArray(paths) || paths.length === 0) {
+    return c.json({ error: "paths が必要です" }, 400);
+  }
+
+  // 存在するファイルだけ採用(同名衝突は連番で回避)。
+  const seen = new Map<string, number>();
+  const entries: { path: string; name: string }[] = [];
+  for (const raw of paths) {
+    const abs = resolve(raw);
+    try {
+      const s = await stat(abs);
+      if (!s.isFile()) continue;
+    } catch {
+      continue;
+    }
+    let name = basename(abs);
+    const n = seen.get(name) ?? 0;
+    seen.set(name, n + 1);
+    if (n > 0) {
+      const dot = name.lastIndexOf(".");
+      name = dot > 0 ? `${name.slice(0, dot)}_${n}${name.slice(dot)}` : `${name}_${n}`;
+    }
+    entries.push({ path: abs, name });
+  }
+  if (entries.length === 0) {
+    return c.json({ error: "対象ファイルが見つかりません" }, 404);
+  }
+
+  const archive = archiver("zip", { store: true });
+  for (const e of entries) archive.file(e.path, { name: e.name });
+  // finalize は待たずにストリームさせる。
+  void archive.finalize();
+
+  const filename = body?.name && /\.zip$/i.test(body.name) ? body.name : "reframe-export.zip";
+  return new Response(Readable.toWeb(archive) as ReadableStream, {
+    status: 200,
+    headers: {
+      "content-type": "application/zip",
+      "content-disposition": `attachment; filename="${filename}"`,
+    },
+  });
 });
 
 /** Range ヘッダ("bytes=start-end")を解釈する。無効/未指定なら undefined。 */

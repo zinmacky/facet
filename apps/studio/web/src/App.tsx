@@ -6,27 +6,30 @@ import type { Clip } from "./types";
 import { sourceBaseName } from "./types";
 import { ClipList } from "./features/clips/ClipList";
 import { ClipEditor } from "./features/clips/ClipEditor";
-import { ExportQueue } from "./features/queue/ExportQueue";
+import { ExportModal } from "./features/export/ExportModal";
+import { UploadModal } from "./features/upload/UploadModal";
 import { Card } from "./components/ui/Card";
 import { Button } from "./components/ui/Button";
 
 /** 選択済みソース(実パス + probe 結果)。 */
-interface Source {
+export interface Source {
   inputPath: string;
   probe: ProbeResult;
 }
 
+type ModalKind = "none" | "export" | "upload";
+
 /**
  * アプリの状態オーナー。
- * ネイティブダイアログで元動画を選び、複数の Clip を作って編集・書き出しする。
- * 各機能コンポーネントには表示に必要な値と onChange だけを配る。
+ * 元画面ではソース選択と切り抜き(trim + クロップ枠 + アスペクト比)を編集する。
+ * 「すべて書き出し」で EXPORT モーダル、そこから UPLOAD モーダルへ段階的に進む。
  */
 export function App() {
   const [source, setSource] = useState<Source | null>(null);
   const [clips, setClips] = useState<Clip[]>([]);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [modal, setModal] = useState<ModalKind>("none");
 
-  // ファイル選択 → probe。キャンセル時は何もしない。
   const pickMutation = useMutation({
     mutationFn: async (): Promise<Source | null> => {
       const picked = await pickFile();
@@ -36,7 +39,6 @@ export function App() {
     },
     onSuccess: (result) => {
       if (!result) return;
-      // 新しいソースを選んだら clips をリセットする。
       setSource(result);
       setClips([]);
       setSelectedClipId(null);
@@ -51,27 +53,20 @@ export function App() {
         id: crypto.randomUUID(),
         name: `${base}_${prev.length + 1}`,
         trim: { start: 0, end: source.probe.duration },
-        variants: { short: true, insta: false },
-        youtube: { title: "", description: "" },
-        instagram: { caption: "" },
+        aspect: "16:9",
       };
       setSelectedClipId(clip.id);
       return [...prev, clip];
     });
   }, [source]);
 
-  const removeClip = useCallback(
-    (id: string) => {
-      setClips((prev) => {
-        const next = prev.filter((c) => c.id !== id);
-        setSelectedClipId((sel) =>
-          sel === id ? (next[0]?.id ?? null) : sel,
-        );
-        return next;
-      });
-    },
-    [],
-  );
+  const removeClip = useCallback((id: string) => {
+    setClips((prev) => {
+      const next = prev.filter((c) => c.id !== id);
+      setSelectedClipId((sel) => (sel === id ? (next[0]?.id ?? null) : sel));
+      return next;
+    });
+  }, []);
 
   const changeClip = useCallback((clip: Clip) => {
     setClips((prev) => prev.map((c) => (c.id === clip.id ? clip : c)));
@@ -111,8 +106,7 @@ export function App() {
 
         {source && (
           <span className="font-mono text-[11px] text-neutral-500">
-            {source.probe.width}×{source.probe.height} ·{" "}
-            {formatTime(source.probe.duration)}
+            {source.probe.width}×{source.probe.height} · {formatTime(source.probe.duration)}
             {source.probe.codec ? ` · ${source.probe.codec}` : ""}
           </span>
         )}
@@ -124,31 +118,18 @@ export function App() {
         </div>
       )}
 
-      {/* メイン: 左(選択中 Clip 編集) / 右(Clip 一覧 + 書き出し) */}
+      {/* メイン: 左(選択中 Clip 編集) / 右(Clip 一覧 + 書き出し起点) */}
       <div className="grid min-h-0 flex-1 grid-cols-[1fr_340px]">
-        {/* 左カラム(min-w-0: grid 子の min-width:auto を無効化しはみ出しを防ぐ) */}
         <div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto p-3">
           {!source ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-neutral-700 text-neutral-600">
-              <div className="h-10 w-10 rounded-md border-2 border-dashed border-neutral-700" />
-              <p className="text-sm">元動画を選択してください。</p>
-            </div>
+            <Placeholder text="元動画を選択してください。" />
           ) : selectedClip ? (
-            <ClipEditor
-              clip={selectedClip}
-              probe={source.probe}
-              onChange={changeClip}
-            />
+            <ClipEditor clip={selectedClip} probe={source.probe} onChange={changeClip} />
           ) : (
-            <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-neutral-700 text-neutral-600">
-              <p className="text-sm">
-                右のパネルから切り抜きを追加してください。
-              </p>
-            </div>
+            <Placeholder text="右のパネルから切り抜きを追加してください。" />
           )}
         </div>
 
-        {/* 右カラム */}
         <aside className="flex min-h-0 flex-col gap-3 overflow-y-auto border-l border-line p-3">
           <Card title="Clips">
             <ClipList
@@ -160,20 +141,41 @@ export function App() {
               onChange={changeClip}
             />
           </Card>
-          <Card title="Export">
-            <ExportQueue
-              clips={clips}
-              inputPath={source?.inputPath ?? ""}
-              sourceReady={source !== null}
-              source={
-                source
-                  ? { width: source.probe.width, height: source.probe.height }
-                  : null
-              }
-            />
-          </Card>
+
+          <Button
+            variant="primary"
+            disabled={!source || clips.length === 0}
+            onClick={() => setModal("export")}
+            className="w-full"
+          >
+            すべて書き出し{clips.length > 0 ? `(${clips.length}本)` : ""}
+          </Button>
         </aside>
       </div>
+
+      <ExportModal
+        open={modal === "export"}
+        source={source}
+        clips={clips}
+        onClose={() => setModal("none")}
+        onProceedToUpload={() => setModal("upload")}
+      />
+      <UploadModal
+        open={modal === "upload"}
+        source={source}
+        clips={clips}
+        onClose={() => setModal("none")}
+        onBack={() => setModal("export")}
+      />
+    </div>
+  );
+}
+
+function Placeholder({ text }: { text: string }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-neutral-700 text-neutral-600">
+      <div className="h-10 w-10 rounded-md border-2 border-dashed border-neutral-700" />
+      <p className="text-sm">{text}</p>
     </div>
   );
 }
