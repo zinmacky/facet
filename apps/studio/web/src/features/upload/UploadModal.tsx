@@ -102,6 +102,19 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
   const [times, setTimes] = useState<string[]>(["20:00"]);
   const [assignNote, setAssignNote] = useState<string | null>(null);
 
+  // 閉じたら内部状態を初期化する(再度開いたときは現在の clips から作り直す)。
+  useEffect(() => {
+    if (open) return;
+    setItems([]);
+    setStatuses(new Map());
+    setRenders(new Map());
+    setStartDate("");
+    setEndDate("");
+    setWeekdays([]);
+    setTimes(["20:00"]);
+    setAssignNote(null);
+  }, [open]);
+
   // open 時に items を初期化(空のときのみ)。各 clip につき 1 つ。
   useEffect(() => {
     if (!open) return;
