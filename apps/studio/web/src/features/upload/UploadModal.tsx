@@ -517,17 +517,8 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
 
   const busy = publishPostMutation.isPending || publishAllMutation.isPending;
 
-  // 全 Output 数(M)と、現在設定と一致する(=最新の)生成済み Output 数(N)。
+  // 一括ダウンロード可否の判定に使う全 Output 数。
   const totalOutputs = posts.reduce((sum, p) => sum + p.outputs.length, 0);
-  const readyOutputs = posts.reduce((sum, p) => {
-    return (
-      sum +
-      p.outputs.filter((o) => {
-        const r = renders.get(o.id);
-        return r?.outputPath !== undefined && r.sig === outputSig(p, o);
-      }).length
-    );
-  }, 0);
 
   // 一括ダウンロード: 押下時に全 Post の全 Output を ensureRendered(再利用)してから ZIP 化する。
   const bulkDownloadMutation = useMutation({
@@ -576,8 +567,16 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
   const selectedPost = posts.find((p) => p.id === selectedPostId) ?? null;
 
   return (
-    <Modal open={open} title="アップロード" onClose={onClose} footer={footer} widthClass="max-w-7xl">
-      <div className="flex flex-col gap-4">
+    <Modal
+      open={open}
+      title="アップロード"
+      onClose={onClose}
+      footer={footer}
+      widthClass="max-w-7xl"
+      scrollBody={false}
+    >
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
+        <div className="shrink-0">
         <BulkSettings
           startDate={startDate}
           endDate={endDate}
@@ -597,10 +596,11 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
           onSetPreset={setPreset}
           onApplyPresets={applyPresets}
         />
+        </div>
 
-        <div className="flex min-h-[52vh] gap-3">
+        <div className="flex min-h-0 flex-1 gap-3">
           {/* 中央: 選択中 Post の詳細 */}
-          <div className="flex-1 min-w-0 overflow-y-auto">
+          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
             {selectedPost ? (
               <PostDetail
                 key={selectedPost.id}
@@ -629,7 +629,7 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
           </div>
 
           {/* 右: 投稿(Post)一覧 */}
-          <div className="w-72 shrink-0 border-l border-line pl-3 overflow-y-auto">
+          <div className="min-h-0 w-72 shrink-0 overflow-y-auto border-l border-line pl-3">
             <div className="flex flex-col gap-2">
               <Button
                 variant="secondary"
@@ -639,9 +639,6 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
               >
                 {bulkDownloadMutation.isPending ? "生成中…" : "一括ダウンロード(ZIP)"}
               </Button>
-              <span className="text-[11px] text-neutral-500">
-                生成済み {readyOutputs}/{totalOutputs}
-              </span>
               {bulkDownloadMutation.isError && (
                 <span className="text-[11px] text-danger">
                   {(bulkDownloadMutation.error as Error).message}

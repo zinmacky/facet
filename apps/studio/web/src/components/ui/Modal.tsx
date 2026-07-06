@@ -11,13 +11,26 @@ interface ModalProps {
   footer?: ReactNode;
   /** パネル幅。既定 max-w-3xl。 */
   widthClass?: string;
+  /**
+   * 本文をスクロールさせるか。既定 true。
+   * false のとき本文は overflow-hidden になり、子側でブロックごとにスクロールを制御する。
+   */
+  scrollBody?: boolean;
 }
 
 /**
  * 中央配置のモーダルダイアログ。
  * オーバーレイクリック / Esc で閉じる。ヘッダ・スクロール本文・任意フッタ。
  */
-export function Modal({ open, title, onClose, children, footer, widthClass = "max-w-3xl" }: ModalProps) {
+export function Modal({
+  open,
+  title,
+  onClose,
+  children,
+  footer,
+  widthClass = "max-w-3xl",
+  scrollBody = true,
+}: ModalProps) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -52,7 +65,14 @@ export function Modal({ open, title, onClose, children, footer, widthClass = "ma
             ✕
           </button>
         </header>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">{children}</div>
+        <div
+          className={cn(
+            "min-h-0 flex-1 p-4",
+            scrollBody ? "overflow-y-auto" : "flex flex-col overflow-hidden",
+          )}
+        >
+          {children}
+        </div>
         {footer && (
           <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-line px-4 py-3">
             {footer}
