@@ -43,6 +43,19 @@ export class ApiError extends Error {
   }
 }
 
+// ---- file pick -------------------------------------------------------------
+
+/** ネイティブファイルダイアログの結果。成功時 path、キャンセル時 canceled。 */
+export interface PickResult {
+  path?: string;
+  canceled?: boolean;
+}
+
+/** OS のファイルダイアログを開いて元動画のパスを得る。 */
+export async function pickFile(): Promise<PickResult> {
+  return postJson<PickResult>("/files/pick", {});
+}
+
 // ---- probe -----------------------------------------------------------------
 
 /** ffprobe 由来のソースメタ。UI は width/height/duration を主に使う。 */

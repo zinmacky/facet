@@ -3,6 +3,7 @@ dist/
 dist-tsnode/
 *.tsbuildinfo
 .turbo/
+.playwright-mcp/
 *.log
 .DS_Store
 

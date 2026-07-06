@@ -1,75 +1,83 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import type { CropRect, EditSpec, Preset, Trim } from "@reframe/core";
-import { PRESETS } from "@reframe/core";
-import { probeFile, type ProbeResult } from "./lib/api";
+import { pickFile, probeFile, type ProbeResult } from "./lib/api";
 import { formatTime } from "./lib/format";
-import { Timeline } from "./features/timeline/Timeline";
-import { CropOverlay } from "./features/crop-overlay/CropOverlay";
-import { PresetPanel } from "./features/preset-panel/PresetPanel";
-import { Queue } from "./features/queue/Queue";
+import type { Clip } from "./types";
+import { sourceBaseName } from "./types";
+import { ClipList } from "./features/clips/ClipList";
+import { ClipEditor } from "./features/clips/ClipEditor";
+import { ExportQueue } from "./features/queue/ExportQueue";
 import { Card } from "./components/ui/Card";
 import { Button } from "./components/ui/Button";
 
-/** クロップ全体を使う初期矩形。 */
-const FULL_CROP: CropRect = { x: 0, y: 0, width: 1, height: 1 };
+/** 選択済みソース(実パス + probe 結果)。 */
+interface Source {
+  inputPath: string;
+  probe: ProbeResult;
+}
 
 /**
  * アプリの状態オーナー。
- * EditSpec(source 寸法・trim・crop・preset)をローカル state で保持し、
+ * ネイティブダイアログで元動画を選び、複数の Clip を作って編集・書き出しする。
  * 各機能コンポーネントには表示に必要な値と onChange だけを配る。
  */
 export function App() {
-  const [path, setPath] = useState("");
-  const [inputPath, setInputPath] = useState("");
-  const [probe, setProbe] = useState<ProbeResult | null>(null);
+  const [source, setSource] = useState<Source | null>(null);
+  const [clips, setClips] = useState<Clip[]>([]);
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 
-  // EditSpec の構成要素を個別に持つ(source は probe 由来)。
-  const [trim, setTrim] = useState<Trim | undefined>(undefined);
-  const [crop, setCrop] = useState<CropRect>(FULL_CROP);
-  const [preset, setPreset] = useState<Preset>(PRESETS["9:16"]);
-  const [snapCrop, setSnapCrop] = useState(true);
-
-  // <video> 再生位置。
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [currentTime, setCurrentTime] = useState(0);
-
-  const probeMutation = useMutation({
-    mutationFn: (p: string) => probeFile(p),
-    onSuccess: (result, variables) => {
-      setProbe(result);
-      // 書き出し・公開でソース参照するため、probe に渡した実パスを保持する。
-      setInputPath(variables);
-      setTrim({ start: 0, end: result.duration });
-      setCrop(FULL_CROP);
-      setCurrentTime(0);
+  // ファイル選択 → probe。キャンセル時は何もしない。
+  const pickMutation = useMutation({
+    mutationFn: async (): Promise<Source | null> => {
+      const picked = await pickFile();
+      if (picked.canceled || !picked.path) return null;
+      const probe = await probeFile(picked.path);
+      return { inputPath: picked.path, probe };
+    },
+    onSuccess: (result) => {
+      if (!result) return;
+      // 新しいソースを選んだら clips をリセットする。
+      setSource(result);
+      setClips([]);
+      setSelectedClipId(null);
     },
   });
 
-  // EditSpec を派生。source が無ければ null(書き出し不可)。
-  const spec: EditSpec | null = useMemo(() => {
-    if (!probe) return null;
-    const s: EditSpec = {
-      source: { width: probe.width, height: probe.height },
-      preset,
-    };
-    if (trim) s.trim = trim;
-    // 全体クロップは省略(core は無指定を全体として扱う)。
-    if (crop.width < 1 || crop.height < 1 || crop.x > 0 || crop.y > 0) {
-      s.crop = crop;
-    }
-    return s;
-  }, [probe, preset, trim, crop]);
+  const addClip = useCallback(() => {
+    if (!source) return;
+    const base = sourceBaseName(source.inputPath);
+    setClips((prev) => {
+      const clip: Clip = {
+        id: crypto.randomUUID(),
+        name: `${base}_${prev.length + 1}`,
+        trim: { start: 0, end: source.probe.duration },
+        variants: { short: true, insta: false },
+        youtube: { title: "", description: "" },
+        instagram: { caption: "" },
+      };
+      setSelectedClipId(clip.id);
+      return [...prev, clip];
+    });
+  }, [source]);
 
-  const presetAspect = preset.width / preset.height;
+  const removeClip = useCallback(
+    (id: string) => {
+      setClips((prev) => {
+        const next = prev.filter((c) => c.id !== id);
+        setSelectedClipId((sel) =>
+          sel === id ? (next[0]?.id ?? null) : sel,
+        );
+        return next;
+      });
+    },
+    [],
+  );
 
-  const onSeek = useCallback((seconds: number) => {
-    const v = videoRef.current;
-    if (v) {
-      v.currentTime = seconds;
-      setCurrentTime(seconds);
-    }
+  const changeClip = useCallback((clip: Clip) => {
+    setClips((prev) => prev.map((c) => (c.id === clip.id ? clip : c)));
   }, []);
+
+  const selectedClip = clips.find((c) => c.id === selectedClipId);
 
   return (
     <div className="flex h-full flex-col bg-panel">
@@ -84,108 +92,85 @@ export function App() {
 
         <div className="mx-2 h-5 w-px bg-line" />
 
-        {/* ファイルパス入力 → probe */}
-        <form
-          className="flex flex-1 items-center gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (path.trim()) probeMutation.mutate(path.trim());
-          }}
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={pickMutation.status === "pending"}
+          onClick={() => pickMutation.mutate()}
         >
-          <input
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            placeholder="ローカル動画のパス(例: /Users/me/clips/a.mp4)"
-            className="h-8 flex-1 rounded-md border border-line bg-surface px-3 font-mono text-xs text-neutral-200 outline-none focus:border-accent"
-          />
-          <Button
-            type="submit"
-            size="sm"
-            variant="primary"
-            disabled={!path.trim() || probeMutation.status === "pending"}
-          >
-            {probeMutation.status === "pending" ? "解析中…" : "読み込み"}
-          </Button>
-        </form>
+          {pickMutation.status === "pending" ? "読み込み中…" : "元動画を選択"}
+        </Button>
 
-        {probe && (
+        {source && (
+          <span className="truncate font-mono text-[11px] text-neutral-400">
+            {sourceBaseName(source.inputPath)}
+          </span>
+        )}
+
+        <div className="flex-1" />
+
+        {source && (
           <span className="font-mono text-[11px] text-neutral-500">
-            {probe.width}×{probe.height} · {formatTime(probe.duration)}
-            {probe.codec ? ` · ${probe.codec}` : ""}
+            {source.probe.width}×{source.probe.height} ·{" "}
+            {formatTime(source.probe.duration)}
+            {source.probe.codec ? ` · ${source.probe.codec}` : ""}
           </span>
         )}
       </header>
 
-      {probeMutation.isError && (
+      {pickMutation.isError && (
         <div className="border-b border-danger/30 bg-danger/10 px-4 py-2 text-xs text-danger">
-          probe 失敗: {(probeMutation.error as Error).message}
+          読み込み失敗: {(pickMutation.error as Error).message}
         </div>
       )}
 
-      {/* メイン: 左(プレビュー+タイムライン) / 右(プリセット+キュー) */}
-      <div className="grid min-h-0 flex-1 grid-cols-[1fr_320px]">
+      {/* メイン: 左(選択中 Clip 編集) / 右(Clip 一覧 + 書き出し) */}
+      <div className="grid min-h-0 flex-1 grid-cols-[1fr_340px]">
         {/* 左カラム */}
-        <div className="flex min-h-0 flex-col gap-3 p-3">
-          {/* プレビュー */}
-          <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg border border-line bg-black/60">
-            {probe ? (
-              <div className="relative inline-block max-h-full max-w-full">
-                <video
-                  ref={videoRef}
-                  src={probe.url}
-                  controls
-                  onTimeUpdate={(e) =>
-                    setCurrentTime((e.target as HTMLVideoElement).currentTime)
-                  }
-                  className="block max-h-[60vh] max-w-full rounded"
-                />
-                <CropOverlay
-                  crop={crop}
-                  onChange={setCrop}
-                  aspect={presetAspect}
-                  snap={snapCrop}
-                />
-              </div>
-            ) : (
-              <div className="flex flex-col items-center gap-2 text-neutral-600">
-                <div className="h-10 w-10 rounded-md border-2 border-dashed border-neutral-700" />
-                <p className="text-xs">動画のパスを入力して読み込みます。</p>
-              </div>
-            )}
-          </div>
-
-          {/* クロップ操作の補助トグル */}
-          <div className="flex items-center justify-end px-1">
-            <label className="flex items-center gap-2 text-xs text-neutral-400">
-              <input
-                type="checkbox"
-                checked={snapCrop}
-                onChange={(e) => setSnapCrop(e.target.checked)}
-                className="accent-accent"
-              />
-              クロップをプリセット比にスナップ
-            </label>
-          </div>
-
-          {/* タイムライン */}
-          <Card title="Timeline" className="shrink-0">
-            <Timeline
-              duration={probe?.duration ?? 0}
-              trim={trim}
-              currentTime={currentTime}
-              onChange={setTrim}
-              onSeek={onSeek}
+        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto p-3">
+          {!source ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-neutral-700 text-neutral-600">
+              <div className="h-10 w-10 rounded-md border-2 border-dashed border-neutral-700" />
+              <p className="text-sm">元動画を選択してください。</p>
+            </div>
+          ) : selectedClip ? (
+            <ClipEditor
+              clip={selectedClip}
+              probe={source.probe}
+              onChange={changeClip}
             />
-          </Card>
+          ) : (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-neutral-700 text-neutral-600">
+              <p className="text-sm">
+                右のパネルから切り抜きを追加してください。
+              </p>
+            </div>
+          )}
         </div>
 
         {/* 右カラム */}
         <aside className="flex min-h-0 flex-col gap-3 overflow-y-auto border-l border-line p-3">
-          <Card title="Preset">
-            <PresetPanel value={preset} onChange={setPreset} />
+          <Card title="Clips">
+            <ClipList
+              clips={clips}
+              selectedClipId={selectedClipId}
+              onSelect={setSelectedClipId}
+              onAdd={addClip}
+              onRemove={removeClip}
+              onChange={changeClip}
+            />
           </Card>
-          <Card title="Queue">
-            <Queue spec={spec} inputPath={inputPath} ready={probe !== null} />
+          <Card title="Export">
+            <ExportQueue
+              clips={clips}
+              inputPath={source?.inputPath ?? ""}
+              sourceReady={source !== null}
+              source={
+                source
+                  ? { width: source.probe.width, height: source.probe.height }
+                  : null
+              }
+            />
           </Card>
         </aside>
       </div>
