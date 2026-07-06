@@ -886,125 +886,132 @@ function OutputCard(props: OutputCardProps) {
 
   return (
     <div className="rounded-lg border border-line bg-panel p-3">
-      <div className="grid grid-cols-[1fr_1fr_auto] items-end gap-2">
-        <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
-          出力ターゲット
-          <select
-            className={selectClass}
-            value={output.targetId}
-            onChange={(e) => props.onPatch({ targetId: e.target.value })}
-          >
-            {OUTPUT_TARGETS.map((target) => (
-              <option key={target.id} value={target.id}>
-                {target.label}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
-          フィット
-          <select
-            className={selectClass}
-            value={output.fit}
-            onChange={(e) => props.onPatch({ fit: e.target.value as FitMode })}
-          >
-            {FIT_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        {props.canRemove && (
-          <button
-            type="button"
-            aria-label="出力先を削除"
-            onClick={props.onRemove}
-            className="flex h-8 w-8 items-center justify-center rounded-md border border-line bg-elevated text-neutral-500 hover:border-danger hover:text-danger"
-          >
-            ✕
-          </button>
-        )}
-      </div>
-
-      {/* メタデータ */}
-      <div className="mt-2 flex flex-col gap-2">
-        {platform === "youtube" ? (
-          <>
-            <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
-              タイトル
-              <input
-                type="text"
-                className={cn(inputClass, "w-full")}
-                value={output.title}
-                onChange={(e) => props.onPatch({ title: e.target.value })}
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
-              説明
-              <textarea
-                className={textareaClass}
-                value={output.description}
-                onChange={(e) => props.onPatch({ description: e.target.value })}
-              />
-            </label>
-          </>
-        ) : (
-          <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
-            キャプション
-            <textarea
-              className={textareaClass}
-              maxLength={2200}
-              value={output.caption}
-              onChange={(e) => props.onPatch({ caption: e.target.value })}
-            />
-          </label>
-        )}
-      </div>
-
-      {/* 最終プレビュー + ダウンロード */}
-      <div className="mt-3 flex flex-col gap-2 rounded-md border border-line bg-elevated/40 p-2">
-        <div className="flex items-center justify-between">
-          <span className="text-[11px] text-neutral-400">
-            最終プレビュー
-            {stale && <span className="ml-1.5 text-amber-400">(要更新)</span>}
-          </span>
-          <div className="flex items-center gap-2">
+      <div className="flex gap-3">
+        {/* 左: 最終プレビュー + ダウンロード */}
+        <div className="flex w-52 shrink-0 flex-col gap-2 rounded-md border border-line bg-elevated/40 p-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-neutral-400">
+              最終プレビュー
+              {stale && <span className="ml-1 text-amber-400">(要更新)</span>}
+            </span>
             {fresh && outputPath && (
               <a
                 href={fileDownloadUrl(outputPath)}
                 download
                 className="text-[11px] text-accent hover:underline"
               >
-                ダウンロード
+                DL
               </a>
             )}
-            <Button variant="ghost" size="sm" onClick={props.onPreview} disabled={rendering || busy}>
-              {rendering ? "生成中…" : outputPath ? "プレビュー更新" : "プレビュー生成"}
+          </div>
+          {outputPath ? (
+            <video
+              src={fileRawUrl(outputPath)}
+              controls
+              className={cn("max-h-52 w-full rounded bg-black", stale && "opacity-60")}
+            />
+          ) : (
+            <p className="py-8 text-center text-[11px] text-neutral-600">
+              「生成」で最終アスペクト・フィットを確認できます。
+            </p>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="w-full"
+            onClick={props.onPreview}
+            disabled={rendering || busy}
+          >
+            {rendering ? "生成中…" : outputPath ? "プレビュー更新" : "プレビュー生成"}
+          </Button>
+          {render?.error && <p className="text-[11px] text-danger">{render.error}</p>}
+        </div>
+
+        {/* 右: 出力ターゲット〜メタデータ + 投稿 */}
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          <div className="grid grid-cols-[1fr_1fr_auto] items-end gap-2">
+            <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
+              出力ターゲット
+              <select
+                className={selectClass}
+                value={output.targetId}
+                onChange={(e) => props.onPatch({ targetId: e.target.value })}
+              >
+                {OUTPUT_TARGETS.map((target) => (
+                  <option key={target.id} value={target.id}>
+                    {target.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
+              フィット
+              <select
+                className={selectClass}
+                value={output.fit}
+                onChange={(e) => props.onPatch({ fit: e.target.value as FitMode })}
+              >
+                {FIT_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {props.canRemove && (
+              <button
+                type="button"
+                aria-label="出力先を削除"
+                onClick={props.onRemove}
+                className="flex h-8 w-8 items-center justify-center rounded-md border border-line bg-elevated text-neutral-500 hover:border-danger hover:text-danger"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+
+          {/* メタデータ */}
+          {platform === "youtube" ? (
+            <>
+              <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
+                タイトル
+                <input
+                  type="text"
+                  className={cn(inputClass, "w-full")}
+                  value={output.title}
+                  onChange={(e) => props.onPatch({ title: e.target.value })}
+                />
+              </label>
+              <label className="flex min-h-0 flex-1 flex-col gap-1 text-[11px] text-neutral-400">
+                説明
+                <textarea
+                  className={cn(textareaClass, "min-h-0 flex-1")}
+                  value={output.description}
+                  onChange={(e) => props.onPatch({ description: e.target.value })}
+                />
+              </label>
+            </>
+          ) : (
+            <label className="flex min-h-0 flex-1 flex-col gap-1 text-[11px] text-neutral-400">
+              キャプション
+              <textarea
+                className={cn(textareaClass, "min-h-0 flex-1")}
+                maxLength={2200}
+                value={output.caption}
+                onChange={(e) => props.onPatch({ caption: e.target.value })}
+              />
+            </label>
+          )}
+
+          <div className="mt-auto flex items-center justify-between">
+            <StatusBadge status={status} />
+            <Button variant="primary" size="sm" onClick={props.onPublish} disabled={busy}>
+              投稿
             </Button>
           </div>
         </div>
-        {outputPath ? (
-          <video
-            src={fileRawUrl(outputPath)}
-            controls
-            className={cn("max-h-40 w-full rounded bg-black", stale && "opacity-60")}
-          />
-        ) : (
-          <p className="py-2 text-center text-[11px] text-neutral-600">
-            「プレビュー生成」で最終アスペクト・フィットを確認できます。
-          </p>
-        )}
-        {render?.error && <p className="text-[11px] text-danger">{render.error}</p>}
-      </div>
-
-      <div className="mt-3 flex items-center justify-between">
-        <StatusBadge status={status} />
-        <Button variant="primary" size="sm" onClick={props.onPublish} disabled={busy}>
-          投稿
-        </Button>
       </div>
     </div>
   );
