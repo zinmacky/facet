@@ -13,8 +13,8 @@
 	},
 	"dependencies": {
 		"@facet/contract": "workspace:*",
-		"hono": "^4.6.3",
-		"zod": "^3.23.8"
+		"hono": "^4.12.28",
+		"zod": "^4.4.3"
 	},
 	"devDependencies": {
 		"@cloudflare/workers-types": "^4.20240925.0",

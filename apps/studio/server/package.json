@@ -14,15 +14,15 @@
 		"@facet/contract": "workspace:*",
 		"@facet/core": "workspace:*",
 		"@facet/ffmpeg-runner": "workspace:*",
-		"@hono/node-server": "^1.13.1",
-		"archiver": "^7.0.1",
+		"@hono/node-server": "^2.0.8",
+		"archiver": "^8.0.0",
 		"aws4fetch": "^1.0.20",
-		"googleapis": "^144.0.0",
-		"hono": "^4.6.3",
-		"zod": "^3.23.8"
+		"googleapis": "^173.0.0",
+		"hono": "^4.12.28",
+		"zod": "^4.4.3"
 	},
 	"devDependencies": {
-		"@types/archiver": "^6.0.2",
+		"@types/archiver": "^8.0.0",
 		"@types/node": "^22.5.0",
 		"tsx": "^4.19.1",
 		"typescript": "^5.6.2",
