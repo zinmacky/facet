@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { compose, type EditSpec } from "@reframe/core";
-import { run, type Progress } from "@reframe/ffmpeg-runner";
+import type { Progress } from "@reframe/ffmpeg-runner";
+import { encode } from "./encode.js";
 
 /**
  * 書き出しジョブのインメモリレジストリ。
@@ -54,7 +55,8 @@ export function startExportJob(params: StartExportParams): string {
   };
 
   const plan = compose(params.spec);
-  run(
+  // encode がエンコードの同時実行制限と libx264 フォールバックを担う。
+  encode(
     plan,
     {
       input: params.input,

@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Hono } from "hono";
 import { compose, type EditSpec } from "@reframe/core";
-import { run } from "@reframe/ffmpeg-runner";
+import { encode } from "../services/encode.js";
 import { config } from "../config.js";
 
 /**
@@ -44,7 +44,7 @@ preview.post("/preview", async (c) => {
   if (!existsSync(output)) {
     const plan = compose(body.spec);
     try {
-      await run(plan, {
+      await encode(plan, {
         input: resolve(body.input),
         output,
         // プレビューは低ビットレート・高速優先。
