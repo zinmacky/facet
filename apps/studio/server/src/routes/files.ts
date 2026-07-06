@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { platform } from "node:os";
 import { promisify } from "node:util";
 import { Readable } from "node:stream";
@@ -145,6 +145,11 @@ files.get("/files/raw", async (c) => {
 
   const contentType = "video/mp4";
   const range = parseRange(c.req.header("range"), size);
+  // download=1 のときはブラウザにダウンロードさせる(ファイル名付き)。
+  const asDownload = c.req.query("download");
+  const dispositionHeader: Record<string, string> = asDownload
+    ? { "content-disposition": `attachment; filename="${basename(path)}"` }
+    : {};
 
   if (range) {
     const { start, end } = range;
@@ -157,6 +162,7 @@ files.get("/files/raw", async (c) => {
         "content-length": String(end - start + 1),
         "content-range": `bytes ${start}-${end}/${size}`,
         "accept-ranges": "bytes",
+        ...dispositionHeader,
       },
     });
   }
@@ -169,6 +175,7 @@ files.get("/files/raw", async (c) => {
       "content-type": contentType,
       "content-length": String(size),
       "accept-ranges": "bytes",
+      ...dispositionHeader,
     },
   });
 });

@@ -1,7 +1,28 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { CropRect } from "@reframe/core";
 import { clamp } from "../../lib/format";
+
+/** crop を目標比(正規化空間の w/h)へ合わせる。中心を保ちつつ境界内に収める。 */
+function snapRectToRatio(c: CropRect, targetNormRatio: number): CropRect {
+  const cx = c.x + c.width / 2;
+  const cy = c.y + c.height / 2;
+  let w = c.width;
+  let h = w / targetNormRatio;
+  if (h > 1) {
+    h = 1;
+    w = h * targetNormRatio;
+  }
+  if (w > 1) {
+    w = 1;
+    h = w / targetNormRatio;
+  }
+  w = clamp(w, 0.05, 1);
+  h = clamp(h, 0.05, 1);
+  const x = clamp(cx - w / 2, 0, 1 - w);
+  const y = clamp(cy - h / 2, 0, 1 - h);
+  return { x, y, width: w, height: h };
+}
 
 interface CropOverlayProps {
   /** 現在のクロップ矩形(0..1 正規化)。 */
@@ -45,6 +66,27 @@ export function CropOverlay({ crop, onChange, aspect, snap }: CropOverlayProps) 
     const rect = el.getBoundingClientRect();
     return rect.width / rect.height;
   }, []);
+
+  // 最新の crop / onChange を ref で保持(スナップ effect の再実行を snap/aspect 変化のみに限定するため)。
+  const cropRef = useRef(crop);
+  cropRef.current = crop;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  // スナップを ON にした瞬間(または対象比が変わった瞬間)に、現在の枠を即座に比率へ合わせる。
+  // これがないとリサイズするまで反映されない。
+  useEffect(() => {
+    if (!snap || !aspect || aspect <= 0) return;
+    const target = aspect / containerAspectRatio();
+    const c = cropRef.current;
+    const snapped = snapRectToRatio(c, target);
+    const changed =
+      Math.abs(snapped.x - c.x) > 0.001 ||
+      Math.abs(snapped.y - c.y) > 0.001 ||
+      Math.abs(snapped.width - c.width) > 0.001 ||
+      Math.abs(snapped.height - c.height) > 0.001;
+    if (changed) onChangeRef.current(snapped);
+  }, [snap, aspect, containerAspectRatio]);
 
   // 枠全体の移動。矩形サイズは保ったまま位置だけを [0,1] 内に収める。
   const beginMove = useCallback(

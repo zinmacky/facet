@@ -19,3 +19,6 @@ dist-tsnode/
 # build outputs
 apps/studio/web/dist/
 coverage/
+
+# studio 書き出し一時ディレクトリ
+.work/
