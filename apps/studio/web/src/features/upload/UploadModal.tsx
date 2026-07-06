@@ -400,7 +400,7 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
 
   const busy = publishOneMutation.isPending || publishAllMutation.isPending;
 
-  // 現在設定と一致する(=最新の)生成済みファイル一覧。一括DL 対象。
+  // 現在設定と一致する(=最新の)生成済みファイル数(注記表示用)。
   const readyPaths = items
     .map((it) => {
       const r = renders.get(it.id);
@@ -408,8 +408,22 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
     })
     .filter((p): p is string => p !== null);
 
+  // 一括ダウンロード: 押下時に全 item をレンダリング(生成済みは再利用)してから ZIP 化する。
   const bulkDownloadMutation = useMutation({
-    mutationFn: () => downloadZip(readyPaths, "reframe-upload.zip"),
+    mutationFn: async () => {
+      const paths: string[] = [];
+      for (const item of items) {
+        try {
+          paths.push(await ensureRendered(item));
+        } catch {
+          // 個別の生成失敗は renders.error に反映済み。スキップして続行。
+        }
+      }
+      if (paths.length === 0) {
+        throw new Error("ダウンロードできる出力がありません(生成に失敗しました)。");
+      }
+      await downloadZip(paths, "reframe-upload.zip");
+    },
   });
 
   // プレビュー生成(現在設定でレンダリング)。エラーは renders.error に反映。
@@ -485,13 +499,18 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
                 variant="secondary"
                 size="sm"
                 onClick={() => bulkDownloadMutation.mutate()}
-                disabled={readyPaths.length === 0 || bulkDownloadMutation.isPending}
+                disabled={items.length === 0 || bulkDownloadMutation.isPending}
               >
                 {bulkDownloadMutation.isPending ? "生成中…" : "一括ダウンロード(ZIP)"}
               </Button>
               <span className="text-[11px] text-neutral-500">
                 生成済み {readyPaths.length}/{items.length}
               </span>
+              {bulkDownloadMutation.isError && (
+                <span className="text-[11px] text-danger">
+                  {(bulkDownloadMutation.error as Error).message}
+                </span>
+              )}
               <Button variant="secondary" size="sm" onClick={addItem} disabled={clips.length === 0}>
                 + 出力を追加
               </Button>
