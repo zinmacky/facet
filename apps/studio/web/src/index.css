@@ -1,9 +1,5 @@
-/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind のディレクティブ(PostCSS が処理) */
-@tailwind base;
-/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind のディレクティブ(PostCSS が処理) */
-@tailwind components;
-/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind のディレクティブ(PostCSS が処理) */
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.js";
 
 /* 最低限のベーススタイル。ダークな編集ツール調に固定する。 */
 @layer base {
