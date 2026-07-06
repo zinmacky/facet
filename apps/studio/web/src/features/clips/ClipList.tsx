@@ -1,13 +1,11 @@
 import type { Clip } from "../../types";
 import { formatTime } from "../../lib/format";
-import { Button } from "../../components/ui/Button";
 import { cn } from "../../components/ui/cn";
 
 interface ClipListProps {
   clips: Clip[];
   selectedClipId: string | null;
   onSelect: (id: string) => void;
-  onAdd: () => void;
   onRemove: (id: string) => void;
   onChange: (clip: Clip) => void;
 }
@@ -15,12 +13,13 @@ interface ClipListProps {
 /**
  * 切り抜き一覧。各行で名前の inline 編集・選択・削除を行う。
  * クロップ比と長さはバッジで表示する(詳細編集は ClipEditor)。
+ * 追加ボタンは Clips カードのヘッダ側に置く。
  */
-export function ClipList({ clips, selectedClipId, onSelect, onAdd, onRemove, onChange }: ClipListProps) {
+export function ClipList({ clips, selectedClipId, onSelect, onRemove, onChange }: ClipListProps) {
   return (
-    <div className="flex flex-col gap-2 p-3">
+    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
       {clips.length === 0 && (
-        <p className="px-1 py-2 text-xs text-neutral-600">切り抜きがありません。追加してください。</p>
+        <p className="px-1 py-2 text-xs text-neutral-600">切り抜きがありません。＋で追加してください。</p>
       )}
 
       {clips.map((clip) => (
@@ -33,10 +32,6 @@ export function ClipList({ clips, selectedClipId, onSelect, onAdd, onRemove, onC
           onChange={onChange}
         />
       ))}
-
-      <Button size="sm" variant="secondary" onClick={onAdd} className="mt-1 self-start">
-        + 切り抜きを追加
-      </Button>
     </div>
   );
 }
@@ -76,10 +71,13 @@ function ClipRow({
             e.stopPropagation();
             onRemove();
           }}
-          className="shrink-0 rounded px-1.5 py-1 text-[11px] text-neutral-500 hover:bg-danger/15 hover:text-danger"
+          aria-label="削除"
           title="削除"
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-line bg-panel text-neutral-500 hover:border-danger hover:bg-danger/15 hover:text-danger"
         >
-          削除
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+            <path d="M2.5 6h7" strokeLinecap="round" />
+          </svg>
         </button>
       </div>
 

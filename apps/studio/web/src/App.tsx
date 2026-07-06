@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { pickFile, probeFile, type ProbeResult } from "./lib/api";
 import { formatTime } from "./lib/format";
@@ -39,6 +39,8 @@ export function App() {
   const [clips, setClips] = useState<Clip[]>([]);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalKind>("none");
+  // 連番カウンタ。削除後の再採番でも名前が衝突しないよう、単調増加させる。
+  const clipSeqRef = useRef(1);
 
   const pickMutation = useMutation({
     mutationFn: async (): Promise<Source | null> => {
@@ -51,6 +53,7 @@ export function App() {
       if (!result) return;
       // ファイル選択時に自動で 1 本目の切り抜きを追加して選択状態にする。
       const first = createClip(result, 1);
+      clipSeqRef.current = 2; // 次の追加は _2 から。
       setSource(result);
       setClips([first]);
       setSelectedClipId(first.id);
@@ -59,11 +62,12 @@ export function App() {
 
   const addClip = useCallback(() => {
     if (!source) return;
-    setClips((prev) => {
-      const clip = createClip(source, prev.length + 1);
-      setSelectedClipId(clip.id);
-      return [...prev, clip];
-    });
+    // 単調増加の連番を使う(削除しても再利用しないので名前が衝突しない)。
+    const seq = clipSeqRef.current;
+    clipSeqRef.current = seq + 1;
+    const clip = createClip(source, seq);
+    setClips((prev) => [...prev, clip]);
+    setSelectedClipId(clip.id);
   }, [source]);
 
   const removeClip = useCallback((id: string) => {
@@ -136,13 +140,29 @@ export function App() {
           )}
         </div>
 
-        <aside className="flex min-h-0 flex-col gap-3 overflow-y-auto border-l border-line p-3">
-          <Card title="Clips">
+        <aside className="flex min-h-0 flex-col gap-3 border-l border-line p-3">
+          <Card
+            title="Clips"
+            className="min-h-0 flex-1"
+            actions={
+              <button
+                type="button"
+                onClick={addClip}
+                disabled={!source}
+                aria-label="切り抜きを追加"
+                title="切り抜きを追加"
+                className="flex h-6 w-6 items-center justify-center rounded-full border border-line bg-elevated text-neutral-300 hover:border-accent hover:text-accent disabled:opacity-40"
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+                  <path d="M6 2.5v7M2.5 6h7" strokeLinecap="round" />
+                </svg>
+              </button>
+            }
+          >
             <ClipList
               clips={clips}
               selectedClipId={selectedClipId}
               onSelect={setSelectedClipId}
-              onAdd={addClip}
               onRemove={removeClip}
               onChange={changeClip}
             />
@@ -152,7 +172,7 @@ export function App() {
             variant="primary"
             disabled={!source || clips.length === 0}
             onClick={() => setModal("export")}
-            className="w-full"
+            className="w-full shrink-0"
           >
             すべて書き出し{clips.length > 0 ? `(${clips.length}本)` : ""}
           </Button>
