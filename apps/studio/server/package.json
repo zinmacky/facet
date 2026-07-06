@@ -26,6 +26,6 @@
 		"tsx": "^4.19.1",
 		"@types/node": "^22.5.0",
 		"@types/archiver": "^6.0.2",
-		"vitest": "^2.0.5"
+		"vitest": "^3.2.6"
 	}
 }
