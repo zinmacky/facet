@@ -654,14 +654,24 @@ interface BulkScheduleProps {
 }
 
 function BulkSchedule(props: BulkScheduleProps) {
+  const [expanded, setExpanded] = useState(false);
   const selectedDays = Object.keys(props.weekdayTimes)
     .map(Number)
     .sort((a, b) => a - b);
 
   return (
     <section className="rounded-lg border border-line bg-elevated/40 p-3">
-      <h3 className="mb-2 text-xs font-semibold text-neutral-200">一括予約スケジュール</h3>
-      <div className="flex flex-col gap-3">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="flex w-full items-center gap-1.5 text-left text-xs font-semibold text-neutral-200"
+      >
+        <span className="text-[10px] text-neutral-500">{expanded ? "▼" : "▶"}</span>
+        一括予約スケジュール
+      </button>
+      {expanded && (
+      <div className="mt-2 flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
             開始日
@@ -753,6 +763,7 @@ function BulkSchedule(props: BulkScheduleProps) {
           {props.note && <span className="text-[11px] text-neutral-400">{props.note}</span>}
         </div>
       </div>
+      )}
     </section>
   );
 }
