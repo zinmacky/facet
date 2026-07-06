@@ -62,6 +62,8 @@ export async function encode(
   plan: FilterPlan,
   opts: EncodeOptions,
   hooks?: RunHooks,
+  /** libx264 フォールバックに切り替わったとき呼ばれる(UI 通知用)。 */
+  onFallback?: () => void,
 ): Promise<void> {
   await acquire();
   try {
@@ -75,6 +77,7 @@ export async function encode(
       if (hooks?.signal?.aborted) throw err;
       if (usesVideoToolbox(opts) && isEncoderOpenError(err)) {
         console.warn(`VideoToolbox 起動に失敗。libx264 で再試行します: ${opts.output}`);
+        onFallback?.();
         await run(plan, { ...opts, encoder: "libx264" }, hooks);
       } else {
         throw err;

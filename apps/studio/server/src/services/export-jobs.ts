@@ -15,6 +15,7 @@ import { encode } from "./encode.js";
 /** web(api.ts)の ExportEvent と一致させる契約。 */
 export type ExportEvent =
   | { type: "progress"; ratio: number; fps?: number }
+  | { type: "notice"; message: string }
   | { type: "done"; outputPath: string }
   | { type: "error"; message: string };
 
@@ -50,7 +51,7 @@ export function startExportJob(params: StartExportParams): string {
 
   const emit = (e: ExportEvent) => {
     job.events.push(e);
-    if (e.type !== "progress") job.finished = true;
+    if (e.type === "done" || e.type === "error") job.finished = true;
     for (const l of job.listeners) l(e);
   };
 
@@ -73,6 +74,7 @@ export function startExportJob(params: StartExportParams): string {
           fps: p.fps,
         }),
     },
+    () => emit({ type: "notice", message: "ソフトウェアエンコードで再試行中…" }),
   )
     .then(() => emit({ type: "done", outputPath: params.output }))
     .catch((err: unknown) =>

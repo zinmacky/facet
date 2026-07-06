@@ -29,6 +29,8 @@ interface TaskState {
   fps?: number;
   outputPath?: string;
   error?: string;
+  /** フォールバック等の一時通知(例: ソフトウェアエンコードで再試行中)。 */
+  notice?: string;
 }
 
 /**
@@ -91,6 +93,8 @@ export function ExportModal({ open, source, clips, onClose, onProceedToUpload }:
       const onEvent = (event: ExportEvent) => {
         if (event.type === "progress") {
           update({ status: "running", ratio: event.ratio, ...(event.fps !== undefined ? { fps: event.fps } : {}) });
+        } else if (event.type === "notice") {
+          update({ notice: event.message });
         } else if (event.type === "done") {
           update({ status: "done", ratio: 1, outputPath: event.outputPath });
         } else {
@@ -237,15 +241,25 @@ function ExportListItem({
       >
         {clip.name}.mp4
       </span>
-      <span
-        className={cn(
-          "shrink-0 text-[11px]",
-          status === "done" && "text-accent",
-          status === "error" && "text-danger",
-          status === "running" && "text-neutral-500",
+      <span className="flex shrink-0 items-center gap-1.5">
+        {status === "running" && task?.notice && (
+          <span
+            className="rounded bg-amber-400/15 px-1 text-[10px] font-medium text-amber-400"
+            title={task.notice}
+          >
+            SW
+          </span>
         )}
-      >
-        {status === "done" ? "完了" : status === "error" ? "失敗" : `${Math.round(ratio * 100)}%`}
+        <span
+          className={cn(
+            "text-[11px]",
+            status === "done" && "text-accent",
+            status === "error" && "text-danger",
+            status === "running" && "text-neutral-500",
+          )}
+        >
+          {status === "done" ? "完了" : status === "error" ? "失敗" : `${Math.round(ratio * 100)}%`}
+        </span>
       </span>
     </button>
   );
@@ -291,6 +305,7 @@ function ExportDetail({ clip, task }: { clip: Clip; task: TaskState | undefined 
             />
           </div>
           <span className="text-xs text-neutral-500">書き出し中… {Math.round(ratio * 100)}%</span>
+          {task?.notice && <span className="text-[11px] text-amber-400">{task.notice}</span>}
         </div>
       )}
 

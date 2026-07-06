@@ -148,6 +148,7 @@ export function postExport(req: ExportRequest): Promise<ExportAccepted> {
 /** SSE で流れてくる書き出し進捗イベント。 */
 export type ExportEvent =
   | { type: "progress"; ratio: number; fps?: number }
+  | { type: "notice"; message: string }
   | { type: "done"; outputPath: string; r2Key?: string }
   | { type: "error"; message: string };
 

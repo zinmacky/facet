@@ -82,6 +82,8 @@ interface RenderState {
   /** 生成時の設定シグネチャ(clipId|targetId|fit)。現在値と異なれば要更新。 */
   sig?: string;
   error?: string;
+  /** レンダリング中の一時通知(例: ソフトウェアエンコードで再試行中)。 */
+  notice?: string;
 }
 
 /** Output の設定シグネチャ。これが変わったらレンダリングは古い(要更新)。 */
@@ -351,13 +353,16 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
   const renderClip = (
     spec: ReturnType<typeof finalSpec>,
     output: string,
+    onNotice?: (message: string) => void,
   ): Promise<string> =>
     new Promise<string>((resolve, reject) => {
       postExport({ spec, input: source?.inputPath ?? "", output })
         .then(({ jobId }) => {
           const unsubscribe = subscribeExport(jobId, {
             onEvent: (event: ExportEvent) => {
-              if (event.type === "done") {
+              if (event.type === "notice") {
+                onNotice?.(event.message);
+              } else if (event.type === "done") {
                 unsubscribe();
                 resolve(event.outputPath);
               } else if (event.type === "error") {
@@ -408,7 +413,7 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
     const cached = renders.get(output.id);
     if (cached?.outputPath && cached.sig === sig) return cached.outputPath;
 
-    setRender(output.id, { rendering: true, error: undefined });
+    setRender(output.id, { rendering: true, error: undefined, notice: undefined });
     try {
       const spec = finalSpec(
         clip,
@@ -417,8 +422,10 @@ export function UploadModal({ open, source, clips, onClose, onBack }: UploadModa
         output.fit,
       );
       const outputName = `${clip.name}_${output.targetId}.mp4`;
-      const outputPath = await renderClip(spec, outputName);
-      setRender(output.id, { rendering: false, outputPath, sig, error: undefined });
+      const outputPath = await renderClip(spec, outputName, (msg) =>
+        setRender(output.id, { notice: msg }),
+      );
+      setRender(output.id, { rendering: false, outputPath, sig, error: undefined, notice: undefined });
       return outputPath;
     } catch (err) {
       setRender(output.id, {
@@ -1030,6 +1037,9 @@ function OutputCard(props: OutputCardProps) {
           >
             {rendering ? "生成中…" : outputPath ? "プレビュー更新" : "プレビュー生成"}
           </Button>
+          {rendering && render?.notice && (
+            <p className="text-[11px] text-amber-400">{render.notice}</p>
+          )}
           {render?.error && <p className="text-[11px] text-danger">{render.error}</p>}
         </div>
 
