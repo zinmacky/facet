@@ -1,6 +1,10 @@
 //! `reframe_start` / `reframe_cancel` コマンド: `media_core::reframe` を非同期に実行し、
 //! 進捗・完了を Tauri イベントで通知する。
 //!
+//! `reframe_cancel` はジョブ ID 空間を [`crate::commands::preview`] と共有しており、
+//! `preview_start` が返した `jobId` に対しても同じコマンドでキャンセルできる
+//! (両モジュールとも同一の [`JobsState`] に登録するため。`preview.rs` 冒頭コメント参照)。
+//!
 //! ## renderer 向け API
 //!
 //! ```ts
@@ -100,20 +104,24 @@ impl JobsState {
 	}
 
 	/// 新しい [`CancelToken`] を登録し、発行した `JobId` を返す。
-	fn register(&self, token: CancelToken) -> JobId {
+	///
+	/// `pub(crate)`: `commands::preview` がジョブ ID 空間を共有する
+	/// (`preview_start` も同じ [`JobsState`] に登録し、`reframe_cancel` を
+	/// そのままキャンセルコマンドとして再利用できるようにするため)。
+	pub(crate) fn register(&self, token: CancelToken) -> JobId {
 		let job_id = Uuid::new_v4().to_string();
 		self.lock().insert(job_id.clone(), token);
 		job_id
 	}
 
 	/// `job_id` に紐づく [`CancelToken`] の clone を返す(`Arc` 共有なので安価)。
-	fn get(&self, job_id: &str) -> Option<CancelToken> {
+	pub(crate) fn get(&self, job_id: &str) -> Option<CancelToken> {
 		self.lock().get(job_id).cloned()
 	}
 
 	/// `job_id` の [`CancelToken`] に `cancel()` を呼ぶ。未登録(既に完了済み含む)なら
 	/// `Err` を返す。
-	fn cancel(&self, job_id: &str) -> Result<(), String> {
+	pub(crate) fn cancel(&self, job_id: &str) -> Result<(), String> {
 		match self.lock().get(job_id) {
 			Some(token) => {
 				token.cancel();
@@ -126,7 +134,7 @@ impl JobsState {
 	}
 
 	/// ジョブ完了時にエントリを削除する。
-	fn remove(&self, job_id: &str) {
+	pub(crate) fn remove(&self, job_id: &str) {
 		self.lock().remove(job_id);
 	}
 }
@@ -248,8 +256,11 @@ fn run_job(app: &AppHandle, job_id: &str, input: &Path, output: &Path, spec: Edi
 }
 
 /// `job_id` のジョブをキャンセルする。次のループ境界チェック(パケット単位)で
-/// `media_core::reframe` が `MediaError::Cancelled` を返し、`reframe://error/{jobId}` が
-/// 発火する(一時出力は `media_core` 側で削除済み — `pipeline.rs` 冒頭コメント参照)。
+/// `media_core::reframe`(または `preview_start` 経由の `media_core::render_preview`)が
+/// `MediaError::Cancelled` を返し、`reframe://error/{jobId}` または `preview://error/{jobId}`
+/// が発火する(一時出力は `media_core` 側で削除済み — `pipeline.rs` 冒頭コメント参照)。
+/// `job_id` が `preview_start` の戻り値であっても、このコマンドをそのまま使う
+/// (ジョブ ID 空間の共有。`preview.rs` 冒頭コメント参照)。
 #[tauri::command]
 pub fn reframe_cancel(job_id: String, jobs: State<'_, JobsState>) -> Result<(), String> {
 	jobs.cancel(&job_id)
