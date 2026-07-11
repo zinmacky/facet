@@ -522,6 +522,11 @@ TS 側ツーリング(Biome / turbo)と干渉させない。
   `rust-cache`。
 - **CI ツールチェーン**: `setup-node` + Rust toolchain 併設。Tauri のシステム依存
   (Win は WebView2)に注意。既存 CI(Node 24)は維持。
+- **Rust 品質ゲート(Phase 2 で CI に追加)**: `cargo fmt --check`(規約は
+  `apps/desktop/rustfmt.toml` の `hard_tabs = true`)+ `cargo clippy -- -D warnings` +
+  **cargo-deny**(依存クレートのライセンス検査。GPL 系を deny リスト化し「GPL
+  コンポーネント不同梱」(§11-2)を CI で構造的に担保)+ `cargo audit`(脆弱性)。
+  Windows ランナーでの `cargo check` は libav ビルド回帰を兼ねる(§Phase2 作業 2-0)。
 - **署名**: mac は Apple Developer 証明書 + notarization、Win は Authenticode。証明書
   は CI シークレット管理。
 
