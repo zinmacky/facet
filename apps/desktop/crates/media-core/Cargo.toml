@@ -1,0 +1,10 @@
+[package]
+name = "media-core"
+version.workspace = true
+edition.workspace = true
+description = "libav ベースのメディアパイプライン(Phase 2 で実装)"
+
+[lib]
+name = "media_core"
+
+[dependencies]

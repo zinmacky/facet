@@ -5,6 +5,10 @@
 			"dependsOn": ["^build"],
 			"outputs": ["dist/**"]
 		},
+		"@facet/contract#build": {
+			"dependsOn": ["^build"],
+			"outputs": ["dist/**", "schema/**"]
+		},
 		"dev": {
 			"cache": false,
 			"persistent": true

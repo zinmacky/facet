@@ -1,0 +1,155 @@
+{
+	"$defs": {
+		"jobCreateResponse": {
+			"additionalProperties": false,
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/jobStatus"
+				}
+			},
+			"required": [
+				"id",
+				"status"
+			],
+			"type": "object"
+		},
+		"jobManifest": {
+			"additionalProperties": false,
+			"properties": {
+				"caption": {
+					"maxLength": 2200,
+					"type": "string"
+				},
+				"idempotencyKey": {
+					"format": "uuid",
+					"type": "string"
+				},
+				"mediaType": {
+					"$ref": "#/$defs/mediaType"
+				},
+				"platform": {
+					"const": "instagram",
+					"type": "string"
+				},
+				"publishAt": {
+					"exclusiveMinimum": 0,
+					"type": "integer"
+				},
+				"r2Key": {
+					"minLength": 1,
+					"type": "string"
+				}
+			},
+			"required": [
+				"idempotencyKey",
+				"platform",
+				"r2Key",
+				"mediaType",
+				"caption",
+				"publishAt"
+			],
+			"type": "object"
+		},
+		"jobRecord": {
+			"additionalProperties": false,
+			"properties": {
+				"attempts": {
+					"minimum": 0,
+					"type": "integer"
+				},
+				"caption": {
+					"maxLength": 2200,
+					"type": "string"
+				},
+				"createdAt": {
+					"type": "integer"
+				},
+				"id": {
+					"type": "string"
+				},
+				"idempotencyKey": {
+					"format": "uuid",
+					"type": "string"
+				},
+				"igContainerId": {
+					"type": [
+						"string",
+						"null"
+					]
+				},
+				"igMediaId": {
+					"type": [
+						"string",
+						"null"
+					]
+				},
+				"lastError": {
+					"type": [
+						"string",
+						"null"
+					]
+				},
+				"mediaType": {
+					"$ref": "#/$defs/mediaType"
+				},
+				"platform": {
+					"const": "instagram",
+					"type": "string"
+				},
+				"publishAt": {
+					"exclusiveMinimum": 0,
+					"type": "integer"
+				},
+				"r2Key": {
+					"minLength": 1,
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/jobStatus"
+				},
+				"updatedAt": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"idempotencyKey",
+				"platform",
+				"r2Key",
+				"mediaType",
+				"caption",
+				"publishAt",
+				"id",
+				"status",
+				"igContainerId",
+				"igMediaId",
+				"attempts",
+				"lastError",
+				"createdAt",
+				"updatedAt"
+			],
+			"type": "object"
+		},
+		"jobStatus": {
+			"enum": [
+				"pending",
+				"creating",
+				"processing",
+				"publishing",
+				"published",
+				"failed"
+			],
+			"type": "string"
+		},
+		"mediaType": {
+			"enum": [
+				"VIDEO",
+				"REELS"
+			],
+			"type": "string"
+		}
+	},
+	"$schema": "https://json-schema.org/draft/2019-09/schema#"
+}

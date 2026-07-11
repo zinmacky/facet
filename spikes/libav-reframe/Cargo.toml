@@ -1,0 +1,17 @@
+[package]
+name = "libav-reframe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# spikes/ は apps/desktop の Cargo workspace には含めない検証コード。
+# 空の [workspace] を明示し、誤って親ワークスペースに巻き込まれないようにする。
+[workspace]
+
+[dependencies]
+# システムの FFmpeg 8.x(libavcodec 62 系)に major.minor を合わせる
+ffmpeg-next = "8.1"
+
+[[bin]]
+name = "reframe"
+path = "src/reframe.rs"
