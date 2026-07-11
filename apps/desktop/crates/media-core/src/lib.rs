@@ -8,3 +8,12 @@
 //!
 //! Tauri(`src-tauri`)に依存しない独立 crate とし、単体テストの対象にする
 //! (docs/desktop-migration-plan.md §6.2 / §7)。ffmpeg-next はまだ追加しない。
+//!
+//! 予定モジュール(Wave 1〜4 で実ファイルと共に順次追加。空モジュールを先行
+//! コミットすると clippy が unused 系で騒ぐため、ここではコメントのみに留める):
+//! - Wave 1: decode / fit / encode / pipeline
+//! - Wave 2: trim / crop / encoder_select / probe(fit は拡張)
+//! - Wave 3: concurrency / cancel / progress / audio
+//! - Wave 4: preview
+
+pub mod spec;
