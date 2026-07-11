@@ -26,6 +26,7 @@ import {
 } from "../../lib/schedule";
 import { type PreviewState, usePreview } from "../../lib/usePreview";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
+import { clipPreviewSig } from "../../lib/clipSig";
 import { Modal } from "../../components/ui/Modal";
 import { Button } from "../../components/ui/Button";
 import { IconButton } from "../../components/ui/IconButton";
@@ -91,9 +92,21 @@ interface PubStatus {
 	message?: string;
 }
 
-/** Output の設定シグネチャ。これが変わったらレンダリングは古い(要更新)。 */
-function outputSig(post: UploadPost, output: UploadOutput): string {
-	return `${post.clipId}|${output.targetId}|${output.fit}`;
+/**
+ * Output の設定シグネチャ。これが変わったらレンダリングは古い(要更新)。
+ * `finalSpec` に効く clip.trim/crop/aspect(`clipPreviewSig`)も含める — clip 側の
+ * 編集(トリム/クロップ/アスペクト変更)後にプレビューが古いままになる P1 バグの修正
+ * (ExportScreen の clipPreviewSig と同じ考え方)。clip が見つからない場合(参照先
+ * clip が削除された等)は "missing" を返し、いずれにせよ再レンダリングが必要になる
+ * ようにする。
+ */
+function outputSig(
+	clip: Clip | undefined,
+	post: UploadPost,
+	output: UploadOutput,
+): string {
+	const clipSig = clip ? clipPreviewSig(clip) : "missing";
+	return `${post.clipId}|${clipSig}|${output.targetId}|${output.fit}`;
 }
 
 /**
@@ -508,7 +521,7 @@ export function UploadScreen({
 			output.id,
 			source.inputPath,
 			spec,
-			outputSig(post, output),
+			outputSig(clip, post, output),
 		);
 	};
 
@@ -1354,6 +1367,7 @@ function PostDetail(props: PostDetailProps) {
 					<OutputCard
 						key={output.id}
 						post={post}
+						clip={postClip}
 						output={output}
 						clipAspectLabel={clipAspectLabel}
 						canRemove={post.outputs.length > 1}
@@ -1378,6 +1392,8 @@ function PostDetail(props: PostDetailProps) {
 
 interface OutputCardProps {
 	post: UploadPost;
+	/** post.clipId の解決済み clip(finalSpec/outputSig に効く trim/crop/aspect を持つ)。 */
+	clip: Clip | undefined;
 	output: UploadOutput;
 	/** 元画面で決めたクロップ比のラベル(由来表示用)。 */
 	clipAspectLabel: string;
@@ -1392,7 +1408,7 @@ interface OutputCardProps {
 }
 
 function OutputCard(props: OutputCardProps) {
-	const { post, output, render, status, busy } = props;
+	const { post, clip, output, render, status, busy } = props;
 	const [postSettingsOpen, setPostSettingsOpen] = useState(false);
 	const target = useMemo(() => targetById(output.targetId), [output.targetId]);
 	const platform = target?.platform;
@@ -1402,7 +1418,7 @@ function OutputCard(props: OutputCardProps) {
 	// 現在設定と生成済みファイルの整合。fresh=最新、stale=設定変更後で要更新。
 	const rendering = render?.rendering ?? false;
 	const outputPath = render?.outputPath;
-	const sig = outputSig(post, output);
+	const sig = outputSig(clip, post, output);
 	const fresh = outputPath !== undefined && render?.sig === sig;
 	const stale = outputPath !== undefined && render?.sig !== sig;
 

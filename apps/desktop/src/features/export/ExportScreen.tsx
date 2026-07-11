@@ -14,6 +14,7 @@ import {
 } from "../../lib/tauri";
 import { type PreviewState, usePreview } from "../../lib/usePreview";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
+import { clipPreviewSig } from "../../lib/clipSig";
 import { Button } from "../../components/ui/Button";
 import { cn } from "../../components/ui/cn";
 import type { ExportSummary } from "../wizard/StepIndicator";
@@ -51,18 +52,6 @@ interface TaskState {
 	 * この結果は古い(要無効化) — clip 単位の細粒度無効化に使う。
 	 */
 	sig: string;
-}
-
-/**
- * masterSpec(クロップ内容)に影響する clip フィールドのシグネチャ。
- * これが変わればプレビュー/書き出し結果は古い(要更新) — usePreview の sig、
- * および results エントリの sig として使う。
- */
-function clipPreviewSig(clip: Clip): string {
-	const crop = clip.crop
-		? `${clip.crop.x}:${clip.crop.y}:${clip.crop.width}:${clip.crop.height}`
-		: "full";
-	return `${clip.trim.start}:${clip.trim.end}|${clip.aspect}|${crop}`;
 }
 
 /**

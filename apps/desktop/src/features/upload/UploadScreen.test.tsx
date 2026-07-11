@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { describe, expect, it } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -63,5 +64,82 @@ describe("UploadScreen: 一括書き出しのファイル名組み立て", () =>
 		emitMockEvent(`reframe://done/${job1}`, { encoder: "h264" });
 		emitMockEvent(`reframe://done/${job2}`, { encoder: "h264" });
 		await waitFor(() => expect(screen.getByText(/完了 2 \/ 2 件/)).toBeInTheDocument());
+	});
+});
+
+/**
+ * 実運用(App.tsx)は clips を親(App)が state で持ち、ClipEditor 側の変更で
+ * setClips するだけで UploadScreen 自身は再マウントされない。この Harness は
+ * その「親から渡される clips が変わる」状況をテスト側から直接再現する
+ * (ExportScreen.test.tsx の Harness と同じ考え方)。
+ */
+function Harness({ initialClips }: { initialClips: Clip[] }) {
+	const [clips, setClips] = useState(initialClips);
+	return (
+		<div>
+			<UploadScreen
+				active
+				source={SOURCE}
+				clips={clips}
+				resetToken={0}
+				onGoToExport={() => {}}
+			/>
+			<button
+				type="button"
+				onClick={() =>
+					setClips((prev) =>
+						prev.map((c) =>
+							c.id === "clip-1" ? { ...c, trim: { start: 1, end: c.trim.end } } : c,
+						),
+					)
+				}
+			>
+				mutate-clip-1-trim
+			</button>
+		</div>
+	);
+}
+
+/**
+ * outputSig(finalSpec に効く clip.trim/crop/aspect を含める修正)の固定テスト。
+ * 以前は post.clipId + targetId + fit のみを sig にしていたため、ターゲット/フィットを
+ * 変えずに clip 側(トリム/クロップ/アスペクト)だけ編集しても「要更新」にならず、
+ * 古い(編集前の内容の)プレビューがそのまま「最新」として表示され続けていた。
+ */
+describe("UploadScreen: outputSig は clip の trim/crop/aspect を反映する", () => {
+	it("プレビュー生成後に clip の trim を変更すると「要更新」表示になる", async () => {
+		const user = userEvent.setup();
+		renderWithProviders(<Harness initialClips={[CLIP]} />);
+
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "プレビュー生成" })).toBeInTheDocument(),
+		);
+		await user.click(screen.getByRole("button", { name: "プレビュー生成" }));
+
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith(
+				"preview_start",
+				expect.objectContaining({ input: SOURCE.inputPath }),
+			),
+		);
+		const callIndex = mockInvoke.mock.calls.findIndex(
+			([cmd]) => cmd === "preview_start",
+		);
+		const jobId = await mockInvoke.mock.results[callIndex]?.value;
+		emitMockEvent(`preview://done/${jobId}`, { path: "/cache/out.mp4" });
+
+		// 生成直後は最新(要更新表示なし)。
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "プレビュー更新" })).toBeInTheDocument(),
+		);
+		expect(screen.queryByText("(要更新)")).not.toBeInTheDocument();
+
+		// clip 側(ターゲット/フィットは変えず trim のみ)を編集する
+		// (App では ClipEditor の Timeline 操作に相当)。
+		await user.click(screen.getByRole("button", { name: "mutate-clip-1-trim" }));
+
+		// finalSpec に効く変更のため、Output 側の設定(target/fit)は何も変えていなくても
+		// 「要更新」になる。
+		await waitFor(() => expect(screen.getByText("(要更新)")).toBeInTheDocument());
 	});
 });
