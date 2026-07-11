@@ -49,14 +49,19 @@ pub async fn probe(path: String) -> Result<MediaInfo, String> {
 mod tests {
 	use super::*;
 
-	/// scratchpad の実ファイルで probe が MediaInfo を返すことを確認する
+	/// 実ファイルで probe が MediaInfo を返すことを確認する
 	/// (§検証: 実機/実ファイルでの結合確認の一部をユニットテストとして固定)。
-	/// ファイルが無い実行環境(このリポジトリの通常の CI 等)ではスキップする。
+	///
+	/// `FACET_DESKTOP_TEST_FIXTURE_MP4` 環境変数でパスを上書きできる(CI 等、開発中の
+	/// scratchpad が存在しない環境向け)。未設定時はこの Wave 5 実装時の scratchpad
+	/// にあった検証用ファイルにフォールバックする。いずれのパスも存在しない実行環境
+	/// (このリポジトリの通常の CI 等、facet-desktop は除外されている)ではスキップする。
 	#[test]
 	fn probe_blocking_reads_real_file() {
-		let path = Path::new(
-			r"C:\Users\zinzo\AppData\Local\Temp\claude\C--Users-zinzo-workspace-facet\dcb872a5-bd39-4a4b-a986-250c389ab11e\scratchpad\input_test_5s.mp4",
-		);
+		let fallback = r"C:\Users\zinzo\AppData\Local\Temp\claude\C--Users-zinzo-workspace-facet\dcb872a5-bd39-4a4b-a986-250c389ab11e\scratchpad\input_test_5s.mp4";
+		let owned = std::env::var("FACET_DESKTOP_TEST_FIXTURE_MP4")
+			.unwrap_or_else(|_| fallback.to_string());
+		let path = Path::new(&owned);
 		if !path.exists() {
 			eprintln!("skip: test fixture not found at {}", path.display());
 			return;
