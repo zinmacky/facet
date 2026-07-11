@@ -9,6 +9,12 @@
 // 元動画の選択・書き出し先フォルダの選択に使うネイティブダイアログで、
 // invoke コマンドではなくプラグイン権限(capabilities/default.json の
 // `dialog:default`)経由で renderer から直接呼ぶ(`@tauri-apps/plugin-dialog`)。
+//
+// bulk-download バグ修正: `tauri-plugin-opener` を追加する。studio 版は書き出し結果を
+// HTTP 経由の ZIP ダウンロードで渡すが、desktop には studio-server が存在しないため
+// 同じ経路は使えない(既知ギャップ)。代わりに実ファイルを直接書き出し、
+// 保存先フォルダを OS 既定のファイルマネージャで開く形にする
+// (`opener:default` 経由で renderer から直接呼ぶ。`@tauri-apps/plugin-opener`)。
 mod commands;
 
 use commands::reframe::JobsState;
@@ -22,6 +28,7 @@ fn ping() -> String {
 pub fn run() {
 	tauri::Builder::default()
 		.plugin(tauri_plugin_dialog::init())
+		.plugin(tauri_plugin_opener::init())
 		.manage(JobsState::default())
 		.invoke_handler(tauri::generate_handler![
 			ping,

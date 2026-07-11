@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { join } from "@tauri-apps/api/path";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { useMutation } from "@tanstack/react-query";
 import type { Clip } from "../../types";
 import { masterSpec } from "../../types";
@@ -11,7 +12,6 @@ import {
 	sanitizeFileName,
 	startReframe,
 } from "../../lib/tauri";
-import { downloadZip } from "../../lib/api";
 import { Modal } from "../../components/ui/Modal";
 import { Button } from "../../components/ui/Button";
 import { cn } from "../../components/ui/cn";
@@ -185,8 +185,16 @@ export function ExportModal({
 		return paths;
 	}, [clips, results]);
 
-	const zipMutation = useMutation({
-		mutationFn: () => downloadZip(donePaths, "facet-export.zip"),
+	// 書き出し先フォルダを OS 既定のファイルマネージャで開く。
+	// studio 版は書き出し結果を HTTP 経由の ZIP ダウンロードで渡すが、desktop には
+	// studio-server が存在しないため同じ経路は使えない(既知ギャップ)。書き出し済み
+	// ファイルは既に `dir` 直下へ実体として存在するので、ZIP 化せずフォルダを開くだけで足りる。
+	const openFolderMutation = useMutation({
+		mutationFn: async () => {
+			const dir = outputDirRef.current;
+			if (!dir) throw new Error("書き出し先フォルダが未選択です。");
+			await openPath(dir);
+		},
 	});
 
 	// open 時、または選択中 clip が clips から消えたときは先頭 clip を選択する。
@@ -260,21 +268,20 @@ export function ExportModal({
 							<Button
 								size="sm"
 								variant="secondary"
-								disabled={
-									donePaths.length === 0 || zipMutation.status === "pending"
-								}
-								onClick={() => zipMutation.mutate()}
+								disabled={openFolderMutation.status === "pending"}
+								onClick={() => openFolderMutation.mutate()}
 							>
-								{zipMutation.status === "pending"
-									? "圧縮中…"
-									: "一括ダウンロード(ZIP)"}
+								{openFolderMutation.status === "pending"
+									? "開いています…"
+									: "出力先フォルダを開く"}
 							</Button>
 							<span className="text-[11px] text-neutral-400">
 								完了 {donePaths.length} / {clips.length} 件
 							</span>
-							{zipMutation.isError && (
+							{openFolderMutation.isError && (
 								<span className="text-xs text-danger">
-									ZIP 失敗: {(zipMutation.error as Error).message}
+									フォルダを開けませんでした:{" "}
+									{(openFolderMutation.error as Error).message}
 								</span>
 							)}
 						</div>

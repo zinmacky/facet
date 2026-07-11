@@ -1,5 +1,6 @@
-import type { FitMode } from "@facet/core";
-import { useEffect, useMemo, useState } from "react";
+import type { EditSpec, FitMode } from "@facet/core";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { join } from "@tauri-apps/api/path";
 import { useMutation } from "@tanstack/react-query";
 import type { Clip, OutputTarget } from "../../types";
 import {
@@ -8,9 +9,15 @@ import {
 	finalSpec,
 	targetById,
 } from "../../types";
-import { downloadZip, publishInstagram, publishYoutube } from "../../lib/api";
 import type { MediaInfo } from "../../lib/tauri";
-import { convertFileSrc, startPreview } from "../../lib/tauri";
+import {
+	cancelJob,
+	convertFileSrc,
+	pickExportDirectory,
+	sanitizeFileName,
+	startPreview,
+	startReframe,
+} from "../../lib/tauri";
 import {
 	WEEKDAY_LABELS,
 	generateSchedule,
@@ -91,8 +98,31 @@ function outputSig(post: UploadPost, output: UploadOutput): string {
 	return `${post.clipId}|${output.targetId}|${output.fit}`;
 }
 
+/**
+ * 「フォルダへ一括書き出し」1 件(= 1 Output)ぶんの進行状態。
+ * `RenderState`(プレビュー品質・preview_start)とは別物で、実書き出し品質
+ * (reframe_start, 既定 8Mbps)をユーザーが選んだフォルダへ直接書き出す。
+ */
+interface BulkExportTask {
+	status: "running" | "done" | "error";
+	/** 0..1。見積り不能な区間は 0 のまま進む。 */
+	ratio: number;
+	outputPath?: string;
+	error?: string;
+	/** キャンセルボタン用。 */
+	jobId?: string;
+}
+
 const DEFAULT_TARGET_ID = "yt-shorts";
 const DEFAULT_FIT: FitMode = "crop";
+
+/**
+ * IG/YouTube への実投稿は Phase 3 まで desktop 版では未対応
+ * (studio-server の `/api/publish/*` に依存しており、desktop にはそのサーバが無い)。
+ * 投稿ボタン群は studio 版と UI 構造を保つため残しつつ、ここを false にして
+ * disabled + 説明表示のみ行う(HTTP を叩いて ECONNREFUSED になる経路を塞ぐ)。
+ */
+const PUBLISH_SUPPORTED = false;
 
 /** 既定の Output を生成する。 */
 function createOutput(): UploadOutput {
@@ -139,6 +169,12 @@ export function UploadModal({
 	);
 	// output.id → 最終レンダリング結果(プレビュー/DL/投稿で共有)。
 	const [renders, setRenders] = useState<Map<string, RenderState>>(new Map());
+	// output.id → 「フォルダへ一括書き出し」の進行状態(プレビュー品質の renders とは別軸)。
+	const [bulkExports, setBulkExports] = useState<Map<string, BulkExportTask>>(
+		new Map(),
+	);
+	// output.id → 実行中の一括書き出しジョブの購読解除関数(キャンセル・cleanup 用)。
+	const bulkUnsubsRef = useRef<Map<string, () => void>>(new Map());
 	const confirm = useConfirm();
 
 	// 一括予約スケジュールの入力状態。
@@ -168,7 +204,21 @@ export function UploadModal({
 		setAssignNote(null);
 		setOutputPresets([{ targetId: DEFAULT_TARGET_ID, fit: DEFAULT_FIT }]);
 		setPresetNote(null);
+		// 実行中の一括書き出しジョブを止めてから状態をクリアする。
+		for (const unsub of bulkUnsubsRef.current.values()) unsub();
+		bulkUnsubsRef.current.clear();
+		setBulkExports(new Map());
 	}, [open]);
+
+	// アンマウント時に一括書き出しの購読を解除する(モーダルを開いたまま親が
+	// アンマウントされるケースの保険。通常は上の open effect で解除済み)。
+	useEffect(() => {
+		const unsubs = bulkUnsubsRef.current;
+		return () => {
+			for (const unsub of unsubs.values()) unsub();
+			unsubs.clear();
+		};
+	}, []);
 
 	// open 時に posts を初期化(空のときのみ)。各 clip につき 1 Post(Output 1 つ)。
 	useEffect(() => {
@@ -510,12 +560,25 @@ export function UploadModal({
 	};
 
 	// ---- 投稿処理 ------------------------------------------------------------
+	// desktop 版は Phase 3 まで IG/YouTube への実投稿(studio-server の
+	// `/api/publish/*` HTTP エンドポイント)に対応しない(desktop に studio-server は
+	// 存在しないため、叩けば ECONNREFUSED になる)。ボタンは studio 版と同じ UI 構造を
+	// 保つため残しつつ disabled にし(PUBLISH_SUPPORTED 参照)、万一 disabled をすり抜けて
+	// 呼ばれても HTTP を叩かず即エラー表示に倒す防御的ガードをここに置く。
 
 	/** 1 Output を投稿する。publishAt は post.publishAt(全出力共通)を使う。 */
 	const publishOutput = async (
 		post: UploadPost,
 		output: UploadOutput,
 	): Promise<void> => {
+		if (!PUBLISH_SUPPORTED) {
+			setPubStatus(output.id, {
+				kind: "error",
+				message:
+					"投稿はデスクトップ版では未対応です(Phase 3 で対応予定)。書き出しは「フォルダへ一括書き出し」を使ってください。",
+			});
+			return;
+		}
 		if (!source) return;
 		const clip = clips.find((c) => c.id === post.clipId);
 		if (!clip) return;
@@ -533,7 +596,7 @@ export function UploadModal({
 			setPubStatus(output.id, { kind: "rendering" });
 			const outputPath = await ensureRendered(post, output);
 
-			// 2. 投稿。
+			// 2. 投稿(Phase 3 で studio-server 相当の native 実装に置き換える)。
 			setPubStatus(output.id, { kind: "publishing" });
 			await publishTo(target, post, output, clip.name, outputPath);
 
@@ -547,30 +610,18 @@ export function UploadModal({
 		}
 	};
 
-	/** プラットフォーム別の投稿。publishAt は post.publishAt。 */
+	/**
+	 * プラットフォーム別の投稿。Phase 3 で実装予定(現状は PUBLISH_SUPPORTED=false のため
+	 * publishOutput の早期リターンで到達しない)。
+	 */
 	const publishTo = async (
-		target: OutputTarget,
-		post: UploadPost,
-		output: UploadOutput,
-		clipName: string,
-		outputPath: string,
+		_target: OutputTarget,
+		_post: UploadPost,
+		_output: UploadOutput,
+		_clipName: string,
+		_outputPath: string,
 	): Promise<void> => {
-		if (target.platform === "youtube") {
-			await publishYoutube({
-				outputPath,
-				title: output.title || clipName,
-				description: output.description,
-				...(post.publishAt !== undefined ? { publishAt: post.publishAt } : {}),
-				privacyStatus: post.publishAt !== undefined ? "private" : "public",
-			});
-		} else {
-			await publishInstagram({
-				outputPath,
-				mediaType: "VIDEO",
-				caption: output.caption,
-				publishAt: post.publishAt ?? Date.now() + 5 * 60_000,
-			});
-		}
+		throw new Error("投稿はデスクトップ版では未対応です(Phase 3 で対応予定)。");
 	};
 
 	// 1 Post の全 Output を逐次投稿する。
@@ -603,30 +654,144 @@ export function UploadModal({
 
 	const busy = publishPostMutation.isPending || publishAllMutation.isPending;
 
-	// 一括ダウンロード可否の判定に使う全 Output 数。
+	// 一括書き出し可否の判定に使う全 Output 数。
 	const totalOutputs = posts.reduce((sum, p) => sum + p.outputs.length, 0);
 
-	// 一括ダウンロード: 押下時に全 Post の全 Output を ensureRendered(再利用)してから ZIP 化する。
-	const bulkDownloadMutation = useMutation({
-		mutationFn: async () => {
-			const paths: string[] = [];
+	const setBulkTask = (outputId: string, patch: Partial<BulkExportTask>) => {
+		setBulkExports((prev) => {
+			const next = new Map(prev);
+			const cur = next.get(outputId) ?? { status: "running" as const, ratio: 0 };
+			next.set(outputId, { ...cur, ...patch });
+			return next;
+		});
+	};
+
+	/**
+	 * フォルダへ一括書き出し: 保存先フォルダを選ばせたうえで、全 Post の全 Output を
+	 * 実書き出し品質(reframe_start, 既定 8Mbps)で直接そのフォルダへ書き出す。
+	 * studio 版は書き出し結果を HTTP 経由の ZIP ダウンロードで渡すが、desktop には
+	 * studio-server が存在しないため同じ経路は使えない(既知ギャップ)。
+	 * プレビュー品質(2Mbps, preview_start)の使い回しはしない — 投稿確認用と
+	 * 実書き出しは別ジョブとして扱う。
+	 * ジョブは同時に投入してよい(media-core 側のセマフォが並列上限を守る)。
+	 */
+	const bulkExportMutation = useMutation({
+		mutationFn: async (): Promise<
+			{ canceled: true } | { canceled: false; ok: number; total: number }
+		> => {
+			if (!source) throw new Error("元動画が未選択です。");
+			const dir = await pickExportDirectory("書き出し先フォルダを選択");
+			if (!dir) return { canceled: true };
+
+			// 対象の (post, output, clip, target) を洗い出す。
+			const tasks: {
+				output: UploadOutput;
+				clip: Clip;
+				target: OutputTarget;
+				spec: EditSpec;
+			}[] = [];
 			for (const post of posts) {
+				const clip = clips.find((c) => c.id === post.clipId);
+				if (!clip) continue;
 				for (const output of post.outputs) {
-					try {
-						paths.push(await ensureRendered(post, output));
-					} catch {
-						// 個別の生成失敗は renders.error に反映済み。スキップして続行。
-					}
+					const target = targetById(output.targetId);
+					if (!target) continue;
+					const spec = finalSpec(
+						clip,
+						{ width: source.probe.width, height: source.probe.height },
+						target,
+						output.fit,
+					);
+					tasks.push({ output, clip, target, spec });
 				}
 			}
-			if (paths.length === 0) {
-				throw new Error(
-					"ダウンロードできる出力がありません(生成に失敗しました)。",
-				);
+			if (tasks.length === 0) {
+				throw new Error("書き出せる出力がありません。");
 			}
-			await downloadZip(paths, "facet-upload.zip");
+
+			// ファイル名の重複を避ける(同一 clip に同一ターゲット+フィットの
+			// Output を複数追加した場合など)。
+			const used = new Map<string, number>();
+			const uniqueBaseName = (base: string): string => {
+				const count = (used.get(base) ?? 0) + 1;
+				used.set(base, count);
+				return count === 1 ? base : `${base}-${count}`;
+			};
+
+			setBulkExports(() => {
+				const next = new Map<string, BulkExportTask>();
+				for (const t of tasks) next.set(t.output.id, { status: "running", ratio: 0 });
+				return next;
+			});
+
+			const outcomes = await Promise.all(
+				tasks.map(async (t) => {
+					const base = uniqueBaseName(
+						`${sanitizeFileName(t.clip.name)}_${t.target.id}_${t.output.fit}`,
+					);
+					try {
+						const outputPath = await join(dir, `${base}.mp4`);
+						await new Promise<void>((resolve, reject) => {
+							let handle: { unsubscribe: () => void } | undefined;
+							startReframe(source.inputPath, outputPath, t.spec, {
+								onProgress: (progress) => {
+									setBulkTask(t.output.id, { ratio: (progress.percent ?? 0) / 100 });
+								},
+								onDone: () => {
+									handle?.unsubscribe();
+									bulkUnsubsRef.current.delete(t.output.id);
+									setBulkTask(t.output.id, { status: "done", ratio: 1, outputPath });
+									resolve();
+								},
+								onError: (message) => {
+									handle?.unsubscribe();
+									bulkUnsubsRef.current.delete(t.output.id);
+									setBulkTask(t.output.id, { status: "error", error: message });
+									reject(new Error(message));
+								},
+							})
+								.then((h) => {
+									handle = h;
+									bulkUnsubsRef.current.set(t.output.id, h.unsubscribe);
+									setBulkTask(t.output.id, { jobId: h.jobId });
+								})
+								.catch((err: unknown) => {
+									const message = err instanceof Error ? err.message : String(err);
+									setBulkTask(t.output.id, { status: "error", error: message });
+									reject(err instanceof Error ? err : new Error(message));
+								});
+						});
+						return true;
+					} catch {
+						// 個別の失敗は bulkExports.error に反映済み。スキップして続行。
+						return false;
+					}
+				}),
+			);
+
+			return {
+				canceled: false,
+				ok: outcomes.filter(Boolean).length,
+				total: tasks.length,
+			};
 		},
 	});
+
+	/** 実行中の一括書き出しジョブをすべてキャンセルする。 */
+	const cancelBulkExport = () => {
+		for (const task of bulkExports.values()) {
+			if (task.status === "running" && task.jobId) void cancelJob(task.jobId);
+		}
+	};
+
+	const bulkExportDone = useMemo(
+		() => [...bulkExports.values()].filter((t) => t.status === "done").length,
+		[bulkExports],
+	);
+	const bulkExportErrors = useMemo(
+		() => [...bulkExports.values()].filter((t) => t.status === "error").length,
+		[bulkExports],
+	);
 
 	// プレビュー生成(現在設定でレンダリング)。エラーは renders.error に反映。
 	const previewOutput = (post: UploadPost, output: UploadOutput) => {
@@ -644,7 +809,12 @@ export function UploadModal({
 			<Button
 				variant="primary"
 				onClick={() => publishAllMutation.mutate()}
-				disabled={busy || totalOutputs === 0}
+				disabled={busy || totalOutputs === 0 || !PUBLISH_SUPPORTED}
+				title={
+					PUBLISH_SUPPORTED
+						? undefined
+						: "デスクトップ版では未対応(Phase 3 で対応予定)"
+				}
 			>
 				すべて投稿
 			</Button>
@@ -665,6 +835,12 @@ export function UploadModal({
 			dismissable={!busy}
 		>
 			<div className="flex min-h-0 flex-1 flex-col gap-3">
+				{!PUBLISH_SUPPORTED && (
+					<div className="shrink-0 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-300">
+						投稿(YouTube / Instagram)はデスクトップ版では未対応です(Phase 3
+						で対応予定)。書き出し済みファイルは右の「フォルダへ一括書き出し」で取得してください。
+					</div>
+				)}
 				<div className="shrink-0">
 					<BulkSettings
 						startDate={startDate}
@@ -729,16 +905,35 @@ export function UploadModal({
 							<Button
 								variant="secondary"
 								size="sm"
-								onClick={() => bulkDownloadMutation.mutate()}
-								disabled={totalOutputs === 0 || bulkDownloadMutation.isPending}
+								onClick={() => bulkExportMutation.mutate()}
+								disabled={totalOutputs === 0 || bulkExportMutation.isPending}
 							>
-								{bulkDownloadMutation.isPending
-									? "生成中…"
-									: "一括ダウンロード(ZIP)"}
+								{bulkExportMutation.isPending
+									? "書き出し中…"
+									: "フォルダへ一括書き出し"}
 							</Button>
-							{bulkDownloadMutation.isError && (
+							{bulkExports.size > 0 && (
+								<div className="flex items-center justify-between gap-2">
+									<span className="text-[11px] text-neutral-400">
+										完了 {bulkExportDone} / {bulkExports.size} 件
+										{bulkExportErrors > 0
+											? `(失敗 ${bulkExportErrors} 件)`
+											: ""}
+									</span>
+									{bulkExportMutation.isPending && (
+										<Button
+											variant="ghost"
+											size="sm"
+											onClick={cancelBulkExport}
+										>
+											キャンセル
+										</Button>
+									)}
+								</div>
+							)}
+							{bulkExportMutation.isError && (
 								<span className="text-[11px] text-danger">
-									{(bulkDownloadMutation.error as Error).message}
+									{(bulkExportMutation.error as Error).message}
 								</span>
 							)}
 							<Button
@@ -1080,7 +1275,12 @@ function PostDetail(props: PostDetailProps) {
 						variant="primary"
 						size="sm"
 						onClick={props.onPublishPost}
-						disabled={busy}
+						disabled={busy || !PUBLISH_SUPPORTED}
+						title={
+							PUBLISH_SUPPORTED
+								? undefined
+								: "デスクトップ版では未対応(Phase 3 で対応予定)"
+						}
 					>
 						この投稿をすべて投稿
 					</Button>
@@ -1302,7 +1502,12 @@ function OutputCard(props: OutputCardProps) {
 							variant="primary"
 							size="sm"
 							onClick={props.onPublish}
-							disabled={busy}
+							disabled={busy || !PUBLISH_SUPPORTED}
+							title={
+								PUBLISH_SUPPORTED
+									? undefined
+									: "デスクトップ版では未対応(Phase 3 で対応予定)"
+							}
 						>
 							投稿
 						</Button>
