@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useMutation } from "@tanstack/react-query";
-import { pickFile, probeFile, type ProbeResult } from "./lib/api";
+import {
+	convertFileSrc,
+	type MediaInfo,
+	pickVideoFile,
+	probeFile,
+} from "./lib/tauri";
 import { formatTime } from "./lib/format";
 import type { Clip } from "./types";
 import { sourceBaseName } from "./types";
@@ -24,7 +29,9 @@ function isTauriRuntime(): boolean {
 /** 選択済みソース(実パス + probe 結果)。 */
 export interface Source {
 	inputPath: string;
-	probe: ProbeResult;
+	probe: MediaInfo;
+	/** `convertFileSrc(inputPath)`。ソース動画をそのまま `<video>` で再生する用(ClipEditor)。 */
+	videoSrc: string;
 }
 
 type ModalKind = "none" | "export" | "upload";
@@ -68,10 +75,14 @@ export function App() {
 
 	const pickMutation = useMutation({
 		mutationFn: async (): Promise<Source | null> => {
-			const picked = await pickFile();
+			const picked = await pickVideoFile();
 			if (picked.canceled || !picked.path) return null;
 			const probe = await probeFile(picked.path);
-			return { inputPath: picked.path, probe };
+			return {
+				inputPath: picked.path,
+				probe,
+				videoSrc: convertFileSrc(picked.path),
+			};
 		},
 		onSuccess: (result) => {
 			if (!result) return;
@@ -173,6 +184,7 @@ export function App() {
 						<ClipEditor
 							clip={selectedClip}
 							probe={source.probe}
+							videoSrc={source.videoSrc}
 							onChange={changeClip}
 						/>
 					) : (

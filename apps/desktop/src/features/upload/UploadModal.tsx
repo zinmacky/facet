@@ -8,16 +8,9 @@ import {
 	finalSpec,
 	targetById,
 } from "../../types";
-import type { ExportEvent, ProbeResult } from "../../lib/api";
-import {
-	downloadZip,
-	fileDownloadUrl,
-	fileRawUrl,
-	postExport,
-	publishInstagram,
-	publishYoutube,
-	subscribeExport,
-} from "../../lib/api";
+import { downloadZip, publishInstagram, publishYoutube } from "../../lib/api";
+import type { MediaInfo } from "../../lib/tauri";
+import { convertFileSrc, startPreview } from "../../lib/tauri";
 import {
 	WEEKDAY_LABELS,
 	generateSchedule,
@@ -43,7 +36,7 @@ import { cn } from "../../components/ui/cn";
 
 interface UploadModalProps {
 	open: boolean;
-	source: { inputPath: string; probe: ProbeResult } | null;
+	source: { inputPath: string; probe: MediaInfo } | null;
 	clips: Clip[];
 	onClose: () => void;
 	onBack: () => void;
@@ -417,32 +410,34 @@ export function UploadModal({
 
 	// ---- レンダリング --------------------------------------------------------
 
-	/** レンダリングを実行し、done で outputPath を返す。error / SSE エラーで reject。 */
-	const renderClip = (
-		spec: ReturnType<typeof finalSpec>,
-		output: string,
-		onNotice?: (message: string) => void,
-	): Promise<string> =>
+	/**
+	 * `preview_start`(低ビットレート・spec ハッシュキャッシュ)でレンダリングし、
+	 * done で生成(またはキャッシュヒット)したプレビューファイルの絶対パスを返す。
+	 * このモーダルの「最終プレビュー」欄・DL・投稿はすべてこの結果を再利用する
+	 * (実際の書き出し品質(reframe_start, 8Mbps)は EXPORT モーダル側が担う。
+	 * このため DL される実体は投稿確認用のプレビュー品質(2Mbps)である点に注意 —
+	 * Phase 3 で実際の IG/YouTube 投稿を実装する際に、投稿直前の本書き出しへの
+	 * 差し替えを検討する)。
+	 */
+	const renderClip = (spec: ReturnType<typeof finalSpec>): Promise<string> =>
 		new Promise<string>((resolve, reject) => {
-			postExport({ spec, input: source?.inputPath ?? "", output })
-				.then(({ jobId }) => {
-					const unsubscribe = subscribeExport(jobId, {
-						onEvent: (event: ExportEvent) => {
-							if (event.type === "notice") {
-								onNotice?.(event.message);
-							} else if (event.type === "done") {
-								unsubscribe();
-								resolve(event.outputPath);
-							} else if (event.type === "error") {
-								unsubscribe();
-								reject(new Error(event.message));
-							}
-						},
-						onError: () => {
-							unsubscribe();
-							reject(new Error("レンダリングの購読でエラーが発生しました。"));
-						},
-					});
+			if (!source) {
+				reject(new Error("元動画が未選択です。"));
+				return;
+			}
+			let handle: { unsubscribe: () => void } | undefined;
+			startPreview(source.inputPath, spec, {
+				onDone: (path) => {
+					handle?.unsubscribe();
+					resolve(path);
+				},
+				onError: (message) => {
+					handle?.unsubscribe();
+					reject(new Error(message));
+				},
+			})
+				.then((h) => {
+					handle = h;
 				})
 				.catch((err: unknown) => {
 					reject(err instanceof Error ? err : new Error(String(err)));
@@ -496,10 +491,7 @@ export function UploadModal({
 				target,
 				output.fit,
 			);
-			const outputName = `${clip.name}_${output.targetId}.mp4`;
-			const outputPath = await renderClip(spec, outputName, (msg) =>
-				setRender(output.id, { notice: msg }),
-			);
+			const outputPath = await renderClip(spec);
 			setRender(output.id, {
 				rendering: false,
 				outputPath,
@@ -1167,7 +1159,7 @@ function OutputCard(props: OutputCardProps) {
 						</span>
 						{fresh && outputPath && (
 							<a
-								href={fileDownloadUrl(outputPath)}
+								href={convertFileSrc(outputPath)}
 								download
 								className="text-[11px] text-accent hover:underline"
 							>
@@ -1178,7 +1170,7 @@ function OutputCard(props: OutputCardProps) {
 					{outputPath ? (
 						/* biome-ignore lint/a11y/useMediaCaption: 書き出し結果のプレビューで字幕データが存在しない */
 						<video
-							src={fileRawUrl(outputPath)}
+							src={convertFileSrc(outputPath)}
 							controls
 							className={cn(
 								"max-h-64 w-full rounded bg-black",

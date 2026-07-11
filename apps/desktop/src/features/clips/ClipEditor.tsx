@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import type { CropRect, Trim } from "@facet/core";
-import type { ProbeResult } from "../../lib/api";
+import type { MediaInfo } from "../../lib/tauri";
 import type { Clip } from "../../types";
 import { ASPECT_TEMPLATES, aspectRatio } from "../../types";
 import { formatTime } from "../../lib/format";
@@ -24,7 +24,9 @@ function isFullCrop(c: CropRect): boolean {
 
 interface ClipEditorProps {
 	clip: Clip;
-	probe: ProbeResult;
+	probe: MediaInfo;
+	/** `convertFileSrc(inputPath)` 済みのソース動画 URL。 */
+	videoSrc: string;
 	onChange: (clip: Clip) => void;
 }
 
@@ -33,7 +35,7 @@ interface ClipEditorProps {
  * プレビューに CropOverlay を重ね、アスペクト比テンプレートでクロップ枠の形を選び、
  * Timeline で見せる時間範囲(trim)を決める。メタデータや最終アスペクトは UPLOAD 側。
  */
-export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
+export function ClipEditor({ clip, probe, videoSrc, onChange }: ClipEditorProps) {
 	const videoRef = useRef<HTMLVideoElement>(null);
 	const [currentTime, setCurrentTime] = useState(0);
 	const [playing, setPlaying] = useState(false);
@@ -99,7 +101,7 @@ export function ClipEditor({ clip, probe, onChange }: ClipEditorProps) {
 					{/* biome-ignore lint/a11y/useMediaCaption: ユーザー生成動画のプレビューで字幕データが存在しない */}
 					<video
 						ref={videoRef}
-						src={probe.url}
+						src={videoSrc}
 						onTimeUpdate={(e) => {
 							const v = e.currentTarget;
 							setCurrentTime(v.currentTime);

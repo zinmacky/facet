@@ -4,6 +4,11 @@
 // reframe_start と同じ JobsState(ジョブ ID 空間)を共有する
 // (commands::preview モジュール冒頭コメント参照。preview_cancel という専用コマンドは
 // 存在せず、reframe_cancel をそのまま使う)。
+//
+// renderer 配線(Phase 2 最終接続): `tauri-plugin-dialog` を追加する。renderer が
+// 元動画の選択・書き出し先フォルダの選択に使うネイティブダイアログで、
+// invoke コマンドではなくプラグイン権限(capabilities/default.json の
+// `dialog:default`)経由で renderer から直接呼ぶ(`@tauri-apps/plugin-dialog`)。
 mod commands;
 
 use commands::reframe::JobsState;
@@ -16,6 +21,7 @@ fn ping() -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
 	tauri::Builder::default()
+		.plugin(tauri_plugin_dialog::init())
 		.manage(JobsState::default())
 		.invoke_handler(tauri::generate_handler![
 			ping,
