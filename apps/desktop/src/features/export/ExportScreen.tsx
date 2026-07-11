@@ -127,7 +127,15 @@ export function ExportScreen({
 			next.delete(id);
 			changed = true;
 		}
-		if (changed) setResults(next);
+		if (changed) {
+			setResults(next);
+			// resultsRef は次のレンダリング(=このコミット後)まで更新されない。
+			// このコミット内で後続実行される「起動」effect(下記、同じく [clips] 依存)が
+			// 無効化前の古い resultsRef を見て「まだ done/実行中」と誤判定し、再起動を
+			// スキップしてしまう(P1-7)。ここで同期的に ref も更新し、起動 effect が
+			// 無効化直後の最新状態を見られるようにする。
+			resultsRef.current = next;
+		}
 		// 選択中 clip が削除されていたら、selectedClipId 側は別 effect(下記)で
 		// 先頭 clip に補正される。
 	}, [clips, preview.remove]);
@@ -426,6 +434,10 @@ function ExportListItem({
 	selected: boolean;
 	onSelect: () => void;
 }) {
+	// task が undefined = まだ起動 effect に一度も拾われていない(=書き出しキュー待ち)。
+	// これを「実行中 0%」と誤表示すると、P1-7(起動 effect の取りこぼし)が発生した際に
+	// 気付けないため、「待機中」と正直に表示する。
+	const pending = task === undefined;
 	const status = task?.status ?? "running";
 	const ratio = task?.ratio ?? 0;
 
@@ -463,11 +475,13 @@ function ExportListItem({
 						status === "running" && "text-neutral-400",
 					)}
 				>
-					{status === "done"
-						? "完了"
-						: status === "error"
-							? "失敗"
-							: `${Math.round(ratio * 100)}%`}
+					{pending
+						? "待機中"
+						: status === "done"
+							? "完了"
+							: status === "error"
+								? "失敗"
+								: `${Math.round(ratio * 100)}%`}
 				</span>
 			</span>
 		</button>
@@ -609,6 +623,9 @@ function ExportDetail({
 	clip: Clip;
 	task: TaskState | undefined;
 }) {
+	// task が undefined = 起動 effect がまだ拾っていない(=書き出しキュー待ち)。
+	// 「書き出し中 0%」と混同しないよう正直に「待機中」を出す(P1-7 の温床だった箇所)。
+	const pending = task === undefined;
 	const status = task?.status ?? "running";
 	const ratio = task?.ratio ?? 0;
 	const boxRatio = aspectRatio(clip.aspect) ?? 16 / 9;
@@ -655,7 +672,9 @@ function ExportDetail({
 							</div>
 							<div className="flex items-center gap-2">
 								<span className="text-xs text-neutral-400">
-									書き出し中… {Math.round(ratio * 100)}%
+									{pending
+										? "待機中…"
+										: `書き出し中… ${Math.round(ratio * 100)}%`}
 								</span>
 								{task?.jobId && (
 									<Button

@@ -110,22 +110,11 @@ describe("ExportScreen: clip 単位シグネチャ無効化(clipPreviewSig)", ()
 		});
 		expect(within(listRow("clipB.mp4")).getByText("完了")).toBeInTheDocument();
 
-		// TODO(#発見バグ1): 無効化直後は再レンダリングが自動起動されない。
-		// 「無効化」effect(clips 依存)の setResults と「起動」effect(同じく clips 依存、
-		// resultsRef.current を読む)が同一コミット内で順に走るため、起動 effect は
-		// setResults 反映前の古い resultsRef(まだ旧 clip-a="done"を指す)を見て
-		// スキップしてしまう。そのため clip-a は見た目上「実行中 0%」(task が
-		// undefined なフォールバック表示)のまま実際にはジョブが起動されていない
-		// 状態で固まる。実運用では Timeline のドラッグ中は pointermove ごとに
-		// clips が変わり続けるため次の tick で自己修復するが、キーボード操作や
-		// SecondsInput の blur 確定のような「1 回だけの離散更新」ではこの
-		// スタック状態が顕在化しうる(修正は別タスクで検討、ここでは現状挙動を固定する)。
-		expect(reframeStartCalls()).toHaveLength(2);
-
-		// 実際には、直後にもう一度 clips 参照が変わる(=別の編集操作が入る)と、
-		// その時点で resultsRef が最新化されているため起動 effect が clip-a の
-		// 欠落に気づき、ようやく再起動される(job-3)。
-		await user.click(screen.getByRole("button", { name: "mutate-clip-a-trim" }));
+		// P1-7 修正の固定テスト: 無効化(clips 依存 effect)と起動(同じく clips 依存、
+		// resultsRef.current を読む)が同一コミット内で順に走っても、無効化 effect が
+		// resultsRef を同期更新するため、起動 effect は 1 回の操作だけで無効化された
+		// clip-a を確実に拾って再起動する(以前は 2 回操作しないと再起動されず、
+		// clip-a が「実行中 0%」の見た目で固まっていた)。
 		await waitFor(() => expect(reframeStartCalls()).toHaveLength(3));
 
 		emitMockEvent("reframe://done/job-3", { encoder: "h264" });
