@@ -24,6 +24,7 @@ pub mod encode;
 pub mod error;
 pub mod fit;
 pub mod pipeline;
+pub mod probe;
 pub mod spec;
 
 pub use error::{MediaError, Result};

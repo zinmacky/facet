@@ -42,6 +42,17 @@ pub enum MediaError {
 	#[error("映像ストリームが見つかりません: {path}")]
 	NoVideoStream { path: PathBuf },
 
+	/// 映像ストリームの寸法(width/height)が 0 以下(取得不可)。
+	/// TS 版 `probe.ts` の「映像の寸法を取得できません」に対応。
+	#[error("映像の寸法を取得できません: {path}")]
+	InvalidDimensions { path: PathBuf },
+
+	/// `decode::open_input` が返した `stream_index` を、`format::context::Input` から
+	/// 再度引けなかった(通常発生しない内部不整合。probe.rs がフレームレート/尺
+	/// 取得のためストリームを再取得する箇所で使用)。
+	#[error("入力ストリームが見つかりません(index={index}): {path}")]
+	InputStreamMissing { path: PathBuf, index: usize },
+
 	/// 映像ストリームのコーデックパラメータからデコーダを構築できなかった
 	/// (非対応コーデック等)。
 	#[error("デコーダを構築できませんでした ({source})")]
