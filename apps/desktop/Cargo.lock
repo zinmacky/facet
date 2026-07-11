@@ -1699,6 +1699,10 @@ dependencies = [
 [[package]]
 name = "media-core"
 version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "memchr"

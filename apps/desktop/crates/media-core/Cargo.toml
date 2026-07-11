@@ -2,9 +2,13 @@
 name = "media-core"
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 description = "libav ベースのメディアパイプライン(Phase 2 で実装)"
 
 [lib]
 name = "media_core"
 
 [dependencies]
+# ffmpeg-next はまだ追加しない(Wave 1 で decode/encode 実装時に追加予定)。
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

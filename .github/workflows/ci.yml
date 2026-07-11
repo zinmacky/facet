@@ -42,3 +42,106 @@ jobs:
       - name: Check contract schema is up to date
         if: matrix.task == 'build'
         run: git diff --exit-code -- packages/contract/schema/
+
+  # apps/desktop (Tauri v2 + crates/*) の Rust 品質ゲート。
+  # 対象は apps/desktop workspace(crates/media-core, crates/contract-rs, src-tauri)。
+  # 現時点(Phase 2 Wave 0)では media-core に ffmpeg-next 依存はまだ無く、
+  # libav 関連のビルド・リンクは Wave 1 以降で発生する見込み。ffmpeg-next 追加後は
+  # このジョブに FFmpeg(shared)のセットアップ(FFMPEG_DIR / LIBCLANG_PATH)を
+  # 追加する必要がある(docs/phase2-0-windows-setup.md §2 参照)。
+  rust:
+    name: rust (${{ matrix.task }})
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [fmt, clippy, test, deny, audit]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop -> target
+
+      # cargo-deny / cargo-audit は prebuilt binary を配布しているツール
+      # (taiki-e/install-action)で導入する。ソースからのビルドはコンパイル時間が
+      # 重いため避ける。
+      - name: Install cargo-deny / cargo-audit
+        if: matrix.task == 'deny' || matrix.task == 'audit'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+
+      - name: cargo fmt --check
+        if: matrix.task == 'fmt'
+        run: cargo fmt --check
+
+      # facet-desktop (src-tauri) は Tauri v2 の Linux バックエンド依存として
+      # gtk/webkit2gtk/gio 等の pkg-config 済みシステムライブラリ
+      # (libwebkit2gtk-4.1-dev, libgtk-3-dev 等)を要求するが、この ubuntu
+      # ランナーには未導入のため gio-sys/gobject-sys/glib-sys のビルドスクリプトが
+      # 「Package gio-2.0 was not found in the pkg-config search path」で失敗する
+      # (#17 実行時に確認: rust (clippy) / rust (test) が exit code 101 で失敗)。
+      # rust-windows-check ジョブと同様に crates/* のみを対象にして回避する。
+      # TODO(Phase 2 以降): facet-desktop 向けに Linux 依存を apt でセットアップし、
+      # このジョブの対象へ facet-desktop を戻す(パッケージング整備のタイミングで
+      # 着手するのが計画的にも自然。Phase 2 の検査対象は media-core が本丸)。
+      - name: cargo clippy --workspace (facet-desktop は Linux 依存未整備のため除外)
+        if: matrix.task == 'clippy'
+        run: cargo clippy --workspace --exclude facet-desktop -- -D warnings
+
+      - name: cargo test --workspace (facet-desktop は Linux 依存未整備のため除外)
+        if: matrix.task == 'test'
+        run: cargo test --workspace --exclude facet-desktop
+
+      # ライセンス検査: GPL/AGPL 系は allow リストに含めないことで既定 deny になる
+      # (apps/desktop/deny.toml 参照)。
+      # 注意: cargo-deny が判定できるのは Cargo.lock 経由の Rust クレートのみ。
+      # media-core が実行時に動的リンクする FFmpeg 共有ライブラリの GPL/LGPL は
+      # 対象外(配布ガードは Phase 4 課題。deny.toml 冒頭コメント参照)。
+      - name: cargo deny check
+        if: matrix.task == 'deny'
+        run: cargo deny check
+
+      - name: cargo audit
+        if: matrix.task == 'audit'
+        run: cargo audit
+
+  # Windows ランナーでのビルド回帰チェック専用ジョブ。
+  # GPU なしの CI VM では h264_amf / h264_mf の HW パス判定はできない
+  # (実機判定は docs/phase2-0-windows-setup.md §7 参照)。ここでは
+  # 「Windows(MSVC)向けに cargo check が通るか」というビルド・リンク回帰のみを見る。
+  # media-core に ffmpeg-next(ffmpeg-sys-next 経由で bindgen が libclang を要求)が
+  # 追加される Wave 1 以降は、このジョブに FFmpeg(shared)取得 + FFMPEG_DIR /
+  # LIBCLANG_PATH 設定を追加する必要がある。
+  rust-windows-check:
+    name: rust (windows cargo check)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop -> target
+
+      # facet-desktop (src-tauri) は Windows 向けビルド時に icons/icon.ico を要求するが
+      # 現状 icons/icon.png のみで未整備(Phase 0/1 スキャフォルド時点の既知ギャップ、
+      # Wave 0 のスコープ外)。crates/* のみを対象にして libav ビルド回帰を確認する。
+      - name: cargo check (crates/* のみ、facet-desktop は icon.ico 未整備のため除外)
+        run: cargo check --workspace --exclude facet-desktop
