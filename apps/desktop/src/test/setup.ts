@@ -50,6 +50,13 @@ class ResizeObserverStub {
 }
 vi.stubGlobal("ResizeObserver", ResizeObserverStub);
 
+// jsdom は <video>/<audio> の再生を実装していない(play/pause/load は
+// "Not implemented" 警告を吐く)。ClipEditor・usePauseVideosOnHide が
+// 呼ぶため、テスト出力を汚さないよう no-op へ差し替える。
+HTMLMediaElement.prototype.play = () => Promise.resolve();
+HTMLMediaElement.prototype.pause = () => {};
+HTMLMediaElement.prototype.load = () => {};
+
 afterEach(() => {
 	cleanup();
 	resetTauriMocks();

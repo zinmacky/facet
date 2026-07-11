@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render } from "@testing-library/react";
+import { render, type RenderResult } from "@testing-library/react";
 import { ConfirmProvider } from "../components/ui/confirm";
 
 /**
@@ -8,7 +8,7 @@ import { ConfirmProvider } from "../components/ui/confirm";
  * `useMutation` や `useConfirm` を使うコンポーネント(ExportScreen/UploadScreen/App)の
  * テストはこれを使う。
  */
-export function renderWithProviders(ui: ReactElement) {
+export function renderWithProviders(ui: ReactElement): RenderResult {
 	const queryClient = new QueryClient({
 		defaultOptions: {
 			queries: { retry: false },
