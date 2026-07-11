@@ -12,6 +12,7 @@
 4. [go/no-go チェックリスト](#4-gono-go-チェックリスト)
 5. [no-go 時の分岐手順](#5-no-go-時の分岐手順)
 6. [落とし穴集](#6-落とし穴集)
+7. [検証結果(実機, 2026-07-11)](#7-検証結果実機-2026-07-11)
 
 ---
 
@@ -213,11 +214,61 @@ crop-cover も合わせて確認する場合:
 - **静的(static)FFmpeg ビルドを使ってしまう**: static ビルドは `lib/*.lib` の構成が
   shared ビルドと異なり、`FFMPEG_DIR` 経由のリンクに失敗するか、意図せず GPL
   コンポーネントを静的に埋め込む形になる。必ず shared ビルドを使う。
+- **`Get-Counter` の単発呼び出しでは HW 稼働率が 0 に見える**: `Get-Counter` を
+  単発呼び出しの繰り返しで使うとレート系カウンタが常に 0 を返し、実際は HW が
+  稼働していても未稼働と誤判定しうる。`-SampleInterval 1 -MaxSamples N` を指定した
+  **1 コマンドでの連続サンプリング**で計測すること。
 
 ---
 
-検証日: (2026-07-11 時点で未実施。手順は文書化のみ。実機での go/no-go 結果は本節に
-追記する)
+## 7. 検証結果(実機, 2026-07-11)
+
+検証機: AMD Radeon RX 9070 XT 搭載 Win 実機。FFmpeg n8.1.2(shared)/ rustc 1.97.0
+(stable-msvc)/ VS Build Tools 17.14 / LLVM 22.1.8。
+
+### 7.1 ビルド・実行
+
+- `cargo build`: エラーなく完走(依存: `ffmpeg-next` 8.1.0 / `ffmpeg-sys-next` 8.1.0 /
+  `bindgen` 0.72.1)。
+- `reframe.exe`: `h264_mf` / `h264_amf` とも blur-pad / crop-cover でパニックなく完走。
+- `ffprobe`: 全出力で `width=1080 height=1920`、フレーム数は入力と完全一致
+  (150 / 900 / 1800)。`duration` は timebase 丸めで約 0.033 秒短いのみ(実用上問題なし)。
+
+### 7.2 HW パス確認(最重要の知見)
+
+- `h264_mf` を空 Dictionary で open すると **ソフトウェア MFT
+  (`H264 Encoder MFT`)に静かにフォールバック**し、GPU Engine カウンタに一切
+  出現しない(§6 落とし穴の実証。3 回試行で再現)。ffmpeg 上 `h264_mf` は
+  capabilities が `hybrid` で `-hw_encoding` の既定が `false` のため。
+- `hw_encoding=1` を明示すると MFT が **`AMDh264Encoder`** に切り替わり、GPU の
+  video codec engine が約 29.5〜32.7% で持続稼働(`Get-Counter` の連続サンプリング
+  で計測)。→ スパイク(`spikes/libav-reframe/src/reframe.rs`)に本修正を反映済み。
+- `h264_amf` は video codec engine 最大 37.17% で HW 稼働を確認。
+
+### 7.3 品質参考値
+
+同一入力 60 秒・8Mbps・同一 filtergraph の libx264 CLI 参照との SSIM
+(timebase 不一致警告付きの参考値):
+
+| エンコーダ | SSIM All |
+|---|---|
+| `h264_amf` | 0.9988 |
+| `h264_mf`(`hw_encoding=1`) | 0.9829 |
+
+### 7.4 判定
+
+**暫定 go**。§4 チェックリストのうち目視再生による品質確認のみ未実施 —
+実施後に確定する。
+
+### 7.5 推奨方針
+
+Windows 既定エンコーダは `h264_amf` を第一候補とする(画質・HW 稼働とも優位)。
+`h264_mf` + `hw_encoding=1` は AMF 不可環境向けのフォールバック候補
+(採用時はレート制御チューニングを要検討)。
+
+---
+
+検証日: 2026-07-11(AMD Radeon RX 9070 XT 実機。結果は §7 参照)。
 
 この手順は 2-0 実施時に最新化する(FFmpeg ビルドの配布 URL・バージョン、
 Visual Studio / LLVM のインストーラ ID は時間経過で変わりうるため、実施前に

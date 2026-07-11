@@ -74,7 +74,11 @@ fn build_filter(
 	let mut graph = filter::Graph::new();
 
 	let sar = decoder.aspect_ratio();
-	let sar = if sar.numerator() == 0 { Rational(1, 1) } else { sar };
+	let sar = if sar.numerator() == 0 {
+		Rational(1, 1)
+	} else {
+		sar
+	};
 	let args = format!(
 		"width={}:height={}:pix_fmt={}:time_base={}:pixel_aspect={}",
 		decoder.width(),
@@ -117,8 +121,14 @@ fn main() {
 	let input = env::args().nth(1).expect("missing input");
 	let output = env::args().nth(2).expect("missing output");
 	let fit = env::args().nth(3).unwrap_or_else(|| "blur-pad".to_string());
-	let tw: u32 = env::args().nth(4).and_then(|s| s.parse().ok()).unwrap_or(1080);
-	let th: u32 = env::args().nth(5).and_then(|s| s.parse().ok()).unwrap_or(1920);
+	let tw: u32 = env::args()
+		.nth(4)
+		.and_then(|s| s.parse().ok())
+		.unwrap_or(1080);
+	let th: u32 = env::args()
+		.nth(5)
+		.and_then(|s| s.parse().ok())
+		.unwrap_or(1920);
 	// エンコーダ名(第6引数)。既定は mac の HW 第一候補 h264_videotoolbox。
 	// Windows 検証では h264_mf / h264_amf を渡す(§Phase2 作業 2-0)。
 	let encoder_name = env::args()
@@ -156,10 +166,7 @@ fn main() {
 	let enc_format = pick_pixel_format(codec);
 	let enc_pix_name = pix_fmt_name(enc_format);
 
-	let global_header = octx
-		.format()
-		.flags()
-		.contains(format::Flags::GLOBAL_HEADER);
+	let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 	let mut ost = octx.add_stream(codec).unwrap();
 
 	let mut enc = codec::context::Context::new_with_codec(codec)
@@ -176,7 +183,14 @@ fn main() {
 	if global_header {
 		enc.set_flags(codec::Flags::GLOBAL_HEADER);
 	}
-	let opened = enc.open_with(Dictionary::new()).expect("open encoder failed");
+	// h264_mf は ffmpeg 上 hybrid 扱いで既定 -hw_encoding=false のため、
+	// 明示的に "1" を渡さないとソフトウェア MFT にフォールバックする(§Phase2-0 追試)。
+	// 他のエンコーダ(h264_amf 等)の挙動は変えない。
+	let mut enc_opts = Dictionary::new();
+	if encoder_name == "h264_mf" {
+		enc_opts.set("hw_encoding", "1");
+	}
+	let opened = enc.open_with(enc_opts).expect("open encoder failed");
 	ost.set_parameters(&opened);
 	let mut encoder = opened;
 
@@ -202,13 +216,20 @@ fn main() {
 		}
 	};
 
-	let mut pull_filtered =
-		|graph: &mut filter::Graph, encoder: &mut encoder::Video, octx: &mut format::context::Output| {
-			while graph.get("out").unwrap().sink().frame(&mut filtered).is_ok() {
-				encoder.send_frame(&filtered).unwrap();
-				drain_encoder(encoder, octx);
-			}
-		};
+	let mut pull_filtered = |graph: &mut filter::Graph,
+	                         encoder: &mut encoder::Video,
+	                         octx: &mut format::context::Output| {
+		while graph
+			.get("out")
+			.unwrap()
+			.sink()
+			.frame(&mut filtered)
+			.is_ok()
+		{
+			encoder.send_frame(&filtered).unwrap();
+			drain_encoder(encoder, octx);
+		}
+	};
 
 	for (stream, packet) in ictx.packets() {
 		if stream.index() != ist_index {
