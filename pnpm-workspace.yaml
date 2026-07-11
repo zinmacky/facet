@@ -3,3 +3,4 @@ packages:
   - "apps/studio/server"
   - "apps/studio/web"
   - "apps/scheduler"
+  - "apps/desktop"
