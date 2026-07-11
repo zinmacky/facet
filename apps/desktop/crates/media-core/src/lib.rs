@@ -21,6 +21,7 @@
 
 pub mod decode;
 pub mod encode;
+pub mod encoder_select;
 pub mod error;
 pub mod fit;
 pub mod pipeline;
