@@ -15,7 +15,6 @@ import {
 	convertFileSrc,
 	pickExportDirectory,
 	sanitizeFileName,
-	startPreview,
 	startReframe,
 } from "../../lib/tauri";
 import {
@@ -24,6 +23,7 @@ import {
 	localInputToMs,
 	msToLocalInput,
 } from "../../lib/schedule";
+import { type PreviewState, usePreview } from "../../lib/usePreview";
 import { Modal } from "../../components/ui/Modal";
 import { Button } from "../../components/ui/Button";
 import { IconButton } from "../../components/ui/IconButton";
@@ -81,18 +81,6 @@ interface PubStatus {
 	message?: string;
 }
 
-/** 最終レンダリング結果。プレビュー表示・DL・投稿で再利用する。 */
-interface RenderState {
-	rendering: boolean;
-	/** 生成済みファイルの絶対パス。 */
-	outputPath?: string;
-	/** 生成時の設定シグネチャ(clipId|targetId|fit)。現在値と異なれば要更新。 */
-	sig?: string;
-	error?: string;
-	/** レンダリング中の一時通知(例: ソフトウェアエンコードで再試行中)。 */
-	notice?: string;
-}
-
 /** Output の設定シグネチャ。これが変わったらレンダリングは古い(要更新)。 */
 function outputSig(post: UploadPost, output: UploadOutput): string {
 	return `${post.clipId}|${output.targetId}|${output.fit}`;
@@ -100,7 +88,7 @@ function outputSig(post: UploadPost, output: UploadOutput): string {
 
 /**
  * 「フォルダへ一括書き出し」1 件(= 1 Output)ぶんの進行状態。
- * `RenderState`(プレビュー品質・preview_start)とは別物で、実書き出し品質
+ * `PreviewState`(プレビュー品質・preview_start、usePreview フック)とは別物で、実書き出し品質
  * (reframe_start, 既定 8Mbps)をユーザーが選んだフォルダへ直接書き出す。
  */
 interface BulkExportTask {
@@ -167,9 +155,10 @@ export function UploadModal({
 	const [pubStatuses, setPubStatuses] = useState<Map<string, PubStatus>>(
 		new Map(),
 	);
-	// output.id → 最終レンダリング結果(プレビュー/DL/投稿で共有)。
-	const [renders, setRenders] = useState<Map<string, RenderState>>(new Map());
-	// output.id → 「フォルダへ一括書き出し」の進行状態(プレビュー品質の renders とは別軸)。
+	// output.id → 最終レンダリング結果(プレビュー/DL/投稿で共有)。preview_start ベースの
+	// 共通フック(ExportModal の「クロップ内容プレビュー」と同じ実装)。
+	const preview = usePreview();
+	// output.id → 「フォルダへ一括書き出し」の進行状態(プレビュー品質の preview とは別軸)。
 	const [bulkExports, setBulkExports] = useState<Map<string, BulkExportTask>>(
 		new Map(),
 	);
@@ -197,7 +186,7 @@ export function UploadModal({
 		setPosts([]);
 		setSelectedPostId(null);
 		setPubStatuses(new Map());
-		setRenders(new Map());
+		preview.reset();
 		setStartDate("");
 		setEndDate("");
 		setWeekdayTimes({});
@@ -208,7 +197,7 @@ export function UploadModal({
 		for (const unsub of bulkUnsubsRef.current.values()) unsub();
 		bulkUnsubsRef.current.clear();
 		setBulkExports(new Map());
-	}, [open]);
+	}, [open, preview.reset]);
 
 	// アンマウント時に一括書き出しの購読を解除する(モーダルを開いたまま親が
 	// アンマウントされるケースの保険。通常は上の open effect で解除済み)。
@@ -348,11 +337,7 @@ export function UploadModal({
 			next.delete(outputId);
 			return next;
 		});
-		setRenders((prev) => {
-			const next = new Map(prev);
-			next.delete(outputId);
-			return next;
-		});
+		preview.remove(outputId);
 	};
 
 	// ---- 曜日・時刻リスト操作 ------------------------------------------------
@@ -451,7 +436,7 @@ export function UploadModal({
 			})),
 		);
 		// 旧 output.id に紐づく生成結果・状態は破棄する。
-		setRenders(new Map());
+		preview.reset();
 		setPubStatuses(new Map());
 		setPresetNote(
 			`全 ${posts.length} 投稿に ${outputPresets.length} 出力先を適用しました。`,
@@ -459,49 +444,6 @@ export function UploadModal({
 	};
 
 	// ---- レンダリング --------------------------------------------------------
-
-	/**
-	 * `preview_start`(低ビットレート・spec ハッシュキャッシュ)でレンダリングし、
-	 * done で生成(またはキャッシュヒット)したプレビューファイルの絶対パスを返す。
-	 * このモーダルの「最終プレビュー」欄・DL・投稿はすべてこの結果を再利用する
-	 * (実際の書き出し品質(reframe_start, 8Mbps)は EXPORT モーダル側が担う。
-	 * このため DL される実体は投稿確認用のプレビュー品質(2Mbps)である点に注意 —
-	 * Phase 3 で実際の IG/YouTube 投稿を実装する際に、投稿直前の本書き出しへの
-	 * 差し替えを検討する)。
-	 */
-	const renderClip = (spec: ReturnType<typeof finalSpec>): Promise<string> =>
-		new Promise<string>((resolve, reject) => {
-			if (!source) {
-				reject(new Error("元動画が未選択です。"));
-				return;
-			}
-			let handle: { unsubscribe: () => void } | undefined;
-			startPreview(source.inputPath, spec, {
-				onDone: (path) => {
-					handle?.unsubscribe();
-					resolve(path);
-				},
-				onError: (message) => {
-					handle?.unsubscribe();
-					reject(new Error(message));
-				},
-			})
-				.then((h) => {
-					handle = h;
-				})
-				.catch((err: unknown) => {
-					reject(err instanceof Error ? err : new Error(String(err)));
-				});
-		});
-
-	const setRender = (outputId: string, patch: Partial<RenderState>) => {
-		setRenders((prev) => {
-			const next = new Map(prev);
-			const base = next.get(outputId) ?? { rendering: false };
-			next.set(outputId, { ...base, ...patch });
-			return next;
-		});
-	};
 
 	const setPubStatus = (outputId: string, status: PubStatus) => {
 		setPubStatuses((prev) => {
@@ -512,8 +454,13 @@ export function UploadModal({
 	};
 
 	/**
-	 * 現在の設定でレンダリング済みなら再利用し、無い/古い場合のみ再レンダリングする。
-	 * プレビュー生成・ダウンロード・投稿で共有する。
+	 * 現在の設定でレンダリング済みなら再利用し、無い/古い場合のみ `preview_start`
+	 * (低ビットレート・spec ハッシュキャッシュ)で再レンダリングする。
+	 * このモーダルの「最終プレビュー」欄・DL・投稿はすべてこの結果を再利用する
+	 * (実際の書き出し品質(reframe_start, 8Mbps)は EXPORT モーダル側が担う。
+	 * このため DL される実体は投稿確認用のプレビュー品質(2Mbps)である点に注意 —
+	 * Phase 3 で実際の IG/YouTube 投稿を実装する際に、投稿直前の本書き出しへの
+	 * 差し替えを検討する)。
 	 */
 	const ensureRendered = async (
 		post: UploadPost,
@@ -525,38 +472,18 @@ export function UploadModal({
 		const target = targetById(output.targetId);
 		if (!target) throw new Error("出力ターゲットが無効です。");
 
-		const sig = outputSig(post, output);
-		const cached = renders.get(output.id);
-		if (cached?.outputPath && cached.sig === sig) return cached.outputPath;
-
-		setRender(output.id, {
-			rendering: true,
-			error: undefined,
-			notice: undefined,
-		});
-		try {
-			const spec = finalSpec(
-				clip,
-				{ width: source.probe.width, height: source.probe.height },
-				target,
-				output.fit,
-			);
-			const outputPath = await renderClip(spec);
-			setRender(output.id, {
-				rendering: false,
-				outputPath,
-				sig,
-				error: undefined,
-				notice: undefined,
-			});
-			return outputPath;
-		} catch (err) {
-			setRender(output.id, {
-				rendering: false,
-				error: err instanceof Error ? err.message : String(err),
-			});
-			throw err;
-		}
+		const spec = finalSpec(
+			clip,
+			{ width: source.probe.width, height: source.probe.height },
+			target,
+			output.fit,
+		);
+		return preview.ensure(
+			output.id,
+			source.inputPath,
+			spec,
+			outputSig(post, output),
+		);
 	};
 
 	// ---- 投稿処理 ------------------------------------------------------------
@@ -871,7 +798,7 @@ export function UploadModal({
 								key={selectedPost.id}
 								post={selectedPost}
 								clips={clips}
-								renders={renders}
+								renders={preview.states}
 								pubStatuses={pubStatuses}
 								busy={busy}
 								onPatchPost={(patch) => patchPost(selectedPost.id, patch)}
@@ -1208,7 +1135,7 @@ function BulkSettings(props: BulkSettingsProps) {
 interface PostDetailProps {
 	post: UploadPost;
 	clips: Clip[];
-	renders: Map<string, RenderState>;
+	renders: Map<string, PreviewState>;
 	pubStatuses: Map<string, PubStatus>;
 	busy: boolean;
 	onPatchPost: (patch: Partial<UploadPost>) => void;
@@ -1324,7 +1251,7 @@ interface OutputCardProps {
 	/** 元画面で決めたクロップ比のラベル(由来表示用)。 */
 	clipAspectLabel: string;
 	canRemove: boolean;
-	render: RenderState | undefined;
+	render: PreviewState | undefined;
 	status: PubStatus | undefined;
 	busy: boolean;
 	onPatch: (patch: Partial<UploadOutput>) => void;
@@ -1395,9 +1322,6 @@ function OutputCard(props: OutputCardProps) {
 								? "プレビュー更新"
 								: "プレビュー生成"}
 					</Button>
-					{rendering && render?.notice && (
-						<p className="text-[11px] text-amber-400">{render.notice}</p>
-					)}
 					{render?.error && (
 						<p className="text-[11px] text-danger">{render.error}</p>
 					)}
