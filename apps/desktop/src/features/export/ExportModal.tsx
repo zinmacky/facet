@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import type { Clip } from "../../types";
-import { masterSpec } from "../../types";
+import { aspectRatio, masterSpec } from "../../types";
 import type { ExportEvent, ProbeResult } from "../../lib/api";
 import {
 	downloadZip,
@@ -180,9 +180,23 @@ export function ExportModal({
 			open={open}
 			title="書き出し(クロップ内容)"
 			onClose={onClose}
-			widthClass="max-w-7xl"
+			widthClass="max-w-4xl"
 			footer={
 				<>
+					{!started && (
+						<p className="mr-auto max-w-xs truncate text-xs text-neutral-400">
+							{clips.length} 本を書き出します(順次レンダリング)。
+						</p>
+					)}
+					{!started && (
+						<Button
+							variant="primary"
+							disabled={clips.length === 0}
+							onClick={() => setStarted(true)}
+						>
+							書き出しを開始({clips.length}本)
+						</Button>
+					)}
 					<Button variant="ghost" onClick={onClose}>
 						閉じる
 					</Button>
@@ -196,79 +210,67 @@ export function ExportModal({
 				</>
 			}
 		>
-			{!started ? (
-				<div className="flex min-h-[60vh] flex-col items-center justify-center gap-4 text-center">
-					<p className="max-w-sm text-sm text-neutral-300">
-						{clips.length}{" "}
-						本の切り抜きをマスター動画(クロップ内容そのもの)として
-						書き出します。開始すると各切り抜きのレンダリングを順次実行します。
-					</p>
-					<Button
-						variant="primary"
-						disabled={clips.length === 0}
-						onClick={() => setStarted(true)}
-					>
-						書き出しを開始({clips.length}本)
-					</Button>
+			<div className="flex gap-4">
+				{/* 中央: 選択中 clip のプレビュー */}
+				<div className="flex min-w-0 flex-1 flex-col gap-2">
+					{selectedClip ? (
+						<ExportPreview
+							clip={selectedClip}
+							task={results.get(selectedClip.id)}
+							started={started}
+						/>
+					) : (
+						<p className="text-sm text-neutral-400">
+							書き出す切り抜きがありません。
+						</p>
+					)}
 				</div>
-			) : (
-				<div className="flex min-h-[60vh] gap-3">
-					{/* 中央: 選択中 clip の詳細 */}
-					<div className="flex min-w-0 flex-1 flex-col gap-3">
-						{selectedClip ? (
-							<ExportDetail
-								clip={selectedClip}
-								task={results.get(selectedClip.id)}
-							/>
-						) : (
-							<p className="text-sm text-neutral-400">
-								書き出す切り抜きがありません。
-							</p>
+
+				{/* 右: 一括DL + clip 一覧 */}
+				<div className="flex w-60 shrink-0 flex-col gap-3 border-l border-line pl-4">
+					<div className="flex flex-col gap-1.5">
+						<Button
+							size="sm"
+							variant="secondary"
+							disabled={
+								donePaths.length === 0 || zipMutation.status === "pending"
+							}
+							onClick={() => zipMutation.mutate()}
+						>
+							{zipMutation.status === "pending"
+								? "圧縮中…"
+								: "一括ダウンロード(ZIP)"}
+						</Button>
+						<span className="text-[11px] text-neutral-400">
+							完了 {donePaths.length} / {clips.length} 件
+						</span>
+						{zipMutation.isError && (
+							<span className="text-xs text-danger">
+								ZIP 失敗: {(zipMutation.error as Error).message}
+							</span>
 						)}
 					</div>
 
-					{/* 右: 一括DL + clip 一覧 */}
-					<div className="flex w-64 shrink-0 flex-col gap-3 border-l border-line pl-3">
-						<div className="flex flex-col gap-1.5">
-							<Button
-								size="sm"
-								variant="secondary"
-								disabled={
-									donePaths.length === 0 || zipMutation.status === "pending"
-								}
-								onClick={() => zipMutation.mutate()}
-							>
-								{zipMutation.status === "pending"
-									? "圧縮中…"
-									: "一括ダウンロード(ZIP)"}
-							</Button>
-							<span className="text-[11px] text-neutral-400">
-								完了 {donePaths.length} / {clips.length} 件
-							</span>
-							{zipMutation.isError && (
-								<span className="text-xs text-danger">
-									ZIP 失敗: {(zipMutation.error as Error).message}
-								</span>
-							)}
-						</div>
-
-						<div className="flex flex-col gap-1 overflow-y-auto">
-							{clips.map((clip) => (
-								<ExportListItem
-									key={clip.id}
-									clip={clip}
-									task={results.get(clip.id)}
-									selected={clip.id === selectedClipId}
-									onSelect={() => setSelectedClipId(clip.id)}
-								/>
-							))}
-						</div>
+					<div className="flex flex-col gap-1 overflow-y-auto">
+						{clips.map((clip) => (
+							<ExportListItem
+								key={clip.id}
+								clip={clip}
+								task={results.get(clip.id)}
+								selected={clip.id === selectedClipId}
+								onSelect={() => setSelectedClipId(clip.id)}
+								started={started}
+							/>
+						))}
 					</div>
 				</div>
-			)}
+			</div>
 		</Modal>
 	);
 }
+
+/** clip の実行ステータス。開始前は task が無いため idle として表示する(表示専用の派生値)。 */
+type DisplayStatus = "idle" | TaskState["status"];
 
 /** 右側一覧の 1 行(clip 名 + ステータス)。 */
 function ExportListItem({
@@ -276,13 +278,15 @@ function ExportListItem({
 	task,
 	selected,
 	onSelect,
+	started,
 }: {
 	clip: Clip;
 	task: TaskState | undefined;
 	selected: boolean;
 	onSelect: () => void;
+	started: boolean;
 }) {
-	const status = task?.status ?? "running";
+	const status: DisplayStatus = !started ? "idle" : (task?.status ?? "running");
 	const ratio = task?.ratio ?? 0;
 
 	return (
@@ -316,35 +320,48 @@ function ExportListItem({
 						"text-[11px]",
 						status === "done" && "text-ok",
 						status === "error" && "text-danger",
-						status === "running" && "text-neutral-400",
+						(status === "running" || status === "idle") &&
+							"text-neutral-400",
 					)}
 				>
 					{status === "done"
 						? "完了"
 						: status === "error"
 							? "失敗"
-							: `${Math.round(ratio * 100)}%`}
+							: status === "idle"
+								? "待機中"
+								: `${Math.round(ratio * 100)}%`}
 				</span>
 			</span>
 		</button>
 	);
 }
 
-/** 中央: 選択中 clip 1 本ぶんの書き出し詳細。 */
-function ExportDetail({
+/**
+ * 中央: 選択中 clip 1 本ぶんのプレビュー。
+ * クロップのアスペクト比に合わせた枠を主役にし、開始前/進行中/完了/失敗のいずれも
+ * 同じ枠の中身を差し替えるだけで表示する(枠のサイズが変わらず無駄な余白が出ない)。
+ */
+function ExportPreview({
 	clip,
 	task,
+	started,
 }: {
 	clip: Clip;
 	task: TaskState | undefined;
+	started: boolean;
 }) {
-	const status = task?.status ?? "running";
+	const status: DisplayStatus = !started ? "idle" : (task?.status ?? "running");
 	const ratio = task?.ratio ?? 0;
+	const boxRatio = aspectRatio(clip.aspect) ?? 16 / 9;
 
 	return (
-		<div className="flex flex-col gap-3">
+		<div className="flex flex-col gap-2">
 			<div className="flex items-center justify-between gap-2">
-				<h3 className="truncate font-mono text-sm text-neutral-100">
+				<h3
+					className="truncate font-mono text-sm text-neutral-100"
+					title={`${clip.name}.mp4`}
+				>
 					{clip.name}.mp4
 				</h3>
 				{status === "running" && task?.fps !== undefined && (
@@ -354,45 +371,55 @@ function ExportDetail({
 				)}
 			</div>
 
-			{status === "done" && task?.outputPath && (
-				<>
-					{/* biome-ignore lint/a11y/useMediaCaption: 書き出し結果のプレビューで字幕データが存在しない */}
-					<video
-						controls
-						src={fileRawUrl(task.outputPath)}
-						className="max-h-[46vh] w-full rounded bg-black"
-					/>
-					<a
-						href={fileDownloadUrl(task.outputPath)}
-						download
-						className="inline-flex h-7 w-fit items-center justify-center rounded-md bg-elevated px-2.5 text-xs font-medium text-neutral-200 hover:bg-line"
-					>
-						ダウンロード
-					</a>
-				</>
-			)}
-
-			{status === "running" && (
-				<div className="flex flex-col gap-1.5">
-					<div className="h-1.5 w-full overflow-hidden rounded-full bg-panel">
-						<div
-							className="h-full rounded-full bg-accent transition-[width]"
-							style={{ width: `${Math.round(ratio * 100)}%` }}
+			<div className="flex h-[52vh] w-full items-center justify-center rounded-lg bg-panel/40">
+				<div
+					style={{ aspectRatio: boxRatio }}
+					className="flex h-full max-w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/40"
+				>
+					{status === "done" && task?.outputPath ? (
+						// biome-ignore lint/a11y/useMediaCaption: 書き出し結果のプレビューで字幕データが存在しない
+						<video
+							controls
+							src={fileRawUrl(task.outputPath)}
+							className="h-full w-full object-contain"
 						/>
-					</div>
-					<span className="text-xs text-neutral-400">
-						書き出し中… {Math.round(ratio * 100)}%
-					</span>
-					{task?.notice && (
-						<span className="text-[11px] text-amber-400">{task.notice}</span>
+					) : status === "error" ? (
+						<p className="max-w-[80%] text-center text-sm text-danger">
+							{task?.error ?? "書き出しに失敗しました。"}
+						</p>
+					) : status === "idle" ? (
+						<p className="max-w-[70%] text-center text-xs text-neutral-500">
+							「書き出しを開始」を押すとレンダリングを開始します
+						</p>
+					) : (
+						<div className="flex w-2/3 flex-col items-center gap-1.5 text-center">
+							<div className="h-1.5 w-full overflow-hidden rounded-full bg-panel">
+								<div
+									className="h-full rounded-full bg-accent transition-[width]"
+									style={{ width: `${Math.round(ratio * 100)}%` }}
+								/>
+							</div>
+							<span className="text-xs text-neutral-400">
+								書き出し中… {Math.round(ratio * 100)}%
+							</span>
+							{task?.notice && (
+								<span className="text-[11px] text-amber-400">
+									{task.notice}
+								</span>
+							)}
+						</div>
 					)}
 				</div>
-			)}
+			</div>
 
-			{status === "error" && (
-				<p className="text-sm text-danger">
-					{task?.error ?? "書き出しに失敗しました。"}
-				</p>
+			{status === "done" && task?.outputPath && (
+				<a
+					href={fileDownloadUrl(task.outputPath)}
+					download
+					className="inline-flex h-7 w-fit items-center justify-center rounded-md bg-elevated px-2.5 text-xs font-medium text-neutral-200 hover:bg-line"
+				>
+					ダウンロード
+				</a>
 			)}
 		</div>
 	);
