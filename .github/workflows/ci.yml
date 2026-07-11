@@ -45,10 +45,11 @@ jobs:
 
   # apps/desktop (Tauri v2 + crates/*) の Rust 品質ゲート。
   # 対象は apps/desktop workspace(crates/media-core, crates/contract-rs, src-tauri)。
-  # 現時点(Phase 2 Wave 0)では media-core に ffmpeg-next 依存はまだ無く、
-  # libav 関連のビルド・リンクは Wave 1 以降で発生する見込み。ffmpeg-next 追加後は
-  # このジョブに FFmpeg(shared)のセットアップ(FFMPEG_DIR / LIBCLANG_PATH)を
-  # 追加する必要がある(docs/phase2-0-windows-setup.md §2 参照)。
+  # Phase 2 Wave 1 で media-core に ffmpeg-next(ffmpeg-sys-next 経由で bindgen が
+  # libclang を要求)を追加したため、clippy/test タスクは事前に FFmpeg(shared)を
+  # 取得して FFMPEG_DIR を設定する(docs/phase2-0-windows-setup.md §2 参照。GPL shared
+  # ビルドは検証専用。配布ビルドは Phase 4 で LGPL 構成に切り替える、deny.toml 冒頭
+  # コメント参照)。fmt/deny/audit はコンパイルを伴わないため FFmpeg 取得をスキップする。
   rust:
     name: rust (${{ matrix.task }})
     runs-on: ubuntu-latest
@@ -71,6 +72,44 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop -> target
+
+      # clippy/test は media-core 経由で ffmpeg-next をビルド・リンクするため、
+      # BtbN の FFmpeg n8.1 linux64-gpl-shared を取得してキャッシュする(検証専用の
+      # GPL shared ビルド。配布は対象外、deny.toml 冒頭コメント参照)。
+      - name: Cache FFmpeg (linux64 gpl shared)
+        if: matrix.task == 'clippy' || matrix.task == 'test'
+        id: cache-ffmpeg-linux
+        uses: actions/cache@v4
+        with:
+          path: apps/desktop/.ffmpeg
+          key: ffmpeg-n8.1-linux64-gpl-shared-8.1
+
+      - name: Download FFmpeg (linux64 gpl shared)
+        if: (matrix.task == 'clippy' || matrix.task == 'test') && steps.cache-ffmpeg-linux.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          mkdir -p .ffmpeg-tmp
+          curl -fsSL -o .ffmpeg-tmp/ffmpeg.tar.xz \
+            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-shared-8.1.tar.xz
+          mkdir -p .ffmpeg
+          tar -xf .ffmpeg-tmp/ffmpeg.tar.xz -C .ffmpeg --strip-components=1
+          rm -rf .ffmpeg-tmp
+
+      # ffmpeg-sys-next のビルドスクリプト(bindgen)が libclang を要求する。
+      - name: Install libclang (bindgen 用)
+        if: matrix.task == 'clippy' || matrix.task == 'test'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+
+      - name: Set FFMPEG_DIR / LIBCLANG_PATH / LD_LIBRARY_PATH
+        if: matrix.task == 'clippy' || matrix.task == 'test'
+        run: |
+          set -eu
+          ffmpeg_dir="$(pwd)/.ffmpeg"
+          echo "FFMPEG_DIR=$ffmpeg_dir" >> "$GITHUB_ENV"
+          # cargo test は実行時にも共有ライブラリを解決する必要がある。
+          echo "LD_LIBRARY_PATH=$ffmpeg_dir/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          libclang_dir="$(dirname "$(find /usr/lib -maxdepth 4 -name 'libclang.so*' 2>/dev/null | head -n1)")"
+          echo "LIBCLANG_PATH=$libclang_dir" >> "$GITHUB_ENV"
 
       # cargo-deny / cargo-audit は prebuilt binary を配布しているツール
       # (taiki-e/install-action)で導入する。ソースからのビルドはコンパイル時間が
@@ -120,9 +159,10 @@ jobs:
   # GPU なしの CI VM では h264_amf / h264_mf の HW パス判定はできない
   # (実機判定は docs/phase2-0-windows-setup.md §7 参照)。ここでは
   # 「Windows(MSVC)向けに cargo check が通るか」というビルド・リンク回帰のみを見る。
-  # media-core に ffmpeg-next(ffmpeg-sys-next 経由で bindgen が libclang を要求)が
-  # 追加される Wave 1 以降は、このジョブに FFmpeg(shared)取得 + FFMPEG_DIR /
-  # LIBCLANG_PATH 設定を追加する必要がある。
+  # Phase 2 Wave 1 で media-core に ffmpeg-next(ffmpeg-sys-next 経由で bindgen が
+  # libclang を要求)が追加されたため、FFmpeg(shared)の取得 + FFMPEG_DIR /
+  # LIBCLANG_PATH 設定を行う(検証専用の GPL shared ビルド。配布は Phase 4 で
+  # LGPL 構成に切り替える、deny.toml 冒頭コメント参照)。
   rust-windows-check:
     name: rust (windows cargo check)
     runs-on: windows-latest
@@ -139,6 +179,36 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop -> target
+
+      - name: Cache FFmpeg (win64 gpl shared)
+        id: cache-ffmpeg-windows
+        uses: actions/cache@v4
+        with:
+          path: apps/desktop/.ffmpeg
+          key: ffmpeg-n8.1-win64-gpl-shared-8.1
+
+      - name: Download FFmpeg (win64 gpl shared)
+        if: steps.cache-ffmpeg-windows.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $dest = "$PWD\.ffmpeg-tmp"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip" -OutFile "$dest\ffmpeg.zip"
+          Expand-Archive -Path "$dest\ffmpeg.zip" -DestinationPath $dest -Force
+          $inner = Get-ChildItem $dest -Directory | Select-Object -First 1 -ExpandProperty FullName
+          Move-Item -Path $inner -Destination "$PWD\.ffmpeg"
+          Remove-Item -Recurse -Force $dest
+
+      # windows-latest ランナーには LLVM が既定でプリインストールされている
+      # (C:\Program Files\LLVM。ランナーイメージの構成が変わった場合はここを更新する)。
+      # ffmpeg-sys-next のビルドスクリプト(bindgen)が libclang を要求するため明示する。
+      - name: Set FFMPEG_DIR / LIBCLANG_PATH / PATH
+        shell: pwsh
+        run: |
+          $ffmpegDir = (Resolve-Path ".ffmpeg").Path
+          echo "FFMPEG_DIR=$ffmpegDir" >> $env:GITHUB_ENV
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+          echo "$ffmpegDir\bin" >> $env:GITHUB_PATH
 
       # facet-desktop (src-tauri) は Windows 向けビルド時に icons/icon.ico を要求するが
       # 現状 icons/icon.png のみで未整備(Phase 0/1 スキャフォルド時点の既知ギャップ、
