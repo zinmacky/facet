@@ -11,7 +11,7 @@ import { formatTime } from "./lib/format";
 import type { Clip } from "./types";
 import { sourceBaseName } from "./types";
 import { ClipList } from "./features/clips/ClipList";
-import { ClipEditor } from "./features/clips/ClipEditor";
+import { ClipEditor, type ClipEditorHandle } from "./features/clips/ClipEditor";
 import { ExportModal } from "./features/export/ExportModal";
 import { UploadModal } from "./features/upload/UploadModal";
 import { Card } from "./components/ui/Card";
@@ -60,6 +60,9 @@ export function App() {
 	// 連番カウンタ。削除後の再採番でも名前が衝突しないよう、単調増加させる。
 	const clipSeqRef = useRef(1);
 	const confirm = useConfirm();
+	// 元動画プレーヤー(ClipEditor)を命令的に操作するための参照。
+	// 「すべて書き出し」押下時に再生を止めるために使う。
+	const clipEditorRef = useRef<ClipEditorHandle>(null);
 
 	// Tauri invoke 疎通確認(Phase 1 の受け入れ基準)。開発用の小さな表示としてフッタに残す。
 	const [pingResult, setPingResult] = useState("(未実行)");
@@ -182,6 +185,7 @@ export function App() {
 						<Placeholder text="元動画を選択してください。" />
 					) : selectedClip ? (
 						<ClipEditor
+							ref={clipEditorRef}
 							clip={selectedClip}
 							probe={source.probe}
 							videoSrc={source.videoSrc}
@@ -221,7 +225,13 @@ export function App() {
 					<Button
 						variant="primary"
 						disabled={!source || clips.length === 0}
-						onClick={() => setModal("export")}
+						onClick={() => {
+							// 書き出しモーダルを開くのと同時に、元動画の再生を止める
+							// (書き出し内容はクロップ済みの音声のみで、この再生音とは無関係だが、
+							// バックグラウンドで鳴り続けるのを避ける)。
+							clipEditorRef.current?.pause();
+							setModal("export");
+						}}
 						className="w-full shrink-0"
 					>
 						すべて書き出し{clips.length > 0 ? `(${clips.length}本)` : ""}
