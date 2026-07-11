@@ -226,6 +226,39 @@ fn open_audio_encoder(
 	})
 }
 
+/// 音声フレームの `index` 番目のプレーンを、呼び出し側が指定した `len` バイトの
+/// スライスとして読む(`AudioFifo::push` から使う)。
+///
+/// **なぜ必要か**: FFmpeg の `AVFrame` は音声フレームについて
+/// 「`linesize[0]` のみが有効で、planar フォーマットの全プレーンは同じ長さを持つ
+/// (`linesize[1..]` は未設定のまま常に 0)」という規約を持つ
+/// (`AVFrame.linesize` のドキュメントコメント参照)。ところが
+/// `ffmpeg_next::frame::Audio::data(index)` は `index` 番目の `linesize[index]` を
+/// そのままスライス長として使うため、`index >= 1` のプレーンに対しては**常に
+/// 長さ 0 のスライスを返す**(実機検証で発見。ステレオ以上の音声で右チャンネル
+/// 以降のサンプルがまるごと読み落とされ、[`AudioFifo::push`] の `take` 計算が
+/// 0 に潰れて **音声が全チャンネル分丸ごと FIFO に積まれず消失する** 不具合の
+/// 直接原因だった — モノラルの実機検証で見逃されていたのはプレーンが 1 個しか
+/// 無く `index >= 1` のパスを一度も通らないため)。
+///
+/// Safety: `index < frame.planes()` であること、`len` が実際に割り当てられた
+/// プレーンのバイト数(= `frame.data(0).len()`、全プレーン共通)以下であることを
+/// 呼び出し側が保証する。ポインタ自体は `av_frame_get_buffer` が
+/// `frame::Audio::new` の時点で正しく確保しているため、長さだけを
+/// 生ポインタ経由で読み直せば安全に取得できる。
+unsafe fn audio_plane_bytes(frame: &frame::Audio, index: usize, len: usize) -> &[u8] {
+	let ptr = (*frame.as_ptr()).data[index];
+	std::slice::from_raw_parts(ptr, len)
+}
+
+/// [`audio_plane_bytes`] の書き込み版(`AudioFifo::pop` から使う)。
+///
+/// Safety: [`audio_plane_bytes`] と同じ契約。
+unsafe fn audio_plane_bytes_mut(frame: &mut frame::Audio, index: usize, len: usize) -> &mut [u8] {
+	let ptr = (*frame.as_mut_ptr()).data[index];
+	std::slice::from_raw_parts_mut(ptr, len)
+}
+
 /// リサンプル後のサンプルを蓄積し、エンコーダのフレームサイズ単位で取り出すための
 /// 最小限の FIFO(モジュール冒頭コメント「FIFO バッファリング」参照)。
 ///
@@ -274,15 +307,24 @@ impl AudioFifo {
 		}
 		let stride = self.stride();
 		let ideal = samples * stride;
-		// 全プレーンの中で最小のプレーン長に揃える(通常は全プレーン同じ長さになる
-		// はずだが、万一の不整合でも「全プレーン同じサンプル数」という FIFO の不変
-		// 条件を崩さないための防御。境界を割った端数バイトは単に取り込まれず、
-		// `available_samples()` のカウントにも入らない — パニックはしない)。
-		let take =
-			(0..self.planes.len()).fold(ideal, |acc, index| acc.min(frame.data(index).len()));
+		// 音声フレームは `linesize[0]` のみが有効で、全プレーン共通の長さを表す
+		// (`audio_plane_bytes` 冒頭コメント参照)。`frame.data(0)` は index=0 なので
+		// `ffmpeg_next` 側のバグの影響を受けず、そのまま全プレーン共通の上限として
+		// 使える。境界を割った端数バイトは単に取り込まれず、`available_samples()`
+		// のカウントにも入らない — パニックはしない、という元の防御方針は維持する。
+		let take = ideal.min(frame.data(0).len());
 		for (index, plane_buf) in self.planes.iter_mut().enumerate() {
-			let data = frame.data(index);
-			plane_buf.extend_from_slice(&data[..take]);
+			let data: &[u8] = if index == 0 {
+				&frame.data(0)[..take]
+			} else {
+				// Safety: `index < self.planes.len() <= frame.planes()`
+				// (`AudioFifo::new` が同じ `channel_layout.channels()` から
+				// `planes.len()` を導出しているため一致する)。`take` は直上で
+				// `frame.data(0).len()`(全プレーン共通の実際の割り当てサイズ)
+				// でクランプ済みなので範囲外読み出しにはならない。
+				unsafe { audio_plane_bytes(frame, index, take) }
+			};
+			plane_buf.extend_from_slice(data);
 		}
 	}
 
@@ -301,15 +343,29 @@ impl AudioFifo {
 		let take = want_samples * self.stride();
 		let mut out = frame::Audio::new(self.format, want_samples, self.channel_layout);
 		out.set_rate(self.rate);
+		// 音声フレームは `linesize[0]` のみが有効(push 側と同じ規約。
+		// `audio_plane_bytes` 冒頭コメント参照)。`out` は直前に新規確保したばかりの
+		// フレームで、`av_frame_get_buffer` は planar 音声の全プレーンを同じ長さで
+		// 確保するため、`out.data(0).len()`(index=0 なので `ffmpeg_next` 側のバグの
+		// 影響を受けない)を全プレーン共通の上限として使える。
+		let plane_capacity = out.data(0).len();
 		for (index, plane_buf) in self.planes.iter_mut().enumerate() {
 			// `take` は `available_samples() >= want_samples` チェック済みのため
-			// 理論上必ず `plane_buf.len()` 以下だが、`data_mut` 側のプレーン長との
-			// 不一致でパニックしないよう二重に `min` でクランプする。
-			let take = take.min(plane_buf.len());
+			// 理論上必ず `plane_buf.len()` 以下だが、確保済みプレーンの実サイズとの
+			// 不一致でパニックしないよう二重に `min` でクランプする(元の防御方針を維持)。
+			let take = take.min(plane_buf.len()).min(plane_capacity);
 			let chunk: Vec<u8> = plane_buf.drain(0..take).collect();
-			let dst = out.data_mut(index);
-			let copy_len = take.min(dst.len());
-			dst[..copy_len].copy_from_slice(&chunk[..copy_len]);
+			let dst: &mut [u8] = if index == 0 {
+				&mut out.data_mut(0)[..take]
+			} else {
+				// Safety: `index < self.planes.len() <= out.planes()`
+				// (`AudioFifo::new` と同じ `channel_layout` から構築しているため
+				// channels が一致する)。`take <= plane_capacity ==
+				// out.data(0).len()`(全プレーン共通の実際の割り当てサイズ)なので
+				// 範囲外書き込みにはならない。
+				unsafe { audio_plane_bytes_mut(&mut out, index, take) }
+			};
+			dst.copy_from_slice(&chunk);
 		}
 		Some(out)
 	}
@@ -358,6 +414,13 @@ pub struct AudioPipeline {
 	/// モジュール冒頭コメント「pts の再基準化」参照。
 	next_pts_samples: i64,
 	encoded: Packet,
+	/// trim 範囲内(`TrimDecision::Keep`)の音声フレームを 1 度でもデコードしたか。
+	/// [`Self::flush`] 末尾の「音声が黙って消えていないか」チェックに使う
+	/// (`MediaError::AudioStreamProducedNoPackets` 冒頭コメント参照)。
+	saw_keep_frame: bool,
+	/// これまでに `write_interleaved` へ実際に書き出した AAC パケット数。
+	/// 同上のチェックに使う。
+	encoded_packet_count: u64,
 }
 
 impl AudioPipeline {
@@ -408,6 +471,8 @@ impl AudioPipeline {
 			ost_time_base: encoder_time_base,
 			next_pts_samples: 0,
 			encoded: Packet::empty(),
+			saw_keep_frame: false,
+			encoded_packet_count: 0,
 		})
 	}
 
@@ -451,6 +516,7 @@ impl AudioPipeline {
 				}
 				TrimDecision::Keep => {}
 			}
+			self.saw_keep_frame = true;
 			self.resample_and_buffer(&mut decoded)?;
 			self.drain_full_chunks(octx)?;
 		}
@@ -472,6 +538,7 @@ impl AudioPipeline {
 					TrimDecision::Stop => break,
 					TrimDecision::Keep => {}
 				}
+				self.saw_keep_frame = true;
 				self.resample_and_buffer(&mut decoded)?;
 			}
 		}
@@ -501,6 +568,15 @@ impl AudioPipeline {
 			.send_eof()
 			.map_err(|source| MediaError::Encode { source })?;
 		self.drain_encoder(octx)?;
+
+		// 安全網: trim 範囲内の音声フレームを実際にデコードしていたにもかかわらず
+		// AAC パケットを 1 つも出力できていない場合は、内部のどこかでサンプルが
+		// 取りこぼされている(想定外の不整合)。無音の trim 区間(音声を 1 度も
+		// `Keep` していない正常系)とは区別できるため誤検知しない
+		// (`MediaError::AudioStreamProducedNoPackets` 冒頭コメント参照)。
+		if self.saw_keep_frame && self.encoded_packet_count == 0 {
+			return Err(MediaError::AudioStreamProducedNoPackets);
+		}
 
 		Ok(())
 	}
@@ -564,6 +640,7 @@ impl AudioPipeline {
 			self.encoded
 				.write_interleaved(octx)
 				.map_err(|source| MediaError::Mux { source })?;
+			self.encoded_packet_count += 1;
 		}
 		Ok(())
 	}
@@ -604,5 +681,132 @@ mod tests {
 	fn decide_sample_rate_handles_low_rates() {
 		// 8kHz 電話品質のような低レートはそのまま(上限はダウンサンプル方向のみ)。
 		assert_eq!(decide_sample_rate(8_000), 8_000);
+	}
+
+	// --- AudioFifo push/pop: ステレオ以上の音声が丸ごと消える回帰の再発防止 -------------
+	//
+	// 実機検証で発見した不具合: `ffmpeg_next::frame::Audio::data(index)` は
+	// 音声フレームの `linesize[index]`(index>=1 は FFmpeg の規約上常に未設定=0)を
+	// そのままスライス長として使うため、2ch 以上の planar 音声では常に長さ 0 を返す。
+	// 旧実装の `AudioFifo::push`/`pop` はこれを素朴に使っていたため、ステレオ入力の
+	// サンプルが FIFO に一切積まれず(`push` の `take` が 0 に潰れる)、
+	// 音声トラックが出力から丸ごと消えていた(AAC エンコーダに 0 フレームしか
+	// 渡らず `Qavg: nan` になる)。`ffmpeg::init()` 済みでなくても
+	// `frame::Audio::new`(avutil のメモリ確保のみ)は動作するため、実 FFmpeg
+	// デコード/リサンプルを介さずに `AudioFifo` 単体で純粋にこの回帰を検証できる。
+
+	/// f32 planar(fltp、AAC が要求する実際のフォーマット)のステレオフレームを
+	/// 構築し、左右チャンネルへ異なる値を書き込む。
+	fn make_stereo_f32_planar_frame(
+		samples: usize,
+		left_base: f32,
+		right_base: f32,
+	) -> frame::Audio {
+		let format = format::Sample::F32(format::sample::Type::Planar);
+		let layout = ChannelLayout::STEREO;
+		let mut frame = frame::Audio::new(format, samples, layout);
+		frame.set_rate(48_000);
+		{
+			let left = frame.plane_mut::<f32>(0);
+			for (i, sample) in left.iter_mut().enumerate() {
+				*sample = left_base + i as f32;
+			}
+		}
+		{
+			let right = frame.plane_mut::<f32>(1);
+			for (i, sample) in right.iter_mut().enumerate() {
+				*sample = right_base - i as f32;
+			}
+		}
+		frame
+	}
+
+	#[test]
+	fn audio_fifo_push_buffers_both_channels_of_a_stereo_planar_frame() {
+		let format = format::Sample::F32(format::sample::Type::Planar);
+		let layout = ChannelLayout::STEREO;
+		let mut fifo = AudioFifo::new(format, layout, 48_000);
+
+		let samples = 8;
+		let input = make_stereo_f32_planar_frame(samples, 1.0, -1.0);
+
+		fifo.push(&input);
+
+		// 回帰対象そのもの: 修正前は右チャンネル(index=1)の `data(1).len()==0` に
+		// 引きずられて `take` が 0 に潰れ、左チャンネル分すら 1 サンプルも
+		// 積まれなかった(= `available_samples() == 0`)。
+		assert_eq!(
+			fifo.available_samples(),
+			samples,
+			"両チャンネル分のサンプルが FIFO に積まれること(修正前は 0 になっていた)"
+		);
+	}
+
+	#[test]
+	fn audio_fifo_round_trips_stereo_planar_samples_without_losing_the_second_channel() {
+		let format = format::Sample::F32(format::sample::Type::Planar);
+		let layout = ChannelLayout::STEREO;
+		let mut fifo = AudioFifo::new(format, layout, 48_000);
+
+		let samples = 6;
+		let input = make_stereo_f32_planar_frame(samples, 10.0, -10.0);
+		fifo.push(&input);
+
+		let popped = fifo
+			.pop(samples)
+			.expect("push 直後で samples 分そろっているので pop できるはず");
+		assert_eq!(popped.samples(), samples);
+
+		let left = popped.plane::<f32>(0);
+		let right = popped.plane::<f32>(1);
+		for i in 0..samples {
+			assert_eq!(
+				left[i],
+				10.0 + i as f32,
+				"左チャンネル(index=0)の値が保持されること"
+			);
+			assert_eq!(
+				right[i],
+				-10.0 - i as f32,
+				"右チャンネル(index=1)の値が保持され、取りこぼされないこと(回帰対象)"
+			);
+		}
+	}
+
+	#[test]
+	fn audio_fifo_push_still_works_for_mono_planar_frames() {
+		// mono は元々プレーンが 1 個(index=0 のみ)しか無く、index>=1 のバグを
+		// 踏まないため Wave 3 の実機検証では見逃されていた。回帰対象ではないが、
+		// 修正が mono の既存動作を壊していないことも合わせて確認する。
+		let format = format::Sample::F32(format::sample::Type::Planar);
+		let layout = ChannelLayout::MONO;
+		let mut fifo = AudioFifo::new(format, layout, 48_000);
+
+		let samples = 5;
+		let mut input = frame::Audio::new(format, samples, layout);
+		input.set_rate(48_000);
+		{
+			let mono = input.plane_mut::<f32>(0);
+			for (i, sample) in mono.iter_mut().enumerate() {
+				*sample = 3.0 + i as f32;
+			}
+		}
+
+		fifo.push(&input);
+		assert_eq!(fifo.available_samples(), samples);
+
+		let popped = fifo.pop(samples).expect("pop できるはず");
+		let mono_out = popped.plane::<f32>(0);
+		for i in 0..samples {
+			assert_eq!(mono_out[i], 3.0 + i as f32);
+		}
+	}
+
+	#[test]
+	fn audio_fifo_pop_remainder_returns_none_when_empty() {
+		let format = format::Sample::F32(format::sample::Type::Planar);
+		let fifo = AudioFifo::new(format, ChannelLayout::STEREO, 48_000);
+		let mut fifo = fifo;
+		assert!(fifo.pop_remainder().is_none());
 	}
 }
