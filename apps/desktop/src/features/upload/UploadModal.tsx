@@ -1,4 +1,5 @@
 import type { EditSpec, FitMode } from "@facet/core";
+import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { join } from "@tauri-apps/api/path";
 import { useMutation } from "@tanstack/react-query";
@@ -1130,6 +1131,45 @@ function BulkSettings(props: BulkSettingsProps) {
 	);
 }
 
+// ---- 折りたたみ(投稿専用フィールドの格納用) --------------------------------
+
+/**
+ * 「一括設定」と同じ ▼/▶ + 見出しの流儀に合わせた、小さな折りたたみ表示。
+ * 投稿(Phase 3 まで無効)専用のフィールドをまとめて隠すために使う
+ * (PostDetail の予約日時・一括投稿、OutputCard のメタデータ・投稿ボタン)。
+ */
+function Disclosure({
+	title,
+	expanded,
+	onToggle,
+	trailing,
+	children,
+}: {
+	title: string;
+	expanded: boolean;
+	onToggle: () => void;
+	trailing?: ReactNode;
+	children: ReactNode;
+}) {
+	return (
+		<div className="rounded-md border border-line/60 bg-elevated/30 px-2 py-1.5">
+			<button
+				type="button"
+				onClick={onToggle}
+				aria-expanded={expanded}
+				className="flex w-full items-center justify-between gap-1.5 text-left"
+			>
+				<span className="flex items-center gap-1.5 text-[11px] font-medium text-neutral-300">
+					<span className="text-neutral-500">{expanded ? "▼" : "▶"}</span>
+					{title}
+				</span>
+				{trailing}
+			</button>
+			{expanded && <div className="mt-2 flex flex-col gap-2">{children}</div>}
+		</div>
+	);
+}
+
 // ---- Post 詳細(中央) ------------------------------------------------------
 
 interface PostDetailProps {
@@ -1149,6 +1189,7 @@ interface PostDetailProps {
 
 function PostDetail(props: PostDetailProps) {
 	const { post, clips, busy } = props;
+	const [scheduleOpen, setScheduleOpen] = useState(false);
 	const postClip = clips.find((c) => c.id === post.clipId);
 	// 元画面で決めたクロップ比。出力先アスペクトとの関係を示すために表示する。
 	const clipAspectLabel = postClip
@@ -1158,6 +1199,10 @@ function PostDetail(props: PostDetailProps) {
 		: "—";
 	const datetimeValue =
 		post.publishAt !== undefined ? msToLocalInput(post.publishAt) : "";
+	const scheduleLabel =
+		post.publishAt !== undefined
+			? msToLocalInput(post.publishAt).replace("T", " ")
+			: "即時";
 
 	const onDatetimeChange = (value: string) => {
 		const ms = localInputToMs(value);
@@ -1168,24 +1213,33 @@ function PostDetail(props: PostDetailProps) {
 
 	return (
 		<div className="flex flex-col gap-3">
-			{/* 投稿ヘッダ: 対象 clip + 予約日時 + この投稿をすべて投稿 */}
-			<div className="rounded-lg border border-line bg-panel p-3">
-				<div className="grid grid-cols-2 gap-2">
-					<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
-						対象 clip
-						<select
-							className={selectClass}
-							value={post.clipId}
-							onChange={(e) => props.onPatchPost({ clipId: e.target.value })}
-						>
-							{clips.map((clip) => (
-								<option key={clip.id} value={clip.id}>
-									{clip.name}
-								</option>
-							))}
-						</select>
-					</label>
+			{/* 投稿ヘッダ: 対象 clip(常時表示)+ 予約日時・一括投稿(折りたたみ) */}
+			<div className="flex flex-col gap-2 rounded-lg border border-line bg-panel p-3">
+				<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
+					対象 clip
+					<select
+						className={selectClass}
+						value={post.clipId}
+						onChange={(e) => props.onPatchPost({ clipId: e.target.value })}
+					>
+						{clips.map((clip) => (
+							<option key={clip.id} value={clip.id}>
+								{clip.name}
+							</option>
+						))}
+					</select>
+				</label>
 
+				<Disclosure
+					title="投稿設定(予約日時・一括投稿)"
+					expanded={scheduleOpen}
+					onToggle={() => setScheduleOpen((v) => !v)}
+					trailing={
+						<span className="text-[11px] text-neutral-400">
+							{scheduleLabel}
+						</span>
+					}
+				>
 					<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
 						予約日時(未指定=即時)
 						<input
@@ -1195,23 +1249,22 @@ function PostDetail(props: PostDetailProps) {
 							onChange={(e) => onDatetimeChange(e.target.value)}
 						/>
 					</label>
-				</div>
-
-				<div className="mt-2 flex justify-end">
-					<Button
-						variant="primary"
-						size="sm"
-						onClick={props.onPublishPost}
-						disabled={busy || !PUBLISH_SUPPORTED}
-						title={
-							PUBLISH_SUPPORTED
-								? undefined
-								: "デスクトップ版では未対応(Phase 3 で対応予定)"
-						}
-					>
-						この投稿をすべて投稿
-					</Button>
-				</div>
+					<div className="flex justify-end">
+						<Button
+							variant="primary"
+							size="sm"
+							onClick={props.onPublishPost}
+							disabled={busy || !PUBLISH_SUPPORTED}
+							title={
+								PUBLISH_SUPPORTED
+									? undefined
+									: "デスクトップ版では未対応(Phase 3 で対応予定)"
+							}
+						>
+							この投稿をすべて投稿
+						</Button>
+					</div>
+				</Disclosure>
 			</div>
 
 			{/* 出力先(Output)一覧 */}
@@ -1262,10 +1315,14 @@ interface OutputCardProps {
 
 function OutputCard(props: OutputCardProps) {
 	const { post, output, render, status, busy } = props;
-	const platform = useMemo(
-		() => targetById(output.targetId)?.platform,
+	const [postSettingsOpen, setPostSettingsOpen] = useState(false);
+	const target = useMemo(
+		() => targetById(output.targetId),
 		[output.targetId],
 	);
+	const platform = target?.platform;
+	// 出力ターゲットのアスペクト比(width/height)。プレビュー枠はこれに追従する。
+	const boxRatio = target ? target.width / target.height : 9 / 16;
 
 	// 現在設定と生成済みファイルの整合。fresh=最新、stale=設定変更後で要更新。
 	const rendering = render?.rendering ?? false;
@@ -1277,8 +1334,8 @@ function OutputCard(props: OutputCardProps) {
 	return (
 		<div className="rounded-lg border border-line bg-panel p-3">
 			<div className="flex items-start gap-3">
-				{/* 左: 最終プレビュー + ダウンロード */}
-				<div className="flex w-72 shrink-0 flex-col gap-2 rounded-md border border-line bg-elevated/40 p-2">
+				{/* 左: 出力先アスペクトに追従する固定プレビュー枠 */}
+				<div className="flex w-72 shrink-0 flex-col gap-1.5">
 					<div className="flex items-center justify-between">
 						<span className="text-[11px] text-neutral-400">
 							最終プレビュー
@@ -1294,21 +1351,30 @@ function OutputCard(props: OutputCardProps) {
 							</a>
 						)}
 					</div>
-					{outputPath ? (
-						/* biome-ignore lint/a11y/useMediaCaption: 書き出し結果のプレビューで字幕データが存在しない */
-						<video
-							src={convertFileSrc(outputPath)}
-							controls
-							className={cn(
-								"max-h-64 w-full rounded bg-black",
-								stale && "opacity-60",
+
+					<div className="flex h-[32vh] w-full items-center justify-center rounded-lg bg-elevated/40">
+						<div
+							style={{ aspectRatio: boxRatio }}
+							className="flex h-full max-w-full items-center justify-center overflow-hidden rounded-md border border-line bg-black/40"
+						>
+							{outputPath ? (
+								/* biome-ignore lint/a11y/useMediaCaption: 投稿確認用のプレビューで字幕データが存在しない */
+								<video
+									src={convertFileSrc(outputPath)}
+									controls
+									className={cn(
+										"h-full w-full object-contain",
+										stale && "opacity-60",
+									)}
+								/>
+							) : (
+								<p className="max-w-[75%] text-center text-[11px] text-neutral-500">
+									「プレビュー生成」で最終アスペクト・フィットを確認できます。
+								</p>
 							)}
-						/>
-					) : (
-						<p className="py-8 text-center text-[11px] text-neutral-400">
-							「生成」で最終アスペクト・フィットを確認できます。
-						</p>
-					)}
+						</div>
+					</div>
+
 					<Button
 						variant="ghost"
 						size="sm"
@@ -1327,7 +1393,7 @@ function OutputCard(props: OutputCardProps) {
 					)}
 				</div>
 
-				{/* 右: 出力ターゲット〜メタデータ + 投稿 */}
+				{/* 右: 出力ターゲット・フィット + 投稿設定(折りたたみ) */}
 				<div className="flex min-w-0 flex-1 flex-col gap-2">
 					<div className="grid grid-cols-[1fr_1fr_auto] items-end gap-2">
 						<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
@@ -1337,9 +1403,9 @@ function OutputCard(props: OutputCardProps) {
 								value={output.targetId}
 								onChange={(e) => props.onPatch({ targetId: e.target.value })}
 							>
-								{OUTPUT_TARGETS.map((target) => (
-									<option key={target.id} value={target.id}>
-										{target.label}
+								{OUTPUT_TARGETS.map((t) => (
+									<option key={t.id} value={t.id}>
+										{t.label}
 									</option>
 								))}
 							</select>
@@ -1374,7 +1440,7 @@ function OutputCard(props: OutputCardProps) {
 						)}
 					</div>
 
-					<p className="text-[11px] text-neutral-400">
+					<p className="text-[11px] leading-snug text-neutral-400">
 						元クロップ{" "}
 						<span className="font-medium text-neutral-200">
 							{props.clipAspectLabel}
@@ -1385,57 +1451,64 @@ function OutputCard(props: OutputCardProps) {
 						」で合わせます。
 					</p>
 
-					{/* メタデータ */}
-					{platform === "youtube" ? (
-						<>
+					{/* 投稿専用フィールド(メタデータ・投稿ボタン・ステータス)。
+					    Phase 3 まで投稿自体が無効なため、既定で折りたたむ。 */}
+					<Disclosure
+						title="投稿設定"
+						expanded={postSettingsOpen}
+						onToggle={() => setPostSettingsOpen((v) => !v)}
+						trailing={<StatusBadge status={status} />}
+					>
+						{platform === "youtube" ? (
+							<>
+								<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
+									タイトル
+									<input
+										type="text"
+										className={cn(inputClass, "w-full")}
+										value={output.title}
+										onChange={(e) => props.onPatch({ title: e.target.value })}
+									/>
+								</label>
+								<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
+									説明
+									<textarea
+										className={cn(textareaClass, "min-h-[96px] resize-y")}
+										value={output.description}
+										onChange={(e) =>
+											props.onPatch({ description: e.target.value })
+										}
+									/>
+								</label>
+							</>
+						) : (
 							<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
-								タイトル
-								<input
-									type="text"
-									className={cn(inputClass, "w-full")}
-									value={output.title}
-									onChange={(e) => props.onPatch({ title: e.target.value })}
-								/>
-							</label>
-							<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
-								説明
+								キャプション
 								<textarea
 									className={cn(textareaClass, "min-h-[96px] resize-y")}
-									value={output.description}
-									onChange={(e) =>
-										props.onPatch({ description: e.target.value })
-									}
+									maxLength={2200}
+									value={output.caption}
+									onChange={(e) => props.onPatch({ caption: e.target.value })}
 								/>
 							</label>
-						</>
-					) : (
-						<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
-							キャプション
-							<textarea
-								className={cn(textareaClass, "min-h-[96px] resize-y")}
-								maxLength={2200}
-								value={output.caption}
-								onChange={(e) => props.onPatch({ caption: e.target.value })}
-							/>
-						</label>
-					)}
+						)}
 
-					<div className="mt-1 flex items-center justify-between">
-						<StatusBadge status={status} />
-						<Button
-							variant="primary"
-							size="sm"
-							onClick={props.onPublish}
-							disabled={busy || !PUBLISH_SUPPORTED}
-							title={
-								PUBLISH_SUPPORTED
-									? undefined
-									: "デスクトップ版では未対応(Phase 3 で対応予定)"
-							}
-						>
-							投稿
-						</Button>
-					</div>
+						<div className="flex justify-end">
+							<Button
+								variant="primary"
+								size="sm"
+								onClick={props.onPublish}
+								disabled={busy || !PUBLISH_SUPPORTED}
+								title={
+									PUBLISH_SUPPORTED
+										? undefined
+										: "デスクトップ版では未対応(Phase 3 で対応予定)"
+								}
+							>
+								投稿
+							</Button>
+						</div>
+					</Disclosure>
 				</div>
 			</div>
 		</div>
