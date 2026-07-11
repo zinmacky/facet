@@ -43,7 +43,7 @@ export interface UsePreviewResult {
 
 /**
  * `preview_start` によるプレビュー生成を key(clip.id や output.id)単位で管理する
- * 共通フック。UploadModal の「最終プレビュー」・ExportModal の「クロップ内容プレビュー」の
+ * 共通フック。UploadScreen の「最終プレビュー」・ExportScreen の「クロップ内容プレビュー」の
  * 双方から使う(実書き出し(`reframe_start`)は別軸で各モーダルが個別に扱う)。
  */
 export function usePreview(): UsePreviewResult {
