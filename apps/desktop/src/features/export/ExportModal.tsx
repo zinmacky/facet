@@ -1,22 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { join } from "@tauri-apps/api/path";
 import { useMutation } from "@tanstack/react-query";
 import type { Clip } from "../../types";
 import { masterSpec } from "../../types";
-import type { ExportEvent, ProbeResult } from "../../lib/api";
+import type { MediaInfo } from "../../lib/tauri";
 import {
-	downloadZip,
-	fileDownloadUrl,
-	fileRawUrl,
-	postExport,
-	subscribeExport,
-} from "../../lib/api";
+	cancelJob,
+	convertFileSrc,
+	pickExportDirectory,
+	sanitizeFileName,
+	startReframe,
+} from "../../lib/tauri";
+import { downloadZip } from "../../lib/api";
 import { Modal } from "../../components/ui/Modal";
 import { Button } from "../../components/ui/Button";
 import { cn } from "../../components/ui/cn";
 
 interface ExportModalProps {
 	open: boolean;
-	source: { inputPath: string; probe: ProbeResult } | null;
+	source: { inputPath: string; probe: MediaInfo } | null;
 	clips: Clip[];
 	onClose: () => void;
 	onProceedToUpload: () => void;
@@ -29,6 +31,8 @@ interface TaskState {
 	fps?: number;
 	outputPath?: string;
 	error?: string;
+	/** キャンセル/失敗の区別無く、実行中ジョブの ID(キャンセルボタン用)。 */
+	jobId?: string;
 	/** フォールバック等の一時通知(例: ソフトウェアエンコードで再試行中)。 */
 	notice?: string;
 }
@@ -48,8 +52,10 @@ export function ExportModal({
 	const [results, setResults] = useState<Map<string, TaskState>>(new Map());
 
 	// 明示的に「書き出しを開始」するまでレンダリングを始めない(開いた瞬間に
-	// 全 clip の ffmpeg を走らせて CPU を占有しないため)。
+	// 全 clip のレンダリングを走らせて CPU を占有しないため)。
 	const [started, setStarted] = useState(false);
+	// 書き出し先フォルダの選択中(ダイアログ表示中)フラグ。
+	const [pickingDir, setPickingDir] = useState(false);
 
 	// マスター/詳細レイアウトの選択中 clip。
 	const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
@@ -60,6 +66,9 @@ export function ExportModal({
 
 	// clipId ごとの購読解除関数。
 	const unsubsRef = useRef<Map<string, () => void>>(new Map());
+
+	// ユーザーが選んだ書き出し先フォルダ(絶対パス)。「書き出しを開始」時に選ばせる。
+	const outputDirRef = useRef<string | null>(null);
 
 	// clips の入れ替え時は古い結果・購読を破棄する。
 	// biome-ignore lint/correctness/useExhaustiveDependencies: clips は本文で参照しないが入れ替え検知のトリガとして意図的に指定
@@ -72,9 +81,23 @@ export function ExportModal({
 		setStarted(false);
 	}, [clips]);
 
-	// レンダリング開始。開始操作後・open・source があり、done 結果を持たない clip のみ対象。
+	/** 書き出し先フォルダを選ばせてからレンダリングを開始する。キャンセル時は何もしない。 */
+	const handleStart = async () => {
+		setPickingDir(true);
+		try {
+			const dir = await pickExportDirectory();
+			if (!dir) return;
+			outputDirRef.current = dir;
+			setStarted(true);
+		} finally {
+			setPickingDir(false);
+		}
+	};
+
+	// レンダリング開始。開始操作後・open・source・出力先があり、done 結果を持たない clip のみ対象。
 	useEffect(() => {
-		if (!started || !open || !source) return;
+		const dir = outputDirRef.current;
+		if (!started || !open || !source || !dir) return;
 		const probe = source.probe;
 		const input = source.inputPath;
 
@@ -95,7 +118,6 @@ export function ExportModal({
 				width: probe.width,
 				height: probe.height,
 			});
-			const output = `${clip.name}.mp4`;
 
 			const update = (patch: Partial<TaskState>) => {
 				setResults((prev) => {
@@ -106,38 +128,41 @@ export function ExportModal({
 				});
 			};
 
-			const onEvent = (event: ExportEvent) => {
-				if (event.type === "progress") {
-					update({
-						status: "running",
-						ratio: event.ratio,
-						...(event.fps !== undefined ? { fps: event.fps } : {}),
+			void (async () => {
+				try {
+					const outputPath = await join(
+						dir,
+						`${sanitizeFileName(clip.name)}.mp4`,
+					);
+					const handle = await startReframe(input, outputPath, spec, {
+						onProgress: (progress) => {
+							update({
+								status: "running",
+								ratio: (progress.percent ?? 0) / 100,
+								fps: progress.fps,
+							});
+						},
+						onDone: () => {
+							update({ status: "done", ratio: 1, outputPath });
+							unsubsRef.current.get(clip.id)?.();
+							unsubsRef.current.delete(clip.id);
+						},
+						onError: (message) => {
+							update({ status: "error", error: message });
+							unsubsRef.current.get(clip.id)?.();
+							unsubsRef.current.delete(clip.id);
+						},
 					});
-				} else if (event.type === "notice") {
-					update({ notice: event.message });
-				} else if (event.type === "done") {
-					update({ status: "done", ratio: 1, outputPath: event.outputPath });
-				} else {
-					update({ status: "error", error: event.message });
-				}
-			};
-
-			void postExport({ spec, input, output })
-				.then(({ jobId }) => {
-					const unsub = subscribeExport(jobId, {
-						onEvent,
-						onError: () =>
-							update({ status: "error", error: "進捗の購読に失敗しました。" }),
-					});
-					unsubsRef.current.set(clip.id, unsub);
-				})
-				.catch((err: unknown) => {
+					update({ jobId: handle.jobId });
+					unsubsRef.current.set(clip.id, handle.unsubscribe);
+				} catch (err) {
 					unsubsRef.current.delete(clip.id);
 					update({
 						status: "error",
 						error: err instanceof Error ? err.message : String(err),
 					});
-				});
+				}
+			})();
 		}
 	}, [started, open, source, clips]);
 
@@ -205,10 +230,12 @@ export function ExportModal({
 					</p>
 					<Button
 						variant="primary"
-						disabled={clips.length === 0}
-						onClick={() => setStarted(true)}
+						disabled={clips.length === 0 || pickingDir}
+						onClick={() => void handleStart()}
 					>
-						書き出しを開始({clips.length}本)
+						{pickingDir
+							? "書き出し先フォルダを選択中…"
+							: `書き出しを開始(${clips.length}本)`}
 					</Button>
 				</div>
 			) : (
@@ -359,16 +386,15 @@ function ExportDetail({
 					{/* biome-ignore lint/a11y/useMediaCaption: 書き出し結果のプレビューで字幕データが存在しない */}
 					<video
 						controls
-						src={fileRawUrl(task.outputPath)}
+						src={convertFileSrc(task.outputPath)}
 						className="max-h-[46vh] w-full rounded bg-black"
 					/>
-					<a
-						href={fileDownloadUrl(task.outputPath)}
-						download
-						className="inline-flex h-7 w-fit items-center justify-center rounded-md bg-elevated px-2.5 text-xs font-medium text-neutral-200 hover:bg-line"
+					<p
+						className="truncate font-mono text-[11px] text-neutral-500"
+						title={task.outputPath}
 					>
-						ダウンロード
-					</a>
+						{task.outputPath}
+					</p>
 				</>
 			)}
 
@@ -380,9 +406,20 @@ function ExportDetail({
 							style={{ width: `${Math.round(ratio * 100)}%` }}
 						/>
 					</div>
-					<span className="text-xs text-neutral-400">
-						書き出し中… {Math.round(ratio * 100)}%
-					</span>
+					<div className="flex items-center gap-2">
+						<span className="text-xs text-neutral-400">
+							書き出し中… {Math.round(ratio * 100)}%
+						</span>
+						{task?.jobId && (
+							<Button
+								variant="ghost"
+								size="sm"
+								onClick={() => task.jobId && void cancelJob(task.jobId)}
+							>
+								キャンセル
+							</Button>
+						)}
+					</div>
 					{task?.notice && (
 						<span className="text-[11px] text-amber-400">{task.notice}</span>
 					)}
