@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { cn } from "./cn";
 import { CloseIcon } from "./icons";
 
@@ -64,7 +65,12 @@ export function Modal({
 	}, [open, dismissable, onClose]);
 
 	if (!open) return null;
-	return (
+	// document.body へ portal する。WizardShell が各画面を transform 付きの
+	// スライドトラック(+ 外側 overflow-hidden)内にマウントするため、素の
+	// position: fixed のままだとその transform 祖先が containing block になり、
+	// viewport 基準の配置が崩れて overflow-hidden にクリップされ不可視になる
+	// (CSS 仕様: transform を持つ要素は fixed 位置指定の containing block になる)。
+	return createPortal(
 		<div
 			className="fixed inset-0 z-50 flex items-center justify-center p-4"
 			role="dialog"
@@ -109,6 +115,7 @@ export function Modal({
 					</footer>
 				)}
 			</div>
-		</div>
+		</div>,
+		document.body,
 	);
 }
