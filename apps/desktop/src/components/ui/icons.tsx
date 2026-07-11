@@ -139,6 +139,58 @@ export function PauseIcon({ size = 12, ...rest }: IconProps) {
 	);
 }
 
+/** 音量(スピーカー)。ミュート・音量0のときは SpeakerMuteIcon を使う。 */
+export function SpeakerIcon({ size = 12, ...rest }: IconProps) {
+	return (
+		<svg
+			width={size}
+			height={size}
+			viewBox="0 0 12 12"
+			aria-hidden="true"
+			{...rest}
+		>
+			<path
+				d="M1.5 4.5h2L6.5 2v8L3.5 7.5h-2z"
+				fill="currentColor"
+				stroke="none"
+			/>
+			<path
+				d="M8.3 4.2a2.6 2.6 0 0 1 0 3.6M9.6 3a4.4 4.4 0 0 1 0 6"
+				fill="none"
+				stroke="currentColor"
+				strokeWidth="1.2"
+				strokeLinecap="round"
+			/>
+		</svg>
+	);
+}
+
+/** ミュート(スピーカー+✕)。 */
+export function SpeakerMuteIcon({ size = 12, ...rest }: IconProps) {
+	return (
+		<svg
+			width={size}
+			height={size}
+			viewBox="0 0 12 12"
+			aria-hidden="true"
+			{...rest}
+		>
+			<path
+				d="M1.5 4.5h2L6.5 2v8L3.5 7.5h-2z"
+				fill="currentColor"
+				stroke="none"
+			/>
+			<path
+				d="M8 4l3 3M11 4l-3 3"
+				fill="none"
+				stroke="currentColor"
+				strokeWidth="1.2"
+				strokeLinecap="round"
+			/>
+		</svg>
+	);
+}
+
 /** 回転スピナー(ローディング)。 */
 export function SpinnerIcon({ size = 16, ...rest }: IconProps) {
 	return (
