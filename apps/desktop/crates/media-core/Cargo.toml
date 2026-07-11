@@ -14,6 +14,10 @@ ffmpeg-next = "8.1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# プレビューキャッシュキー(preview.rs)のハッシュ計算用。std の DefaultHasher は
+# プロセスを跨いで安定という保証がない(SipHash のシード乱数化)ため使わない。
+# MIT/Apache-2.0(deny.toml の allow リストに既に含まれる)。
+sha2 = "0.10"
 
 [[example]]
 name = "reframe"
@@ -22,3 +26,7 @@ path = "examples/reframe.rs"
 [[example]]
 name = "probe"
 path = "examples/probe.rs"
+
+[[example]]
+name = "preview"
+path = "examples/preview.rs"

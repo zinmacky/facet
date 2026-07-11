@@ -773,10 +773,12 @@ dependencies = [
 name = "facet-desktop"
 version = "0.0.0"
 dependencies = [
+ "media-core",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "uuid",
 ]
 
 [[package]]
@@ -1797,6 +1799,7 @@ dependencies = [
  "ffmpeg-next",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
 ]
 

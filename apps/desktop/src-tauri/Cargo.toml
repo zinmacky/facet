@@ -20,3 +20,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# reframe/probe コマンドの実処理(Wave 5: コマンド境界の配線)。
+media-core = { path = "../crates/media-core" }
+# ジョブ ID の発行(reframe_start が返す JobId)。
+uuid = { version = "1", features = ["v4"] }
