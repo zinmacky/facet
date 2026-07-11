@@ -34,7 +34,7 @@ export interface Source {
 	videoSrc: string;
 }
 
-type ModalKind = "none" | "export" | "upload";
+type Step = "edit" | "export" | "upload";
 
 /** ソースから新しい Clip を作る(連番付き)。 */
 function createClip(source: Source, index: number): Clip {
@@ -56,7 +56,7 @@ export function App() {
 	const [source, setSource] = useState<Source | null>(null);
 	const [clips, setClips] = useState<Clip[]>([]);
 	const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
-	const [modal, setModal] = useState<ModalKind>("none");
+	const [step, setStep] = useState<Step>("edit");
 	// 連番カウンタ。削除後の再採番でも名前が衝突しないよう、単調増加させる。
 	const clipSeqRef = useRef(1);
 	const confirm = useConfirm();
@@ -230,7 +230,7 @@ export function App() {
 							// (書き出し内容はクロップ済みの音声のみで、この再生音とは無関係だが、
 							// バックグラウンドで鳴り続けるのを避ける)。
 							clipEditorRef.current?.pause();
-							setModal("export");
+							setStep("export");
 						}}
 						className="w-full shrink-0"
 					>
@@ -240,18 +240,18 @@ export function App() {
 			</div>
 
 			<ExportModal
-				open={modal === "export"}
+				open={step === "export"}
 				source={source}
 				clips={clips}
-				onClose={() => setModal("none")}
-				onProceedToUpload={() => setModal("upload")}
+				onClose={() => setStep("edit")}
+				onProceedToUpload={() => setStep("upload")}
 			/>
 			<UploadModal
-				open={modal === "upload"}
+				open={step === "upload"}
 				source={source}
 				clips={clips}
-				onClose={() => setModal("none")}
-				onBack={() => setModal("export")}
+				onClose={() => setStep("edit")}
+				onBack={() => setStep("export")}
 			/>
 
 			{/* 開発用フッタ: Tauri invoke 疎通確認(Phase 1 の受け入れ基準)。 */}
