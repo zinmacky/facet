@@ -798,9 +798,21 @@ export function UploadScreen({
 		[bulkExports],
 	);
 
-	// プレビュー生成(現在設定でレンダリング)。エラーは renders.error に反映。
+	// プレビュー生成(現在設定でレンダリング)。
+	// ensureRendered は preview.ensure 呼び出し前にガード節で早期 throw することがある
+	// (元動画未選択・対象クリップ不明・出力ターゲット無効)。この場合 preview 側の
+	// states には何も反映されないため render.error は出ず、以前は catch(() => undefined)
+	// で握りつぶしてユーザーに一切見えなくなっていた(P1 バグ)。preview.ensure 到達後の
+	// 失敗は引き続き renders.error にも反映されるが、ここでは早期 throw を含む
+	// あらゆる失敗を既存の pubStatuses(StatusBadge、折りたたみを開かなくても常時
+	// 見える trailing 表示)へも反映し、必ずユーザーに見える形にする。
 	const previewOutput = (post: UploadPost, output: UploadOutput) => {
-		void ensureRendered(post, output).catch(() => undefined);
+		void ensureRendered(post, output).catch((err: unknown) => {
+			setPubStatus(output.id, {
+				kind: "error",
+				message: err instanceof Error ? err.message : String(err),
+			});
+		});
 	};
 
 	// 中央詳細に表示する選択中の Post。

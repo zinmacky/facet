@@ -187,3 +187,37 @@ describe("UploadScreen: 孤児 post の無効化", () => {
 		expect(screen.getByRole("button", { name: /ClipOne/ })).toBeInTheDocument();
 	});
 });
+
+/**
+ * ensureRendered の早期 throw(preview.ensure 呼び出し前のガード節: 元動画未選択・
+ * 対象クリップ不明・出力ターゲット無効)を可視化する修正の固定テスト。
+ * 以前は `void ensureRendered(...).catch(() => undefined)` で握りつぶされ、
+ * preview.ensure に到達しないためユーザーには一切見えなかった。
+ */
+describe("UploadScreen: ensureRendered の早期 throw を可視化する", () => {
+	it("元動画未選択でプレビュー生成すると、既存のステータス表示にエラーが反映される", async () => {
+		const user = userEvent.setup();
+		renderWithProviders(
+			<UploadScreen
+				active
+				source={null}
+				clips={[CLIP]}
+				resetToken={0}
+				onGoToExport={() => {}}
+			/>,
+		);
+
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "プレビュー生成" })).toBeInTheDocument(),
+		);
+		await user.click(screen.getByRole("button", { name: "プレビュー生成" }));
+
+		// 「投稿設定」折りたたみのトグルに常時表示される StatusBadge(トグルを開かなくても
+		// 見える trailing 表示)へエラーが反映される。
+		await waitFor(() =>
+			expect(screen.getByText(/エラー: 元動画が未選択です。/)).toBeInTheDocument(),
+		);
+		// 早期 throw のため preview_start には到達しない。
+		expect(mockInvoke.mock.calls.some(([cmd]) => cmd === "preview_start")).toBe(false);
+	});
+});
