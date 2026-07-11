@@ -17,7 +17,13 @@ name = "facet_desktop_lib"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `protocol-asset`: renderer が `convertFileSrc`(元動画/プレビュー/書き出し結果の
+# <video src> に使う asset:// プロトコル)で任意パスのローカルファイルを読むために必要。
+# この機能フラグが無いと asset プロトコルのハンドラ自体がビルドに含まれず、
+# tauri.conf.json 側で `security.assetProtocol.enable: true` を設定しても効果が無い
+# (`asset` カスタムプロトコルの登録は `#[cfg(feature = "protocol-asset")]` で
+# コンパイル時に丸ごと除外されるため)。
+tauri = { version = "2", features = ["protocol-asset"] }
 # renderer 側のネイティブファイル選択(入力動画・書き出し先フォルダ)用。
 # Wave 5 では invoke 境界(reframe/probe/preview)のみだったが、renderer 配線
 # (Phase 2 最終接続)で file/directory picker が必要になったため追加する。
