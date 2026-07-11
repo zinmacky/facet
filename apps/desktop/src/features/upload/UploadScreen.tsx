@@ -258,6 +258,29 @@ export function UploadScreen({
 		});
 	}, [clips]);
 
+	// 孤児 post の無効化: clips から消えた clipId を参照する post を除去する
+	// (ExportScreen.tsx の clip 単位の細粒度無効化 effect が手本)。ClipEditor 側で
+	// clip を削除しても、UploadScreen 側は resetToken が増分されないため posts に
+	// 参照切れの post が残り続けていた(存在しない clip を指す post が「対象 clip
+	// 不明」のまま操作可能に見えてしまう P1 バグ)。除去する post の Output に紐づく
+	// プレビュー・投稿ステータスも合わせて破棄する。
+	useEffect(() => {
+		const validClipIds = new Set(clips.map((c) => c.id));
+		const orphanOutputIds = posts
+			.filter((p) => !validClipIds.has(p.clipId))
+			.flatMap((p) => p.outputs.map((o) => o.id));
+		if (orphanOutputIds.length === 0) return;
+
+		setPosts((prev) => prev.filter((p) => validClipIds.has(p.clipId)));
+		for (const outputId of orphanOutputIds) preview.remove(outputId);
+		setPubStatuses((prev) => {
+			const next = new Map(prev);
+			for (const outputId of orphanOutputIds) next.delete(outputId);
+			return next;
+		});
+		// 選択中 post が除去されていたら、selectedPostId 側は下の effect で補正される。
+	}, [clips, posts, preview.remove]);
+
 	// 選択中 id が posts に無い場合は先頭へ補正する(削除・並び替え時の担保)。
 	useEffect(() => {
 		if (posts.length === 0) {
