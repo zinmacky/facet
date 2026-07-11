@@ -12,6 +12,7 @@ import {
 	sanitizeFileName,
 	startReframe,
 } from "../../lib/tauri";
+import { type PreviewState, usePreview } from "../../lib/usePreview";
 import { Modal } from "../../components/ui/Modal";
 import { Button } from "../../components/ui/Button";
 import { cn } from "../../components/ui/cn";
@@ -35,6 +36,17 @@ interface TaskState {
 	jobId?: string;
 	/** フォールバック等の一時通知(例: ソフトウェアエンコードで再試行中)。 */
 	notice?: string;
+}
+
+/**
+ * masterSpec(クロップ内容)に影響する clip フィールドのシグネチャ。
+ * これが変わればプレビューは古い(要更新) — usePreview の sig として使う。
+ */
+function clipPreviewSig(clip: Clip): string {
+	const crop = clip.crop
+		? `${clip.crop.x}:${clip.crop.y}:${clip.crop.width}:${clip.crop.height}`
+		: "full";
+	return `${clip.trim.start}:${clip.trim.end}|${clip.aspect}|${crop}`;
 }
 
 /**
@@ -70,6 +82,10 @@ export function ExportModal({
 	// ユーザーが選んだ書き出し先フォルダ(絶対パス)。「書き出しを開始」時に選ばせる。
 	const outputDirRef = useRef<string | null>(null);
 
+	// クロップ内容プレビュー(preview_start、低ビットレート・app キャッシュ、DL/保存 UI 無し)。
+	// UploadModal の「最終プレビュー」と同じ実装を共有する。
+	const preview = usePreview();
+
 	// clips の入れ替え時は古い結果・購読を破棄する。
 	// biome-ignore lint/correctness/useExhaustiveDependencies: clips は本文で参照しないが入れ替え検知のトリガとして意図的に指定
 	useEffect(() => {
@@ -77,9 +93,20 @@ export function ExportModal({
 		unsubsRef.current.clear();
 		resultsRef.current = new Map();
 		setResults(new Map());
+		preview.reset();
 		// clips が入れ替わったら再度「開始」を要求する。
 		setStarted(false);
 	}, [clips]);
+
+	/** 選択中 clip のクロップ内容プレビューを生成(または更新)する。 */
+	const handlePreviewClip = (clip: Clip) => {
+		if (!source) return;
+		const spec = masterSpec(clip, {
+			width: source.probe.width,
+			height: source.probe.height,
+		});
+		preview.trigger(clip.id, source.inputPath, spec, clipPreviewSig(clip));
+	};
 
 	/** 書き出し先フォルダを選ばせてからレンダリングを開始する。キャンセル時は何もしない。 */
 	const handleStart = async () => {
@@ -230,21 +257,52 @@ export function ExportModal({
 			}
 		>
 			{!started ? (
-				<div className="flex min-h-[60vh] flex-col items-center justify-center gap-4 text-center">
-					<p className="max-w-sm text-sm text-neutral-300">
-						{clips.length}{" "}
-						本の切り抜きをマスター動画(クロップ内容そのもの)として
-						書き出します。開始すると各切り抜きのレンダリングを順次実行します。
-					</p>
-					<Button
-						variant="primary"
-						disabled={clips.length === 0 || pickingDir}
-						onClick={() => void handleStart()}
-					>
-						{pickingDir
-							? "書き出し先フォルダを選択中…"
-							: `書き出しを開始(${clips.length}本)`}
-					</Button>
+				<div className="flex min-h-[60vh] gap-3">
+					{/* 中央: 選択中 clip のクロップ内容プレビュー + 開始操作 */}
+					<div className="flex min-w-0 flex-1 flex-col gap-3">
+						{selectedClip ? (
+							<ExportPreviewDetail
+								clip={selectedClip}
+								state={preview.states.get(selectedClip.id)}
+								onGenerate={() => handlePreviewClip(selectedClip)}
+								onCancel={() => preview.cancel(selectedClip.id)}
+							/>
+						) : (
+							<p className="text-sm text-neutral-400">
+								プレビューする切り抜きがありません。
+							</p>
+						)}
+
+						<div className="mt-auto flex flex-col items-center gap-3 border-t border-line pt-3 text-center">
+							<p className="max-w-sm text-sm text-neutral-300">
+								{clips.length}{" "}
+								本の切り抜きをマスター動画(クロップ内容そのもの)として
+								書き出します。開始すると各切り抜きのレンダリングを順次実行します。
+							</p>
+							<Button
+								variant="primary"
+								disabled={clips.length === 0 || pickingDir}
+								onClick={() => void handleStart()}
+							>
+								{pickingDir
+									? "書き出し先フォルダを選択中…"
+									: `書き出しを開始(${clips.length}本)`}
+							</Button>
+						</div>
+					</div>
+
+					{/* 右: clip 一覧(プレビュー状態) */}
+					<div className="flex w-64 shrink-0 flex-col gap-1 overflow-y-auto border-l border-line pl-3">
+						{clips.map((clip) => (
+							<ExportPreviewListItem
+								key={clip.id}
+								clip={clip}
+								state={preview.states.get(clip.id)}
+								selected={clip.id === selectedClipId}
+								onSelect={() => setSelectedClipId(clip.id)}
+							/>
+						))}
+					</div>
 				</div>
 			) : (
 				<div className="flex min-h-[60vh] gap-3">
@@ -361,6 +419,122 @@ function ExportListItem({
 				</span>
 			</span>
 		</button>
+	);
+}
+
+/** 右側一覧の 1 行(clip 名 + プレビュー生成状態)。「書き出しを開始」前の画面用。 */
+function ExportPreviewListItem({
+	clip,
+	state,
+	selected,
+	onSelect,
+}: {
+	clip: Clip;
+	state: PreviewState | undefined;
+	selected: boolean;
+	onSelect: () => void;
+}) {
+	const rendering = state?.rendering ?? false;
+	const done = state?.outputPath !== undefined && !rendering;
+
+	return (
+		<button
+			type="button"
+			onClick={onSelect}
+			className={cn(
+				"flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-left transition-colors",
+				selected
+					? "border-accent bg-accent/10"
+					: "border-transparent hover:bg-elevated",
+			)}
+		>
+			<span
+				className="truncate font-mono text-xs text-neutral-200"
+				title={`${clip.name}.mp4`}
+			>
+				{clip.name}.mp4
+			</span>
+			<span
+				className={cn(
+					"shrink-0 text-[11px]",
+					state?.error && "text-danger",
+					!state?.error && done && "text-ok",
+					!state?.error && !done && "text-neutral-400",
+				)}
+			>
+				{state?.error
+					? "失敗"
+					: rendering
+						? "生成中…"
+						: done
+							? "プレビュー済み"
+							: "未生成"}
+			</span>
+		</button>
+	);
+}
+
+/**
+ * 中央: 選択中 clip 1 本ぶんのクロップ内容プレビュー。「書き出しを開始」前の画面用。
+ * `preview_start`(低ビットレート・app キャッシュ)を使い、ユーザー向けの
+ * ファイルダウンロード/保存は行わない(結果はモーダル内の <video> 表示のみ)。
+ */
+function ExportPreviewDetail({
+	clip,
+	state,
+	onGenerate,
+	onCancel,
+}: {
+	clip: Clip;
+	state: PreviewState | undefined;
+	onGenerate: () => void;
+	onCancel: () => void;
+}) {
+	const rendering = state?.rendering ?? false;
+	const outputPath = state?.outputPath;
+
+	return (
+		<div className="flex flex-col gap-2 rounded-lg border border-line bg-elevated/40 p-3">
+			<div className="flex items-center justify-between gap-2">
+				<h3 className="truncate font-mono text-sm text-neutral-100">
+					{clip.name}.mp4
+				</h3>
+				<span className="shrink-0 text-[11px] text-neutral-400">
+					クロップ内容プレビュー
+				</span>
+			</div>
+
+			{outputPath ? (
+				/* biome-ignore lint/a11y/useMediaCaption: 書き出し内容確認用のプレビューで字幕データが存在しない */
+				<video
+					controls
+					src={convertFileSrc(outputPath)}
+					className="max-h-[40vh] w-full rounded bg-black"
+				/>
+			) : (
+				<p className="py-10 text-center text-sm text-neutral-400">
+					「プレビュー生成」でクロップ内容を確認できます(ファイルはアプリの
+					キャッシュにのみ作成され、保存・ダウンロードはされません)。
+				</p>
+			)}
+
+			<div className="flex items-center gap-2">
+				<Button
+					variant="secondary"
+					size="sm"
+					onClick={onGenerate}
+					disabled={rendering}
+				>
+					{rendering ? "生成中…" : outputPath ? "プレビュー更新" : "プレビュー生成"}
+				</Button>
+				{rendering && (
+					<Button variant="ghost" size="sm" onClick={onCancel}>
+						キャンセル
+					</Button>
+				)}
+			</div>
+			{state?.error && <p className="text-xs text-danger">{state.error}</p>}
+		</div>
 	);
 }
 
