@@ -5,8 +5,10 @@
 //!
 //! **Wave 3 のためのフックをここで固定する**(公開 API として安定させ、Wave 3 の
 //! 3 エージェントが並行でこのシグネチャへ接続できるようにする):
-//! - `should_cancel: &dyn Fn() -> bool` をループ境界(パケット単位)で毎回チェックする。
+//! - [`crate::cancel::CancelToken`] をループ境界(パケット単位)で毎回チェックする。
 //!   キャンセルを検知したら一時出力ファイルを削除して `MediaError::Cancelled` を返す。
+//!   クローン可能・スレッド安全なので、将来 Tauri コマンド(別スレッド/非同期)から
+//!   同じトークンの `cancel()` を呼んで中断できる(`cancel.rs` 冒頭コメント参照)。
 //! - `on_progress: &dyn Fn(Progress)` をエンコーダへフレームを送出するたびに呼ぶ。
 //!   `Progress` はフレーム数ベースの最小構造体(frame / total_frames 推定 / percent)。
 //!   Wave 3 の `progress.rs` が fps/speed 等へ拡張する前提。
@@ -38,6 +40,7 @@ use std::path::{Path, PathBuf};
 
 use ffmpeg_next::{self as ffmpeg, filter, format, frame, Dictionary, Packet, Rational};
 
+use crate::cancel::CancelToken;
 use crate::crop;
 use crate::decode;
 use crate::encode::{self, EncoderSpec};
@@ -106,7 +109,8 @@ pub struct ReframeOptions<'a> {
 	pub trim: Option<Trim>,
 	pub encoder: EncoderSelection<'a>,
 	pub bit_rate: usize,
-	pub should_cancel: &'a dyn Fn() -> bool,
+	/// クローン可能・スレッド安全なキャンセルトークン([`CancelToken`] 冒頭コメント参照)。
+	pub cancel: &'a CancelToken,
 	pub on_progress: &'a dyn Fn(Progress),
 }
 
@@ -174,7 +178,7 @@ fn run_pipeline(
 		trim,
 		encoder,
 		bit_rate,
-		should_cancel,
+		cancel,
 		on_progress,
 	} = options;
 
@@ -274,7 +278,7 @@ fn run_pipeline(
 	let mut stopped_early = false;
 
 	'decode: for (stream, packet) in input.packets() {
-		if should_cancel() {
+		if cancel.is_cancelled() {
 			return Err(MediaError::Cancelled);
 		}
 		if stream.index() != ist_index {
@@ -307,7 +311,7 @@ fn run_pipeline(
 				on_progress,
 			)?;
 		}
-		if should_cancel() {
+		if cancel.is_cancelled() {
 			return Err(MediaError::Cancelled);
 		}
 	}

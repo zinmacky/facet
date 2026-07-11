@@ -17,17 +17,17 @@
 //! - `--crop=<x>:<y>:<w>:<h>`(0..1 正規化)を指定すると、事前クロップを適用する
 //!   (`ReframeOptions.crop`)。実ピクセルへの解決に必要な `source` 寸法は
 //!   `media_core::probe::probe` で入力ファイルから取得する。
-//! - `cancel_after_frames` を指定すると、そのフレーム数を送出した時点で
-//!   `should_cancel` が true を返すようになる(キャンセルフックの動作確認用)。
+//! - `cancel_after_frames` を指定すると、そのフレーム数を送出した時点で進捗コールバックが
+//!   `CancelToken::cancel()` を呼ぶ(キャンセルフックの動作確認用)。
 //!   例: `... h264_amf 30` → 30 フレーム目で中断し、一時出力が残らないことを確認できる。
 
-use std::cell::Cell;
 use std::path::PathBuf;
 
 use media_core::encoder_select::{self, Platform};
 use media_core::spec::{CropRect, FitMode, Preset, SourceDimensions, Trim};
 use media_core::{
-	encode, fit, pipeline, probe, reframe, EncoderSelection, MediaError, ReframeOptions,
+	encode, fit, pipeline, probe, reframe, CancelToken, EncoderSelection, MediaError,
+	ReframeOptions,
 };
 
 fn main() {
@@ -107,17 +107,16 @@ fn run() -> Result<(), MediaError> {
 		}
 	};
 
-	// should_cancel / on_progress は共有カウンタ(Cell)経由でフレーム数をやり取りする。
-	// pipeline は single-threaded なので Cell で十分。
-	let frame_count = Cell::new(0u64);
-	let should_cancel = || -> bool {
-		match cancel_after_frames {
-			Some(limit) => frame_count.get() >= limit,
-			None => false,
-		}
-	};
+	// cancel_after_frames が指定されていれば、進捗コールバック内でフレーム数を見て
+	// CancelToken::cancel() を呼ぶ(Tauri 側でも「別経路からの cancel() 呼び出しで
+	// 次のループ境界チェックを止める」という同じ形になる想定)。
+	let cancel_token = CancelToken::new();
 	let on_progress = |progress: pipeline::Progress| {
-		frame_count.set(progress.frame);
+		if let Some(limit) = cancel_after_frames {
+			if progress.frame >= limit {
+				cancel_token.cancel();
+			}
+		}
 		match progress.percent {
 			Some(percent) => println!(
 				"frame={} total={:?} percent={:.1}%",
@@ -143,7 +142,7 @@ fn run() -> Result<(), MediaError> {
 		trim,
 		encoder: selection,
 		bit_rate: encode::DEFAULT_BITRATE,
-		should_cancel: &should_cancel,
+		cancel: &cancel_token,
 		on_progress: &on_progress,
 	};
 
