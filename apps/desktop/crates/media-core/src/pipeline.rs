@@ -9,9 +9,10 @@
 //!   キャンセルを検知したら一時出力ファイルを削除して `MediaError::Cancelled` を返す。
 //!   クローン可能・スレッド安全なので、将来 Tauri コマンド(別スレッド/非同期)から
 //!   同じトークンの `cancel()` を呼んで中断できる(`cancel.rs` 冒頭コメント参照)。
-//! - `on_progress: &dyn Fn(Progress)` をエンコーダへフレームを送出するたびに呼ぶ。
-//!   `Progress` はフレーム数ベースの最小構造体(frame / total_frames 推定 / percent)。
-//!   Wave 3 の `progress.rs` が fps/speed 等へ拡張する前提。
+//! - `on_progress: &dyn Fn(Progress)` は `progress::ProgressTracker` 経由で呼ばれる。
+//!   `ProgressTracker` がフレームを送出するたびに fps/speed/out_time_secs/percent を
+//!   算出し、既定 200ms 間隔でスロットリングした上で `on_progress` を発火する
+//!   (`Progress` のフィールド定義・スロットリング仕様は `progress.rs` 参照)。
 //! - エンコーダは [`EncoderSelection`] として引数注入する(`Explicit` は明示指定、
 //!   `Auto` はプラットフォーム別候補を `encoder_select` から取得し順に試す。
 //!   Wave 2 配線で確定)。
@@ -37,6 +38,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use ffmpeg_next::{self as ffmpeg, filter, format, frame, Dictionary, Packet, Rational};
 
@@ -48,35 +50,13 @@ use crate::encoder_select;
 use crate::error::{MediaError, Result};
 use crate::fit::{self, FilterGraphSpec};
 use crate::probe;
+use crate::progress::ProgressTracker;
 use crate::spec::{CropRect, Preset, SourceDimensions, Trim};
 use crate::trim::{self, TrimDecision, TrimWindow};
 
-/// パイプライン進捗の最小構造体。
-///
-/// Wave 1 時点ではフレーム数ベースの最小情報のみを持つ(fps/speed 等は Wave 3 の
-/// `progress.rs` が拡張する)。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Progress {
-	/// これまでにエンコーダへ送出したフレーム数。
-	pub frame: u64,
-	/// コンテナ申告値等から見積もった総フレーム数(不明なら `None`)。
-	pub total_frames: Option<u64>,
-	/// 0.0〜100.0(見積り不能なら `None`)。
-	pub percent: Option<f64>,
-}
-
-impl Progress {
-	fn new(frame: u64, total_frames: Option<u64>) -> Self {
-		let percent = total_frames
-			.filter(|&total| total > 0)
-			.map(|total| (frame as f64 / total as f64 * 100.0).min(100.0));
-		Progress {
-			frame,
-			total_frames,
-			percent,
-		}
-	}
-}
+/// パイプライン進捗の構造体。定義本体は Wave 3 で `progress.rs` へ移設した
+/// (frame/total_frames/percent に加え out_time_secs/fps/speed を持つ)。
+pub use crate::progress::Progress;
 
 /// エンコーダの選び方。`Explicit` はテスト・CLI での明示指定用、`Auto` は
 /// `encoder_select` のプラットフォーム別候補を先頭から順に試す(Wave 2 配線)。
@@ -276,6 +256,11 @@ fn run_pipeline(
 	// (pts が単調増加である限り)すべて end 以降のため、デコーダ側の EOF flush は
 	// 行わずフィルタ/エンコーダの flush のみ行う。
 	let mut stopped_early = false;
+	// 直近で得られたフレームの pts を秒に変換した値(`Progress.out_time_secs` の元)。
+	// フィルタ出力フレームの pts が稀に不明(`None`)な場合でも 0 に巻き戻らないよう、
+	// 判明したときだけ更新する(`pull_filtered` 内)。
+	let mut last_out_time_secs: f64 = 0.0;
+	let mut progress_tracker = ProgressTracker::new(total_frames, on_progress);
 
 	'decode: for (stream, packet) in input.packets() {
 		if cancel.is_cancelled() {
@@ -307,8 +292,8 @@ fn run_pipeline(
 				&mut filtered,
 				&mut encoded,
 				&mut frame_count,
-				total_frames,
-				on_progress,
+				&mut last_out_time_secs,
+				&mut progress_tracker,
 			)?;
 		}
 		if cancel.is_cancelled() {
@@ -340,8 +325,8 @@ fn run_pipeline(
 				&mut filtered,
 				&mut encoded,
 				&mut frame_count,
-				total_frames,
-				on_progress,
+				&mut last_out_time_secs,
+				&mut progress_tracker,
 			)?;
 		}
 	}
@@ -356,8 +341,8 @@ fn run_pipeline(
 		&mut filtered,
 		&mut encoded,
 		&mut frame_count,
-		total_frames,
-		on_progress,
+		&mut last_out_time_secs,
+		&mut progress_tracker,
 	)?;
 
 	encoder_ctx
@@ -371,6 +356,9 @@ fn run_pipeline(
 		ost_time_base,
 		&mut encoded,
 	)?;
+	// 完了時は必ず最終進捗を通知する(直前の update がスロットリングで間引かれていても、
+	// 呼び出し側は 100% の Progress を確実に受け取れる)。
+	progress_tracker.finish(frame_count, last_out_time_secs);
 
 	octx.write_trailer()
 		.map_err(|source| MediaError::Mux { source })?;
@@ -585,7 +573,7 @@ fn drain_encoder(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn pull_filtered(
+fn pull_filtered<F: Fn() -> Instant>(
 	graph: &mut filter::Graph,
 	encoder: &mut ffmpeg::encoder::Video,
 	octx: &mut format::context::Output,
@@ -595,8 +583,8 @@ fn pull_filtered(
 	filtered: &mut frame::Video,
 	encoded: &mut Packet,
 	frame_count: &mut u64,
-	total_frames: Option<u64>,
-	on_progress: &dyn Fn(Progress),
+	last_out_time_secs: &mut f64,
+	tracker: &mut ProgressTracker<'_, F>,
 ) -> Result<()> {
 	loop {
 		let has_frame = graph
@@ -622,30 +610,28 @@ fn pull_filtered(
 			encoded,
 		)?;
 		*frame_count += 1;
-		on_progress(Progress::new(*frame_count, total_frames));
+		// フィルタ出力フレームの pts が判明していれば out_time_secs を更新する
+		// (`buffersink` は通常 `best_effort_timestamp` を保つが、まれに不明な場合は
+		// 直前の値を引き継ぎ 0 に巻き戻さない)。
+		if let Some(pts) = filtered.timestamp() {
+			*last_out_time_secs = pts_to_secs(pts, ist_time_base);
+		}
+		tracker.update(*frame_count, *last_out_time_secs);
 	}
 	Ok(())
+}
+
+/// pts(`time_base` 単位の整数)を秒に変換する。
+fn pts_to_secs(pts: i64, time_base: Rational) -> f64 {
+	pts as f64 * f64::from(time_base.numerator()) / f64::from(time_base.denominator())
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 
-	// --- Progress::new (既存の Wave 1 テストの範囲。回帰確認用) -------------------------
-
-	#[test]
-	fn progress_percent_is_none_when_total_unknown() {
-		let progress = Progress::new(5, None);
-		assert_eq!(progress.frame, 5);
-		assert_eq!(progress.total_frames, None);
-		assert_eq!(progress.percent, None);
-	}
-
-	#[test]
-	fn progress_percent_is_clamped_to_100() {
-		let progress = Progress::new(120, Some(100));
-		assert_eq!(progress.percent, Some(100.0));
-	}
+	// --- Progress の構造体本体・生成ロジックのテストは `progress.rs` へ移設した
+	//     (Wave 3 統合。`Progress` はもうこのファイルに定義を持たない)。
 
 	// --- temp_output_path --------------------------------------------------------------
 
