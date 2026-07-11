@@ -38,11 +38,10 @@ export default defineConfig({
 				changeOrigin: true,
 				rewrite: (path) => path.replace(/^\/api/, ""),
 			},
-			// /files/* はローカルのメディア配信。SSE も含むため ws は不要だが素通しする。
+			// /files/* はローカルのメディア配信。パスはそのまま素通しする(rewrite 不要)。
 			"/files": {
 				target: SERVER_ORIGIN,
 				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/files/, "/files"),
 			},
 		},
 	},
