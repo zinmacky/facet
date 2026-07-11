@@ -63,6 +63,12 @@ allow = [
 	"CC0-1.0",
 	"MIT-0",
 	"MPL-2.0",
+	# ffmpeg-next / ffmpeg-sys-next(Rust バインディングクレート自体)のライセンス。
+	# WTFPL は FSF Free/Libre 認定の緩いライセンスで配布上の懸念はない。
+	# 注意: これはあくまで「Rust バインディングコード」のライセンスであり、実行時に
+	# 動的リンクする FFmpeg 共有ライブラリ本体の GPL/LGPL とは別問題(deny.toml 冒頭の
+	# コメント・配布ガードは Phase 4 課題、を参照)。
+	"WTFPL",
 ]
 
 [licenses.private]
