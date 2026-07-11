@@ -4,19 +4,31 @@
 //! 薄いラッパで、パイプライン本体のロジックはここには置かない。
 //!
 //! 使い方:
-//!   cargo run --example reframe -- <input> <output> <blur-pad|crop> <target_w> <target_h> [encoder] [cancel_after_frames]
+//!   cargo run --example reframe -- <input> <output> <blur-pad|crop> <target_w> <target_h> \
+//!       [encoder|auto] [cancel_after_frames] [--trim=<start>:<end>] [--crop=<x>:<y>:<w>:<h>]
 //!
-//! `cancel_after_frames` を指定すると、そのフレーム数を送出した時点で
-//! `should_cancel` が true を返すようになる(キャンセルフックの動作確認用)。
-//! 例: `... h264_amf 30` → 30 フレーム目で中断し、一時出力が残らないことを確認できる。
+//! - `encoder` を省略するか `auto` を指定すると `encoder_select::select()` の
+//!   プラットフォーム別候補(Windows: h264_amf → h264_mf、mac: h264_videotoolbox)を
+//!   先頭から順に試す(Wave 2 配線)。エンコーダ名を明示すると、そのプラットフォームの
+//!   候補テーブルに一致するエントリがあれば同じ追加オプション(例: h264_mf の
+//!   `hw_encoding=1`)を再利用する(なければオプションなしで開く)。
+//! - `--trim=<start>:<end>`(秒)を指定すると、その区間だけを処理する
+//!   (`ReframeOptions.trim`、Wave 2 配線)。
+//! - `--crop=<x>:<y>:<w>:<h>`(0..1 正規化)を指定すると、事前クロップを適用する
+//!   (`ReframeOptions.crop`)。実ピクセルへの解決に必要な `source` 寸法は
+//!   `media_core::probe::probe` で入力ファイルから取得する。
+//! - `cancel_after_frames` を指定すると、そのフレーム数を送出した時点で
+//!   `should_cancel` が true を返すようになる(キャンセルフックの動作確認用)。
+//!   例: `... h264_amf 30` → 30 フレーム目で中断し、一時出力が残らないことを確認できる。
 
 use std::cell::Cell;
 use std::path::PathBuf;
 
-use ffmpeg_next::Dictionary;
-
-use media_core::spec::{FitMode, Preset};
-use media_core::{encode, fit, pipeline, reframe, MediaError, ReframeOptions};
+use media_core::encoder_select::{self, Platform};
+use media_core::spec::{CropRect, FitMode, Preset, SourceDimensions, Trim};
+use media_core::{
+	encode, fit, pipeline, probe, reframe, EncoderSelection, MediaError, ReframeOptions,
+};
 
 fn main() {
 	if let Err(err) = run() {
@@ -26,24 +38,51 @@ fn main() {
 }
 
 fn run() -> Result<(), MediaError> {
-	let args: Vec<String> = std::env::args().collect();
-	if args.len() < 6 {
+	let raw_args: Vec<String> = std::env::args().skip(1).collect();
+	let (flags, positional): (Vec<&str>, Vec<&str>) = raw_args
+		.iter()
+		.map(|s| s.as_str())
+		.partition(|a| a.starts_with("--"));
+
+	if positional.len() < 5 {
 		eprintln!(
-            "usage: reframe <input> <output> <blur-pad|crop> <target_w> <target_h> [encoder] [cancel_after_frames]"
+            "usage: reframe <input> <output> <blur-pad|crop> <target_w> <target_h> [encoder|auto] [cancel_after_frames] [--trim=<start>:<end>] [--crop=<x>:<y>:<w>:<h>]"
         );
 		std::process::exit(2);
 	}
 
-	let input = PathBuf::from(&args[1]);
-	let output = PathBuf::from(&args[2]);
-	let fit_mode = parse_fit(&args[3]);
-	let width: u32 = parse_u32(&args[4], "target_w");
-	let height: u32 = parse_u32(&args[5], "target_h");
-	let encoder_name = args
-		.get(6)
-		.cloned()
-		.unwrap_or_else(|| "h264_videotoolbox".to_string());
-	let cancel_after_frames: Option<u64> = args.get(7).and_then(|s| s.parse().ok());
+	let input = PathBuf::from(positional[0]);
+	let output = PathBuf::from(positional[1]);
+	let fit_mode = parse_fit(positional[2]);
+	let width: u32 = parse_u32(positional[3], "target_w");
+	let height: u32 = parse_u32(positional[4], "target_h");
+	let encoder_arg = positional.get(5).copied();
+	let cancel_after_frames: Option<u64> = positional.get(6).and_then(|s| s.parse().ok());
+
+	let trim: Option<Trim> = flags
+		.iter()
+		.find_map(|f| f.strip_prefix("--trim="))
+		.map(parse_trim);
+	let crop: Option<CropRect> = flags
+		.iter()
+		.find_map(|f| f.strip_prefix("--crop="))
+		.map(parse_crop);
+
+	// crop 適用時のみ実際のソース寸法が必要(pre_crop 計算用)。probe を使って
+	// 手動で寸法を渡す手間をなくす(Tauri コマンドから呼ぶ将来形にも近い)。
+	let source = match crop {
+		Some(_) => {
+			let info = probe::probe(&input)?;
+			SourceDimensions {
+				width: info.width,
+				height: info.height,
+			}
+		}
+		None => SourceDimensions {
+			width: 0,
+			height: 0,
+		},
+	};
 
 	let preset = Preset {
 		name: "cli".to_string(),
@@ -52,14 +91,21 @@ fn run() -> Result<(), MediaError> {
 		fit: fit_mode,
 	};
 
-	// h264_mf は既定 -hw_encoding=false のためソフトウェア MFT へ静かにフォールバックする
-	// (docs/phase2-0-windows-setup.md §7.2 の実機検証済み挙動)。プラットフォーム別の
-	// エンコーダ選択・オプション決定は Wave 2 の `encoder_select` の責務だが、この CLI は
-	// スパイク同様この 1 エンコーダのみ暫定的に特別扱いする。
-	let mut encoder_options = Dictionary::new();
-	if encoder_name == "h264_mf" {
-		encoder_options.set("hw_encoding", "1");
-	}
+	// encoder_name を省略(または "auto")すると encoder_select::select() の候補を
+	// 順に試す。明示指定時は、現在のプラットフォームの候補テーブルに同名の
+	// エントリがあればその追加オプション(hw_encoding=1 等)を再利用する
+	// (Wave 1 時点の h264_mf ハードコードの一般化、モジュール冒頭コメント参照)。
+	let selection = match encoder_arg {
+		None | Some("auto") => EncoderSelection::Auto,
+		Some(name) => {
+			let options = encoder_select::candidate_table(Platform::current())
+				.iter()
+				.find(|choice| choice.name == name)
+				.map(|choice| choice.to_dictionary())
+				.unwrap_or_default();
+			EncoderSelection::Explicit { name, options }
+		}
+	};
 
 	// should_cancel / on_progress は共有カウンタ(Cell)経由でフレーム数をやり取りする。
 	// pipeline は single-threaded なので Cell で十分。
@@ -82,25 +128,27 @@ fn run() -> Result<(), MediaError> {
 	};
 
 	println!(
-		"fit={} target={width}x{height} encoder={encoder_name}",
-		fit_label(&preset.fit)
+		"fit={} target={width}x{height} encoder={} trim={:?} crop={:?}",
+		fit_label(&preset.fit),
+		encoder_arg.unwrap_or("auto"),
+		trim,
+		crop,
 	);
 
 	let options = ReframeOptions {
 		preset: &preset,
 		sigma: fit::DEFAULT_SIGMA,
-		// TODO(Wave 2): trim.rs / crop.rs 接続後、CLI 引数から渡せるようにする。
-		pre_crop: None,
-		trim: None,
-		encoder_name: &encoder_name,
-		encoder_options,
+		crop,
+		source,
+		trim,
+		encoder: selection,
 		bit_rate: encode::DEFAULT_BITRATE,
 		should_cancel: &should_cancel,
 		on_progress: &on_progress,
 	};
 
-	reframe(&input, &output, options)?;
-	println!("done -> {}", output.display());
+	let encoder_used = reframe(&input, &output, options)?;
+	println!("done -> {} (encoder={encoder_used})", output.display());
 	Ok(())
 }
 
@@ -120,6 +168,45 @@ fn parse_u32(raw: &str, label: &str) -> u32 {
 		eprintln!("invalid {label}: {raw}");
 		std::process::exit(2);
 	})
+}
+
+/// `--trim=<start>:<end>`(秒)をパースする。
+fn parse_trim(raw: &str) -> Trim {
+	let parts: Vec<&str> = raw.split(':').collect();
+	let [start, end] = parts.as_slice() else {
+		eprintln!("invalid --trim (expected <start>:<end>): {raw}");
+		std::process::exit(2);
+	};
+	let start: f64 = start.parse().unwrap_or_else(|_| {
+		eprintln!("invalid --trim start: {start}");
+		std::process::exit(2);
+	});
+	let end: f64 = end.parse().unwrap_or_else(|_| {
+		eprintln!("invalid --trim end: {end}");
+		std::process::exit(2);
+	});
+	Trim { start, end }
+}
+
+/// `--crop=<x>:<y>:<w>:<h>`(0..1 正規化)をパースする。
+fn parse_crop(raw: &str) -> CropRect {
+	let parts: Vec<&str> = raw.split(':').collect();
+	let [x, y, w, h] = parts.as_slice() else {
+		eprintln!("invalid --crop (expected <x>:<y>:<w>:<h>): {raw}");
+		std::process::exit(2);
+	};
+	let parse_component = |label: &str, value: &str| -> f64 {
+		value.parse().unwrap_or_else(|_| {
+			eprintln!("invalid --crop {label}: {value}");
+			std::process::exit(2);
+		})
+	};
+	CropRect {
+		x: parse_component("x", x),
+		y: parse_component("y", y),
+		width: parse_component("width", w),
+		height: parse_component("height", h),
+	}
 }
 
 fn fit_label(fit: &FitMode) -> &'static str {

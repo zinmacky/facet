@@ -42,6 +42,17 @@ pub enum MediaError {
 	#[error("映像ストリームが見つかりません: {path}")]
 	NoVideoStream { path: PathBuf },
 
+	/// 映像ストリームの寸法(width/height)が 0 以下(取得不可)。
+	/// TS 版 `probe.ts` の「映像の寸法を取得できません」に対応。
+	#[error("映像の寸法を取得できません: {path}")]
+	InvalidDimensions { path: PathBuf },
+
+	/// `decode::open_input` が返した `stream_index` を、`format::context::Input` から
+	/// 再度引けなかった(通常発生しない内部不整合。probe.rs がフレームレート/尺
+	/// 取得のためストリームを再取得する箇所で使用)。
+	#[error("入力ストリームが見つかりません(index={index}): {path}")]
+	InputStreamMissing { path: PathBuf, index: usize },
+
 	/// 映像ストリームのコーデックパラメータからデコーダを構築できなかった
 	/// (非対応コーデック等)。
 	#[error("デコーダを構築できませんでした ({source})")]
@@ -120,4 +131,29 @@ pub enum MediaError {
 	/// (pipeline.rs の実装契約)。
 	#[error("キャンセルされました")]
 	Cancelled,
+
+	/// trim 開始点への demuxer シーク(`format::context::Input::seek`)が失敗した。
+	#[error("シークに失敗しました: {path} ({source})")]
+	Seek {
+		path: PathBuf,
+		#[source]
+		source: ffmpeg_next::Error,
+	},
+
+	/// `encoder_select` モジュール: プラットフォーム別の HW エンコーダ候補が
+	/// 1 つも使えなかった。`attempted` は候補テーブルの全エンコーダ名
+	/// (非対応プラットフォームで候補自体が 0 件の場合は空)。
+	///
+	/// この判定は `ffmpeg_next::encoder::find_by_name` による登録確認のみに基づく
+	/// (`encoder_select::select` の責務)。実際の HW 初期化成否(open 失敗、
+	/// ドライバ/セッション枯渇等)はここでは検出できない — その扱いは
+	/// `candidates()` の返す順で `encode::open_encoder` を試す呼び出し側の
+	/// 候補ループに委ねる(`EncoderOpen` が個々の open 失敗を表す)。
+	/// Phase 2 では libx264 等のソフトウェアエンコーダへのフォールバックを
+	/// 行わない(docs/desktop-migration-plan.md §11-2)。
+	#[error("利用可能な HW エンコーダが見つかりません(platform={platform}, 候補={attempted:?})")]
+	NoEncoderCandidate {
+		platform: String,
+		attempted: Vec<String>,
+	},
 }

@@ -18,3 +18,7 @@ serde_json = "1"
 [[example]]
 name = "reframe"
 path = "examples/reframe.rs"
+
+[[example]]
+name = "probe"
+path = "examples/probe.rs"
