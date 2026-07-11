@@ -12,8 +12,10 @@ import type { Clip } from "./types";
 import { sourceBaseName } from "./types";
 import { ClipList } from "./features/clips/ClipList";
 import { ClipEditor, type ClipEditorHandle } from "./features/clips/ClipEditor";
-import { ExportModal } from "./features/export/ExportModal";
-import { UploadModal } from "./features/upload/UploadModal";
+import { ExportScreen } from "./features/export/ExportScreen";
+import { UploadScreen } from "./features/upload/UploadScreen";
+import { WizardShell } from "./features/wizard/WizardShell";
+import { type ExportSummary, StepIndicator } from "./features/wizard/StepIndicator";
 import { Card } from "./components/ui/Card";
 import { Button } from "./components/ui/Button";
 import { IconButton } from "./components/ui/IconButton";
@@ -49,19 +51,27 @@ function createClip(source: Source, index: number): Clip {
 
 /**
  * アプリの状態オーナー。
+ * 編集/書き出し/アップロードの3画面を横スライドのウィザードとして常時マウントし、
+ * `step` で表示中の画面を切り替える(WizardShell が実際のスライド表示を担う)。
  * 元画面ではソース選択と切り抜き(trim + クロップ枠 + アスペクト比)を編集する。
- * 「すべて書き出し」で EXPORT モーダル、そこから UPLOAD モーダルへ段階的に進む。
  */
 export function App() {
 	const [source, setSource] = useState<Source | null>(null);
 	const [clips, setClips] = useState<Clip[]>([]);
 	const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 	const [step, setStep] = useState<Step>("edit");
+	// アップロード画面の投稿処理中フラグ(離脱抑止に使う)。
+	const [uploadBusy, setUploadBusy] = useState(false);
+	// 書き出し画面の進捗サマリ(StepIndicator のバッジ表示に使う)。
+	const [exportSummary, setExportSummary] = useState<ExportSummary>();
+	// 増加させるたびに ExportScreen/UploadScreen が全状態を明示的に破棄する
+	// (新しい元動画を選択したときのみ増分する — リスク4対応)。
+	const [resetToken, setResetToken] = useState(0);
 	// 連番カウンタ。削除後の再採番でも名前が衝突しないよう、単調増加させる。
 	const clipSeqRef = useRef(1);
 	const confirm = useConfirm();
 	// 元動画プレーヤー(ClipEditor)を命令的に操作するための参照。
-	// 「すべて書き出し」押下時に再生を止めるために使う。
+	// 編集画面から離れるときに再生を止めるために使う。
 	const clipEditorRef = useRef<ClipEditorHandle>(null);
 
 	// Tauri invoke 疎通確認(Phase 1 の受け入れ基準)。開発用の小さな表示としてフッタに残す。
@@ -95,6 +105,10 @@ export function App() {
 			setSource(result);
 			setClips([first]);
 			setSelectedClipId(first.id);
+			// 新しい元動画を選んだので、必ず編集画面へ戻り、書き出し/アップロード画面の
+			// 古い結果(前の動画の clip に紐づく results/posts/preview)を破棄させる。
+			setStep("edit");
+			setResetToken((t) => t + 1);
 		},
 	});
 
@@ -133,43 +147,75 @@ export function App() {
 
 	const selectedClip = clips.find((c) => c.id === selectedClipId);
 
+	// "export" へ前進してよいか / "upload" へ前進してよいか。
+	const canGoExport = !!source && clips.length > 0;
+	const canGoUpload = clips.length > 0;
+	// アップロード画面が投稿処理中の間は、そこから離れる遷移をすべて禁止する。
+	const stepLocked = step === "upload" && uploadBusy;
+
+	// ウィザードの画面遷移をここに集約する。StepIndicator・各画面の戻る/進む
+	// ボタンはすべてこれ経由で遷移する。
+	const goToStep = useCallback(
+		(next: Step) => {
+			if (stepLocked && next !== step) return;
+			// 編集画面から離れるときは元動画の再生を止める(書き出し内容はクロップ済みの
+			// 音声のみで、この再生音とは無関係だが、バックグラウンドで鳴り続けるのを避ける)。
+			if (step === "edit" && next !== "edit") clipEditorRef.current?.pause();
+			setStep(next);
+		},
+		[step, stepLocked],
+	);
+
 	return (
 		<div className="flex h-full flex-col bg-panel">
 			{/* トップバー */}
-			<header className="flex h-12 shrink-0 items-center gap-3 border-b border-line px-4">
-				<div className="flex items-center gap-2">
-					<div className="h-4 w-4 rounded-sm bg-accent" />
-					<span className="text-sm font-semibold tracking-tight text-neutral-100">
-						Facet <span className="text-neutral-500">desktop</span>
-					</span>
+			<header className="grid h-12 shrink-0 grid-cols-[auto_1fr_auto] items-center gap-3 border-b border-line px-4">
+				<div className="flex items-center gap-3">
+					<div className="flex items-center gap-2">
+						<div className="h-4 w-4 rounded-sm bg-accent" />
+						<span className="text-sm font-semibold tracking-tight text-neutral-100">
+							Facet <span className="text-neutral-500">desktop</span>
+						</span>
+					</div>
+
+					<div className="h-5 w-px bg-line" />
+
+					<Button
+						size="sm"
+						variant="primary"
+						disabled={pickMutation.status === "pending"}
+						onClick={() => pickMutation.mutate()}
+					>
+						{pickMutation.status === "pending" ? "読み込み中…" : "元動画を選択"}
+					</Button>
+
+					{source && (
+						<span className="truncate font-mono text-[11px] text-neutral-400">
+							{sourceBaseName(source.inputPath)}
+						</span>
+					)}
 				</div>
 
-				<div className="mx-2 h-5 w-px bg-line" />
+				<div className="flex justify-center">
+					<StepIndicator
+						step={step}
+						canGoExport={canGoExport}
+						canGoUpload={canGoUpload}
+						locked={stepLocked}
+						exportSummary={exportSummary}
+						onSelect={goToStep}
+					/>
+				</div>
 
-				<Button
-					size="sm"
-					variant="primary"
-					disabled={pickMutation.status === "pending"}
-					onClick={() => pickMutation.mutate()}
-				>
-					{pickMutation.status === "pending" ? "読み込み中…" : "元動画を選択"}
-				</Button>
-
-				{source && (
-					<span className="truncate font-mono text-[11px] text-neutral-400">
-						{sourceBaseName(source.inputPath)}
-					</span>
-				)}
-
-				<div className="flex-1" />
-
-				{source && (
-					<span className="font-mono text-[11px] text-neutral-500">
-						{source.probe.width}×{source.probe.height} ·{" "}
-						{formatTime(source.probe.duration)}
-						{source.probe.codec ? ` · ${source.probe.codec}` : ""}
-					</span>
-				)}
+				<div className="flex justify-end">
+					{source && (
+						<span className="font-mono text-[11px] text-neutral-500">
+							{source.probe.width}×{source.probe.height} ·{" "}
+							{formatTime(source.probe.duration)}
+							{source.probe.codec ? ` · ${source.probe.codec}` : ""}
+						</span>
+					)}
+				</div>
 			</header>
 
 			{pickMutation.isError && (
@@ -178,80 +224,86 @@ export function App() {
 				</div>
 			)}
 
-			{/* メイン: 左(選択中 Clip 編集) / 右(Clip 一覧 + 書き出し起点) */}
-			<div className="grid min-h-0 flex-1 grid-cols-[1fr_340px]">
-				<div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto p-3">
-					{!source ? (
-						<Placeholder text="元動画を選択してください。" />
-					) : selectedClip ? (
-						<ClipEditor
-							ref={clipEditorRef}
-							clip={selectedClip}
-							probe={source.probe}
-							videoSrc={source.videoSrc}
-							onChange={changeClip}
-						/>
-					) : (
-						<Placeholder text="右のパネルから切り抜きを追加してください。" />
-					)}
-				</div>
+			<WizardShell
+				step={step}
+				panels={{
+					edit: (
+						<div className="grid h-full min-h-0 grid-cols-[1fr_340px]">
+							<div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto p-3">
+								{!source ? (
+									<Placeholder text="元動画を選択してください。" />
+								) : selectedClip ? (
+									<ClipEditor
+										ref={clipEditorRef}
+										clip={selectedClip}
+										probe={source.probe}
+										videoSrc={source.videoSrc}
+										onChange={changeClip}
+									/>
+								) : (
+									<Placeholder text="右のパネルから切り抜きを追加してください。" />
+								)}
+							</div>
 
-				<aside className="flex min-h-0 flex-col gap-3 border-l border-line p-3">
-					<Card
-						title="Clips"
-						className="min-h-0 flex-1"
-						actions={
-							<IconButton
-								tone="accent"
-								onClick={addClip}
-								disabled={!source}
-								aria-label="切り抜きを追加"
-								title="切り抜きを追加"
-								className="rounded-full"
-							>
-								<PlusIcon />
-							</IconButton>
-						}
-					>
-						<ClipList
+							<aside className="flex min-h-0 flex-col gap-3 border-l border-line p-3">
+								<Card
+									title="Clips"
+									className="min-h-0 flex-1"
+									actions={
+										<IconButton
+											tone="accent"
+											onClick={addClip}
+											disabled={!source}
+											aria-label="切り抜きを追加"
+											title="切り抜きを追加"
+											className="rounded-full"
+										>
+											<PlusIcon />
+										</IconButton>
+									}
+								>
+									<ClipList
+										clips={clips}
+										selectedClipId={selectedClipId}
+										onSelect={setSelectedClipId}
+										onRemove={removeClip}
+										onChange={changeClip}
+									/>
+								</Card>
+
+								<Button
+									variant="primary"
+									disabled={!canGoExport}
+									onClick={() => goToStep("export")}
+									className="w-full shrink-0"
+								>
+									すべて書き出し{clips.length > 0 ? `(${clips.length}本)` : ""}
+								</Button>
+							</aside>
+						</div>
+					),
+					export: (
+						<ExportScreen
+							active={step === "export"}
+							source={source}
 							clips={clips}
-							selectedClipId={selectedClipId}
-							onSelect={setSelectedClipId}
-							onRemove={removeClip}
-							onChange={changeClip}
+							resetToken={resetToken}
+							onGoToEdit={() => goToStep("edit")}
+							onGoToUpload={() => goToStep("upload")}
+							onProgressSummary={setExportSummary}
 						/>
-					</Card>
-
-					<Button
-						variant="primary"
-						disabled={!source || clips.length === 0}
-						onClick={() => {
-							// 書き出しモーダルを開くのと同時に、元動画の再生を止める
-							// (書き出し内容はクロップ済みの音声のみで、この再生音とは無関係だが、
-							// バックグラウンドで鳴り続けるのを避ける)。
-							clipEditorRef.current?.pause();
-							setStep("export");
-						}}
-						className="w-full shrink-0"
-					>
-						すべて書き出し{clips.length > 0 ? `(${clips.length}本)` : ""}
-					</Button>
-				</aside>
-			</div>
-
-			<ExportModal
-				open={step === "export"}
-				source={source}
-				clips={clips}
-				onClose={() => setStep("edit")}
-				onProceedToUpload={() => setStep("upload")}
-			/>
-			<UploadModal
-				open={step === "upload"}
-				source={source}
-				clips={clips}
-				onClose={() => setStep("edit")}
-				onBack={() => setStep("export")}
+					),
+					upload: (
+						<UploadScreen
+							active={step === "upload"}
+							source={source}
+							clips={clips}
+							resetToken={resetToken}
+							onGoToExport={() => goToStep("export")}
+							onBusyChange={setUploadBusy}
+						/>
+					),
+				}}
 			/>
 
 			{/* 開発用フッタ: Tauri invoke 疎通確認(Phase 1 の受け入れ基準)。 */}
