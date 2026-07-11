@@ -156,4 +156,13 @@ pub enum MediaError {
 		platform: String,
 		attempted: Vec<String>,
 	},
+
+	/// 音声のリサンプル(サンプルレート/フォーマット/チャンネルレイアウト変換)の
+	/// 構築(`resampling::Context::get`)または実行(`run`/`flush`)が失敗した
+	/// (`audio.rs`)。
+	#[error("音声のリサンプルに失敗しました ({source})")]
+	Resample {
+		#[source]
+		source: ffmpeg_next::Error,
+	},
 }
