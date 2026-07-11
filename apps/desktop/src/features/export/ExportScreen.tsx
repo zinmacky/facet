@@ -15,6 +15,7 @@ import {
 import { type PreviewState, usePreview } from "../../lib/usePreview";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
 import { clipPreviewSig } from "../../lib/clipSig";
+import { uniqueBaseNames } from "../../lib/uniqueBaseName";
 import { Button } from "../../components/ui/Button";
 import { cn } from "../../components/ui/cn";
 import type { ExportSummary } from "../wizard/StepIndicator";
@@ -163,6 +164,12 @@ export function ExportScreen({
 		const probe = source.probe;
 		const input = source.inputPath;
 
+		// ファイル名の重複を避ける(同名 clip が複数ある場合など。UploadScreen の
+		// 一括書き出しと同じ採番ロジックを共有する)。現在の clips 全体から都度
+		// 計算する純粋関数のため、この effect が複数回走っても同じ clip 集合であれば
+		// 同じ名前を返す(安定)。
+		const uniqueNames = uniqueBaseNames(clips, (c) => sanitizeFileName(c.name));
+
 		for (const clip of clips) {
 			const existing = resultsRef.current.get(clip.id);
 			if (existing && existing.status === "done") continue;
@@ -194,10 +201,8 @@ export function ExportScreen({
 
 			void (async () => {
 				try {
-					const outputPath = await join(
-						dir,
-						`${sanitizeFileName(clip.name)}.mp4`,
-					);
+					const base = uniqueNames.get(clip) ?? sanitizeFileName(clip.name);
+					const outputPath = await join(dir, `${base}.mp4`);
 					const handle = await startReframe(input, outputPath, spec, {
 						onProgress: (progress) => {
 							update({

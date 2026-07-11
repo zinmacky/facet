@@ -27,6 +27,7 @@ import {
 import { type PreviewState, usePreview } from "../../lib/usePreview";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
 import { clipPreviewSig } from "../../lib/clipSig";
+import { uniqueBaseNames } from "../../lib/uniqueBaseName";
 import { Modal } from "../../components/ui/Modal";
 import { Button } from "../../components/ui/Button";
 import { IconButton } from "../../components/ui/IconButton";
@@ -684,13 +685,12 @@ export function UploadScreen({
 			}
 
 			// ファイル名の重複を避ける(同一 clip に同一ターゲット+フィットの
-			// Output を複数追加した場合など)。
-			const used = new Map<string, number>();
-			const uniqueBaseName = (base: string): string => {
-				const count = (used.get(base) ?? 0) + 1;
-				used.set(base, count);
-				return count === 1 ? base : `${base}-${count}`;
-			};
+			// Output を複数追加した場合など)。ExportScreen の書き出しと同じ採番
+			// ロジックを共有する。
+			const uniqueNames = uniqueBaseNames(
+				tasks,
+				(t) => `${sanitizeFileName(t.clip.name)}_${t.target.id}_${t.output.fit}`,
+			);
 
 			setBulkExports(() => {
 				const next = new Map<string, BulkExportTask>();
@@ -701,9 +701,9 @@ export function UploadScreen({
 
 			const outcomes = await Promise.all(
 				tasks.map(async (t) => {
-					const base = uniqueBaseName(
-						`${sanitizeFileName(t.clip.name)}_${t.target.id}_${t.output.fit}`,
-					);
+					const base =
+						uniqueNames.get(t) ??
+						`${sanitizeFileName(t.clip.name)}_${t.target.id}_${t.output.fit}`;
 					try {
 						const outputPath = await join(dir, `${base}.mp4`);
 						await new Promise<void>((resolve, reject) => {

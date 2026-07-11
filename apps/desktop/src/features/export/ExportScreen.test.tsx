@@ -163,3 +163,22 @@ describe("ExportScreen: clip 単位シグネチャ無効化(clipPreviewSig)", ()
 		});
 	});
 });
+
+describe("ExportScreen: 書き出しファイル名の重複回避", () => {
+	it("同名 clip が複数あっても書き出し先ファイル名は衝突せず、2 件目以降に -2 が付く", async () => {
+		const user = userEvent.setup();
+		// 2 clip が同じ表示名を持つ(例: 同じ元動画から複製した場合など)。
+		const clipA = makeClip("clip-a", "Clip", 10);
+		const clipB = makeClip("clip-b", "Clip", 8);
+		renderWithProviders(<Harness initialClips={[clipA, clipB]} />);
+
+		await startExport(user);
+
+		// 以前は両方とも `sanitizeFileName(clip.name)}.mp4` = "Clip.mp4" で
+		// 書き出し先が衝突し、後発のジョブが先発の出力を上書きしていた(P1 バグ)。
+		// 採番ロジック(uniqueBaseNames、UploadScreen の一括書き出しと共有)により
+		// 2 件目は "Clip-2.mp4" になる。
+		expect(mockJoin).toHaveBeenCalledWith("/out", "Clip.mp4");
+		expect(mockJoin).toHaveBeenCalledWith("/out", "Clip-2.mp4");
+	});
+});
