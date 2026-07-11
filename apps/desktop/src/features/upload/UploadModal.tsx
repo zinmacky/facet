@@ -182,6 +182,8 @@ export function UploadModal({
 	const [presetNote, setPresetNote] = useState<string | null>(null);
 	// 「一括設定」モーダル(出力先の組み合わせ一括適用)の開閉状態。
 	const [bulkSettingsOpen, setBulkSettingsOpen] = useState(false);
+	// 「予約スケジュール」モーダル(予約日時の一括割当)の開閉状態。
+	const [scheduleSettingsOpen, setScheduleSettingsOpen] = useState(false);
 
 	// 閉じたら内部状態を初期化する(再度開いたときは現在の clips から作り直す)。
 	useEffect(() => {
@@ -197,6 +199,7 @@ export function UploadModal({
 		setOutputPresets([{ targetId: DEFAULT_TARGET_ID, fit: DEFAULT_FIT }]);
 		setPresetNote(null);
 		setBulkSettingsOpen(false);
+		setScheduleSettingsOpen(false);
 		// 実行中の一括書き出しジョブを止めてから状態をクリアする。
 		for (const unsub of bulkUnsubsRef.current.values()) unsub();
 		bulkUnsubsRef.current.clear();
@@ -594,7 +597,10 @@ export function UploadModal({
 	const setBulkTask = (outputId: string, patch: Partial<BulkExportTask>) => {
 		setBulkExports((prev) => {
 			const next = new Map(prev);
-			const cur = next.get(outputId) ?? { status: "running" as const, ratio: 0 };
+			const cur = next.get(outputId) ?? {
+				status: "running" as const,
+				ratio: 0,
+			};
 			next.set(outputId, { ...cur, ...patch });
 			return next;
 		});
@@ -654,7 +660,8 @@ export function UploadModal({
 
 			setBulkExports(() => {
 				const next = new Map<string, BulkExportTask>();
-				for (const t of tasks) next.set(t.output.id, { status: "running", ratio: 0 });
+				for (const t of tasks)
+					next.set(t.output.id, { status: "running", ratio: 0 });
 				return next;
 			});
 
@@ -669,12 +676,18 @@ export function UploadModal({
 							let handle: { unsubscribe: () => void } | undefined;
 							startReframe(source.inputPath, outputPath, t.spec, {
 								onProgress: (progress) => {
-									setBulkTask(t.output.id, { ratio: (progress.percent ?? 0) / 100 });
+									setBulkTask(t.output.id, {
+										ratio: (progress.percent ?? 0) / 100,
+									});
 								},
 								onDone: () => {
 									handle?.unsubscribe();
 									bulkUnsubsRef.current.delete(t.output.id);
-									setBulkTask(t.output.id, { status: "done", ratio: 1, outputPath });
+									setBulkTask(t.output.id, {
+										status: "done",
+										ratio: 1,
+										outputPath,
+									});
 									resolve();
 								},
 								onError: (message) => {
@@ -690,7 +703,8 @@ export function UploadModal({
 									setBulkTask(t.output.id, { jobId: h.jobId });
 								})
 								.catch((err: unknown) => {
-									const message = err instanceof Error ? err.message : String(err);
+									const message =
+										err instanceof Error ? err.message : String(err);
 									setBulkTask(t.output.id, { status: "error", error: message });
 									reject(err instanceof Error ? err : new Error(message));
 								});
@@ -775,22 +789,6 @@ export function UploadModal({
 						で対応予定)。書き出し済みファイルは右の「フォルダへ一括書き出し」で取得してください。
 					</div>
 				)}
-				<div className="shrink-0">
-					<ScheduleSettings
-						startDate={startDate}
-						endDate={endDate}
-						weekdayTimes={weekdayTimes}
-						note={assignNote}
-						onStartDate={setStartDate}
-						onEndDate={setEndDate}
-						onToggleWeekday={toggleWeekday}
-						onAddTime={addTimeFor}
-						onRemoveTime={removeTimeFor}
-						onSetTime={setTimeFor}
-						onAssign={assignSchedule}
-					/>
-				</div>
-
 				<div className="flex min-h-0 flex-1 gap-3">
 					{/* 中央: 選択中 Post の詳細 */}
 					<div className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
@@ -836,6 +834,13 @@ export function UploadModal({
 								onClick={() => setBulkSettingsOpen(true)}
 							>
 								一括設定…
+							</Button>
+							<Button
+								variant="secondary"
+								size="sm"
+								onClick={() => setScheduleSettingsOpen(true)}
+							>
+								予約スケジュール…
 							</Button>
 							<Button
 								variant="secondary"
@@ -917,6 +922,22 @@ export function UploadModal({
 					const applied = await applyPresets();
 					if (applied) setBulkSettingsOpen(false);
 				}}
+			/>
+
+			<ScheduleSettingsModal
+				open={scheduleSettingsOpen}
+				onClose={() => setScheduleSettingsOpen(false)}
+				startDate={startDate}
+				endDate={endDate}
+				weekdayTimes={weekdayTimes}
+				note={assignNote}
+				onStartDate={setStartDate}
+				onEndDate={setEndDate}
+				onToggleWeekday={toggleWeekday}
+				onAddTime={addTimeFor}
+				onRemoveTime={removeTimeFor}
+				onSetTime={setTimeFor}
+				onAssign={assignSchedule}
 			/>
 		</Modal>
 	);
@@ -1030,9 +1051,11 @@ function BulkPresetsModal(props: BulkPresetsModalProps) {
 	);
 }
 
-// ---- 予約スケジュール(一括割当) --------------------------------------------
+// ---- 予約スケジュール(一括割当のモーダル) ----------------------------------
 
-interface ScheduleSettingsProps {
+interface ScheduleSettingsModalProps {
+	open: boolean;
+	onClose: () => void;
 	startDate: string;
 	endDate: string;
 	weekdayTimes: Record<number, string[]>;
@@ -1046,137 +1069,140 @@ interface ScheduleSettingsProps {
 	onAssign: () => void;
 }
 
-function ScheduleSettings(props: ScheduleSettingsProps) {
-	const [expanded, setExpanded] = useState(false);
+/**
+ * 「予約スケジュール」モーダル: 期間・曜日・時刻から予約枠を生成し、
+ * Post の並び順へ予約日時を一括割当する。割当は非破壊(publishAt の上書きのみで、
+ * 再割当・個別修正がいつでもできる)ため確認ダイアログは挟まない。
+ * 割当結果のノート(割当件数・枠不足の警告)を見せるため、割当後もモーダルは
+ * 閉じない(「閉じる」/ Esc / オーバーレイクリックで閉じる)。
+ */
+function ScheduleSettingsModal(props: ScheduleSettingsModalProps) {
 	const selectedDays = Object.keys(props.weekdayTimes)
 		.map(Number)
 		.sort((a, b) => a - b);
 
 	return (
-		<section className="rounded-lg border border-line bg-elevated/40 p-3">
-			<button
-				type="button"
-				onClick={() => setExpanded((v) => !v)}
-				aria-expanded={expanded}
-				className="flex w-full items-center gap-1.5 text-left text-xs font-semibold text-neutral-200"
-			>
-				<span className="text-[11px] text-neutral-400">
-					{expanded ? "▼" : "▶"}
-				</span>
-				予約スケジュール
-			</button>
-			{expanded && (
-				<div className="mt-2 flex flex-col gap-4">
-					<div className="flex flex-wrap items-center gap-3">
-						<label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
-							開始日
-							<input
-								type="date"
-								className={inputClass}
-								value={props.startDate}
-								onChange={(e) => props.onStartDate(e.target.value)}
-							/>
-						</label>
-						<label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
-							終了日
-							<input
-								type="date"
-								className={inputClass}
-								value={props.endDate}
-								onChange={(e) => props.onEndDate(e.target.value)}
-							/>
-						</label>
-					</div>
+		<Modal
+			open={props.open}
+			title="予約スケジュール"
+			onClose={props.onClose}
+			widthClass="max-w-xl"
+			footer={
+				<>
+					<Button variant="ghost" onClick={props.onClose}>
+						閉じる
+					</Button>
+					<Button variant="primary" size="sm" onClick={props.onAssign}>
+						この順で予約日時を割り当て
+					</Button>
+				</>
+			}
+		>
+			<div className="flex flex-col gap-4">
+				<div className="flex flex-wrap items-center gap-3">
+					<label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+						開始日
+						<input
+							type="date"
+							className={inputClass}
+							value={props.startDate}
+							onChange={(e) => props.onStartDate(e.target.value)}
+						/>
+					</label>
+					<label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+						終了日
+						<input
+							type="date"
+							className={inputClass}
+							value={props.endDate}
+							onChange={(e) => props.onEndDate(e.target.value)}
+						/>
+					</label>
+				</div>
 
-					<div className="flex items-center gap-1.5">
-						<span className="text-[11px] text-neutral-400">曜日</span>
-						{WEEKDAY_LABELS.map((label, day) => {
-							const active = day in props.weekdayTimes;
+				<div className="flex items-center gap-1.5">
+					<span className="text-[11px] text-neutral-400">曜日</span>
+					{WEEKDAY_LABELS.map((label, day) => {
+						const active = day in props.weekdayTimes;
+						return (
+							<button
+								key={label}
+								type="button"
+								onClick={() => props.onToggleWeekday(day)}
+								className={cn(
+									"h-7 w-7 rounded-md border text-xs transition-colors",
+									active
+										? "border-accent bg-accent/20 text-accent"
+										: "border-line bg-elevated text-neutral-400 hover:border-accent/60",
+								)}
+							>
+								{label}
+							</button>
+						);
+					})}
+				</div>
+
+				{/* 曜日ごとの時刻(曜日ごとに異なる複数時刻を設定できる) */}
+				{selectedDays.length === 0 ? (
+					<p className="text-[11px] text-neutral-400">
+						曜日を選ぶと、その曜日の時刻を設定できます。
+					</p>
+				) : (
+					<div className="flex flex-col gap-1.5">
+						{selectedDays.map((day) => {
+							const list = props.weekdayTimes[day] ?? [];
 							return (
-								<button
-									key={label}
-									type="button"
-									onClick={() => props.onToggleWeekday(day)}
-									className={cn(
-										"h-7 w-7 rounded-md border text-xs transition-colors",
-										active
-											? "border-accent bg-accent/20 text-accent"
-											: "border-line bg-elevated text-neutral-400 hover:border-accent/60",
-									)}
-								>
-									{label}
-								</button>
+								<div key={day} className="flex flex-wrap items-center gap-2">
+									<span className="w-5 text-center text-[11px] font-semibold text-accent">
+										{WEEKDAY_LABELS[day] ?? ""}
+									</span>
+									{list.map((time, index) => (
+										// biome-ignore lint/suspicious/noArrayIndexKey: 時刻は配列位置で識別され(onSetTime/onRemoveTime が index を使用)安定IDを持たない
+										<div key={index} className="flex items-center gap-1">
+											<input
+												type="time"
+												className={inputClass}
+												value={time}
+												onChange={(e) =>
+													props.onSetTime(day, index, e.target.value)
+												}
+											/>
+											{list.length > 1 && (
+												<IconButton
+													tone="danger"
+													aria-label="時刻を削除"
+													onClick={() => props.onRemoveTime(day, index)}
+												>
+													<TrashIcon />
+												</IconButton>
+											)}
+										</div>
+									))}
+									<Button
+										variant="ghost"
+										size="sm"
+										onClick={() => props.onAddTime(day)}
+									>
+										+ 時刻
+									</Button>
+								</div>
 							);
 						})}
 					</div>
+				)}
 
-					{/* 曜日ごとの時刻(曜日ごとに異なる複数時刻を設定できる) */}
-					{selectedDays.length === 0 ? (
-						<p className="text-[11px] text-neutral-400">
-							曜日を選ぶと、その曜日の時刻を設定できます。
-						</p>
-					) : (
-						<div className="flex flex-col gap-1.5">
-							{selectedDays.map((day) => {
-								const list = props.weekdayTimes[day] ?? [];
-								return (
-									<div key={day} className="flex flex-wrap items-center gap-2">
-										<span className="w-5 text-center text-[11px] font-semibold text-accent">
-											{WEEKDAY_LABELS[day] ?? ""}
-										</span>
-										{list.map((time, index) => (
-											// biome-ignore lint/suspicious/noArrayIndexKey: 時刻は配列位置で識別され(onSetTime/onRemoveTime が index を使用)安定IDを持たない
-											<div key={index} className="flex items-center gap-1">
-												<input
-													type="time"
-													className={inputClass}
-													value={time}
-													onChange={(e) =>
-														props.onSetTime(day, index, e.target.value)
-													}
-												/>
-												{list.length > 1 && (
-													<IconButton
-														tone="danger"
-														aria-label="時刻を削除"
-														onClick={() => props.onRemoveTime(day, index)}
-													>
-														<TrashIcon />
-													</IconButton>
-												)}
-											</div>
-										))}
-										<Button
-											variant="ghost"
-											size="sm"
-											onClick={() => props.onAddTime(day)}
-										>
-											+ 時刻
-										</Button>
-									</div>
-								);
-							})}
-						</div>
-					)}
-
-					<div className="flex items-center gap-3">
-						<Button variant="secondary" size="sm" onClick={props.onAssign}>
-							この順で予約日時を割り当て
-						</Button>
-						{props.note && (
-							<span className="text-[11px] text-neutral-400">{props.note}</span>
-						)}
-					</div>
-				</div>
-			)}
-		</section>
+				{props.note && (
+					<p className="text-[11px] text-neutral-400">{props.note}</p>
+				)}
+			</div>
+		</Modal>
 	);
 }
 
 // ---- 折りたたみ(投稿専用フィールドの格納用) --------------------------------
 
 /**
- * 「一括設定」と同じ ▼/▶ + 見出しの流儀に合わせた、小さな折りたたみ表示。
+ * ▼/▶ + 見出しの流儀に合わせた、小さな折りたたみ表示。
  * 投稿(Phase 3 まで無効)専用のフィールドをまとめて隠すために使う
  * (PostDetail の予約日時・一括投稿、OutputCard のメタデータ・投稿ボタン)。
  */
@@ -1358,10 +1384,7 @@ interface OutputCardProps {
 function OutputCard(props: OutputCardProps) {
 	const { post, output, render, status, busy } = props;
 	const [postSettingsOpen, setPostSettingsOpen] = useState(false);
-	const target = useMemo(
-		() => targetById(output.targetId),
-		[output.targetId],
-	);
+	const target = useMemo(() => targetById(output.targetId), [output.targetId]);
 	const platform = target?.platform;
 	// 出力ターゲットのアスペクト比(width/height)。プレビュー枠はこれに追従する。
 	const boxRatio = target ? target.width / target.height : 9 / 16;
