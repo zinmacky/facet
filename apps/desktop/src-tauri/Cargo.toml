@@ -28,6 +28,11 @@ tauri = { version = "2", features = ["protocol-asset"] }
 # Wave 5 では invoke 境界(reframe/probe/preview)のみだったが、renderer 配線
 # (Phase 2 最終接続)で file/directory picker が必要になったため追加する。
 tauri-plugin-dialog = "2"
+# 書き出し先フォルダをエクスプローラ(等 OS 既定のファイルマネージャ)で開くために追加。
+# studio 版は HTTP の ZIP ダウンロードで書き出し結果を渡すが、desktop は実ファイルを
+# ローカルへ直接書き出すため、ZIP 化ではなく「保存先フォルダを開く」形で完結させる
+# (bulk-download バグ修正、docs/desktop-migration-plan.md の既知ギャップ対応)。
+tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # reframe/probe コマンドの実処理(Wave 5: コマンド境界の配線)。
