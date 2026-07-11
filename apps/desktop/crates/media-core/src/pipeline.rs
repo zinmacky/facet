@@ -43,6 +43,11 @@
 //!   パイプラインとして動作する(`ReframeOptions` に音声の有効/無効フラグは存在しない
 //!   — `packages/ffmpeg-runner` の `-map 0:a?` と同じ「あれば通す」挙動)。
 //!   詳細な設計(trim/リサンプル/FIFO/pts 再基準化)は `audio.rs` モジュール冒頭コメント参照。
+//! - `concurrency`: [`reframe`] 冒頭で [`crate::concurrency::EncodeSlots::global`] から
+//!   スロットを取得し(関数末尾まで保持、RAII で解放)、同時エンコード数を制限する。
+//!   `Auto` 選択時のエンコーダ候補ループは
+//!   [`crate::concurrency::retry_on_encoder_open`] でラップし、`EncoderOpen`(HW
+//!   セッション枯渇等)はリトライ後も次候補へ進む(`concurrency.rs` 冒頭コメント参照)。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,6 +57,7 @@ use ffmpeg_next::{self as ffmpeg, filter, format, frame, Dictionary, Packet, Rat
 
 use crate::audio;
 use crate::cancel::CancelToken;
+use crate::concurrency;
 use crate::crop;
 use crate::decode;
 use crate::encode::{self, EncoderSpec};
@@ -119,6 +125,10 @@ pub fn reframe(
 	options: ReframeOptions<'_>,
 ) -> Result<String> {
 	ffmpeg::init().map_err(|source| MediaError::Init { source })?;
+
+	// 同時エンコード数を制限するスロットを取得する(関数末尾までスコープに保持し、
+	// drop 時に RAII で解放される。`concurrency` モジュール冒頭コメント参照)。
+	let _slot = concurrency::EncodeSlots::global().acquire();
 
 	let tmp_output_path = temp_output_path(output_path);
 	match run_pipeline(input_path, &tmp_output_path, options) {
@@ -483,19 +493,29 @@ fn open_selected_encoder(
 		}
 		EncoderSelection::Auto => {
 			let candidates = encoder_select::select()?;
+			let retry_config = concurrency::RetryConfig::default();
 			let mut last_err: Option<MediaError> = None;
 			for choice in candidates {
-				let attempt = encode::open_encoder(
-					octx,
-					EncoderSpec {
-						name: choice.name,
-						options: choice.to_dictionary(),
-						width: preset.width,
-						height: preset.height,
-						time_base,
-						frame_rate,
-						bit_rate,
-						global_header,
+				// HW エンコーダのセッション枯渇(-12903 相当)による open 失敗は、
+				// 他ジョブの完了を待てば解消することが多いため、次候補へ進む前に
+				// 待機リトライする(`concurrency` モジュール冒頭コメント参照)。
+				let attempt = concurrency::retry_on_encoder_open(
+					&retry_config,
+					&|duration| std::thread::sleep(duration),
+					|| {
+						encode::open_encoder(
+							octx,
+							EncoderSpec {
+								name: choice.name,
+								options: choice.to_dictionary(),
+								width: preset.width,
+								height: preset.height,
+								time_base,
+								frame_rate,
+								bit_rate,
+								global_header,
+							},
+						)
 					},
 				);
 				match attempt {
