@@ -25,6 +25,7 @@ pub mod error;
 pub mod fit;
 pub mod pipeline;
 pub mod spec;
+pub mod trim;
 
 pub use error::{MediaError, Result};
 pub use pipeline::{reframe, Progress, ReframeOptions};
