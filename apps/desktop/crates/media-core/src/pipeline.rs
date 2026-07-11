@@ -5,11 +5,14 @@
 //!
 //! **Wave 3 のためのフックをここで固定する**(公開 API として安定させ、Wave 3 の
 //! 3 エージェントが並行でこのシグネチャへ接続できるようにする):
-//! - `should_cancel: &dyn Fn() -> bool` をループ境界(パケット単位)で毎回チェックする。
+//! - [`crate::cancel::CancelToken`] をループ境界(パケット単位)で毎回チェックする。
 //!   キャンセルを検知したら一時出力ファイルを削除して `MediaError::Cancelled` を返す。
-//! - `on_progress: &dyn Fn(Progress)` をエンコーダへフレームを送出するたびに呼ぶ。
-//!   `Progress` はフレーム数ベースの最小構造体(frame / total_frames 推定 / percent)。
-//!   Wave 3 の `progress.rs` が fps/speed 等へ拡張する前提。
+//!   クローン可能・スレッド安全なので、将来 Tauri コマンド(別スレッド/非同期)から
+//!   同じトークンの `cancel()` を呼んで中断できる(`cancel.rs` 冒頭コメント参照)。
+//! - `on_progress: &dyn Fn(Progress)` は `progress::ProgressTracker` 経由で呼ばれる。
+//!   `ProgressTracker` がフレームを送出するたびに fps/speed/out_time_secs/percent を
+//!   算出し、既定 200ms 間隔でスロットリングした上で `on_progress` を発火する
+//!   (`Progress` のフィールド定義・スロットリング仕様は `progress.rs` 参照)。
 //! - エンコーダは [`EncoderSelection`] として引数注入する(`Explicit` は明示指定、
 //!   `Auto` はプラットフォーム別候補を `encoder_select` から取得し順に試す。
 //!   Wave 2 配線で確定)。
@@ -32,12 +35,29 @@
 //! - `encoder_select`: `ReframeOptions.encoder` が `Auto` の場合、候補を先頭から
 //!   順に `encode::open_encoder` で試し、`MediaError::EncoderOpen` なら次候補へ、
 //!   それ以外の失敗は即座に返す。
+//!
+//! **Wave 3 で接続したモジュール**:
+//! - `audio`: 入力に音声ストリームがあれば [`crate::audio::AudioPipeline`] を構築し、
+//!   映像と同じパケットループ内でインターリーブして駆動する(`stream.index()` で
+//!   映像/音声どちらのパケットかを振り分ける)。音声が無い入力では従来どおり映像のみの
+//!   パイプラインとして動作する(`ReframeOptions` に音声の有効/無効フラグは存在しない
+//!   — `packages/ffmpeg-runner` の `-map 0:a?` と同じ「あれば通す」挙動)。
+//!   詳細な設計(trim/リサンプル/FIFO/pts 再基準化)は `audio.rs` モジュール冒頭コメント参照。
+//! - `concurrency`: [`reframe`] 冒頭で [`crate::concurrency::EncodeSlots::global`] から
+//!   スロットを取得し(関数末尾まで保持、RAII で解放)、同時エンコード数を制限する。
+//!   `Auto` 選択時のエンコーダ候補ループは
+//!   [`crate::concurrency::retry_on_encoder_open`] でラップし、`EncoderOpen`(HW
+//!   セッション枯渇等)はリトライ後も次候補へ進む(`concurrency.rs` 冒頭コメント参照)。
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use ffmpeg_next::{self as ffmpeg, filter, format, frame, Dictionary, Packet, Rational};
 
+use crate::audio;
+use crate::cancel::CancelToken;
+use crate::concurrency;
 use crate::crop;
 use crate::decode;
 use crate::encode::{self, EncoderSpec};
@@ -45,35 +65,13 @@ use crate::encoder_select;
 use crate::error::{MediaError, Result};
 use crate::fit::{self, FilterGraphSpec};
 use crate::probe;
+use crate::progress::ProgressTracker;
 use crate::spec::{CropRect, Preset, SourceDimensions, Trim};
 use crate::trim::{self, TrimDecision, TrimWindow};
 
-/// パイプライン進捗の最小構造体。
-///
-/// Wave 1 時点ではフレーム数ベースの最小情報のみを持つ(fps/speed 等は Wave 3 の
-/// `progress.rs` が拡張する)。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Progress {
-	/// これまでにエンコーダへ送出したフレーム数。
-	pub frame: u64,
-	/// コンテナ申告値等から見積もった総フレーム数(不明なら `None`)。
-	pub total_frames: Option<u64>,
-	/// 0.0〜100.0(見積り不能なら `None`)。
-	pub percent: Option<f64>,
-}
-
-impl Progress {
-	fn new(frame: u64, total_frames: Option<u64>) -> Self {
-		let percent = total_frames
-			.filter(|&total| total > 0)
-			.map(|total| (frame as f64 / total as f64 * 100.0).min(100.0));
-		Progress {
-			frame,
-			total_frames,
-			percent,
-		}
-	}
-}
+/// パイプライン進捗の構造体。定義本体は Wave 3 で `progress.rs` へ移設した
+/// (frame/total_frames/percent に加え out_time_secs/fps/speed を持つ)。
+pub use crate::progress::Progress;
 
 /// エンコーダの選び方。`Explicit` はテスト・CLI での明示指定用、`Auto` は
 /// `encoder_select` のプラットフォーム別候補を先頭から順に試す(Wave 2 配線)。
@@ -106,13 +104,14 @@ pub struct ReframeOptions<'a> {
 	pub trim: Option<Trim>,
 	pub encoder: EncoderSelection<'a>,
 	pub bit_rate: usize,
-	pub should_cancel: &'a dyn Fn() -> bool,
+	/// クローン可能・スレッド安全なキャンセルトークン([`CancelToken`] 冒頭コメント参照)。
+	pub cancel: &'a CancelToken,
 	pub on_progress: &'a dyn Fn(Progress),
 }
 
 /// `EditSpec` 1 つを libav パイプラインで実行し、`input_path` を `preset` 形状へ
-/// 再フレーミングして `output_path` に書き出す(映像のみ。音声は Wave 3 の `audio.rs`
-/// で追加予定 — `lib.rs` 冒頭コメント参照)。
+/// 再フレーミングして `output_path` に書き出す(音声ストリームがあれば AAC ≤48kHz へ
+/// 再エンコードして通す。`audio.rs` / `lib.rs` 冒頭コメント参照)。
 ///
 /// 出力は完了時のみ `output_path` に現れる(§6.2、モジュール冒頭コメント参照)。
 ///
@@ -126,6 +125,10 @@ pub fn reframe(
 	options: ReframeOptions<'_>,
 ) -> Result<String> {
 	ffmpeg::init().map_err(|source| MediaError::Init { source })?;
+
+	// 同時エンコード数を制限するスロットを取得する(関数末尾までスコープに保持し、
+	// drop 時に RAII で解放される。`concurrency` モジュール冒頭コメント参照)。
+	let _slot = concurrency::EncodeSlots::global().acquire();
 
 	let tmp_output_path = temp_output_path(output_path);
 	match run_pipeline(input_path, &tmp_output_path, options) {
@@ -174,7 +177,7 @@ fn run_pipeline(
 		trim,
 		encoder,
 		bit_rate,
-		should_cancel,
+		cancel,
 		on_progress,
 	} = options;
 
@@ -220,6 +223,11 @@ fn run_pipeline(
 	// フレーム単位の trim 分類・再基準化用ウィンドウ(ストリームのタイムベース)。
 	let frame_window = TrimWindow::new(trim.as_ref(), ist_time_base);
 
+	// 音声ストリームの検出(`decoder`/`input` を可変参照へ分割する前に、共有の
+	// `decode_ctx.input` から不変借用で読む。audio.rs モジュール冒頭コメント参照)。
+	// 無ければ `None`(映像のみのパイプラインとして継続する)。
+	let audio_source = audio::open_audio_decoder(&decode_ctx.input)?;
+
 	// `input`/`decoder` を別々の可変参照として取り出す(同一ループ内で両方を
 	// 独立に可変借用するため。DecodeContext のフィールドは互いに素なので安全)。
 	let decoder = &mut decode_ctx.decoder;
@@ -251,6 +259,19 @@ fn run_pipeline(
 	});
 	let mut graph = open_filter_graph(decoder, ist_time_base, &filter_spec_str, enc_pix_fmt)?;
 
+	// 音声パイプラインの構築(出力ストリームの追加・エンコーダ open まで)。
+	// 映像のストリーム追加(`open_selected_encoder` 内の `add_stream`)より後に
+	// 呼ぶことで、出力コンテナのストリーム順を「映像 0・音声 1」に保つ。
+	let mut audio_pipeline = match audio_source {
+		Some(source) => Some(audio::AudioPipeline::open(
+			&mut octx,
+			source,
+			trim.as_ref(),
+			global_header,
+		)?),
+		None => None,
+	};
+
 	// mp4 に +faststart(moov 先頭。docs/desktop-migration-plan.md §12.1/§6.2)。
 	let mut mux_opts = Dictionary::new();
 	mux_opts.set("movflags", "+faststart");
@@ -262,6 +283,9 @@ fn run_pipeline(
 			index: stream_index,
 		})?
 		.time_base();
+	if let Some(pipeline) = audio_pipeline.as_mut() {
+		pipeline.bind_output_time_base(&octx)?;
+	}
 
 	let mut decoded = frame::Video::empty();
 	let mut filtered = frame::Video::empty();
@@ -272,42 +296,53 @@ fn run_pipeline(
 	// (pts が単調増加である限り)すべて end 以降のため、デコーダ側の EOF flush は
 	// 行わずフィルタ/エンコーダの flush のみ行う。
 	let mut stopped_early = false;
+	// 直近で得られたフレームの pts を秒に変換した値(`Progress.out_time_secs` の元)。
+	// フィルタ出力フレームの pts が稀に不明(`None`)な場合でも 0 に巻き戻らないよう、
+	// 判明したときだけ更新する(`pull_filtered` 内)。
+	let mut last_out_time_secs: f64 = 0.0;
+	let mut progress_tracker = ProgressTracker::new(total_frames, on_progress);
 
 	'decode: for (stream, packet) in input.packets() {
-		if should_cancel() {
+		if cancel.is_cancelled() {
 			return Err(MediaError::Cancelled);
 		}
-		if stream.index() != ist_index {
-			continue;
-		}
-		decoder
-			.send_packet(&packet)
-			.map_err(|source| MediaError::Decode { source })?;
-		while decoder.receive_frame(&mut decoded).is_ok() {
-			match classify_and_rebase(&mut decoded, &frame_window) {
-				TrimDecision::Skip => continue,
-				TrimDecision::Stop => {
-					stopped_early = true;
-					break 'decode;
+		let packet_stream_index = stream.index();
+		if packet_stream_index == ist_index {
+			decoder
+				.send_packet(&packet)
+				.map_err(|source| MediaError::Decode { source })?;
+			while decoder.receive_frame(&mut decoded).is_ok() {
+				match classify_and_rebase(&mut decoded, &frame_window) {
+					TrimDecision::Skip => continue,
+					TrimDecision::Stop => {
+						stopped_early = true;
+						break 'decode;
+					}
+					TrimDecision::Keep => {}
 				}
-				TrimDecision::Keep => {}
+				push_to_filter(&mut graph, &decoded)?;
+				pull_filtered(
+					&mut graph,
+					&mut encoder_ctx,
+					&mut octx,
+					stream_index,
+					ist_time_base,
+					ost_time_base,
+					&mut filtered,
+					&mut encoded,
+					&mut frame_count,
+					&mut last_out_time_secs,
+					&mut progress_tracker,
+				)?;
 			}
-			push_to_filter(&mut graph, &decoded)?;
-			pull_filtered(
-				&mut graph,
-				&mut encoder_ctx,
-				&mut octx,
-				stream_index,
-				ist_time_base,
-				ost_time_base,
-				&mut filtered,
-				&mut encoded,
-				&mut frame_count,
-				total_frames,
-				on_progress,
-			)?;
+		} else if let Some(pipeline) = audio_pipeline.as_mut() {
+			// 音声ストリームのパケットは映像と同じループ内でインターリーブして
+			// 処理する(audio.rs モジュール冒頭コメント参照。stream index で振り分け)。
+			if packet_stream_index == pipeline.stream_index() {
+				pipeline.process_packet(&packet, &mut octx)?;
+			}
 		}
-		if should_cancel() {
+		if cancel.is_cancelled() {
 			return Err(MediaError::Cancelled);
 		}
 	}
@@ -336,8 +371,8 @@ fn run_pipeline(
 				&mut filtered,
 				&mut encoded,
 				&mut frame_count,
-				total_frames,
-				on_progress,
+				&mut last_out_time_secs,
+				&mut progress_tracker,
 			)?;
 		}
 	}
@@ -352,8 +387,8 @@ fn run_pipeline(
 		&mut filtered,
 		&mut encoded,
 		&mut frame_count,
-		total_frames,
-		on_progress,
+		&mut last_out_time_secs,
+		&mut progress_tracker,
 	)?;
 
 	encoder_ctx
@@ -367,6 +402,18 @@ fn run_pipeline(
 		ost_time_base,
 		&mut encoded,
 	)?;
+	// 完了時は必ず最終進捗を通知する(直前の update がスロットリングで間引かれていても、
+	// 呼び出し側は 100% の Progress を確実に受け取れる)。
+	progress_tracker.finish(frame_count, last_out_time_secs);
+
+	// 音声パイプラインの flush(デコーダ EOF・リサンプラ・FIFO の残り・エンコーダ
+	// flush をまとめて行う。`AudioPipeline::flush` 参照)。`stopped_early`(映像側の
+	// trim end 早期終了)とは独立に、常に実行する — 音声自身の trim end 到達判定
+	// (`AudioPipeline` 内部の `stopped`)は映像側の早期終了と一致するとは限らないため
+	// (audio.rs モジュール冒頭コメント参照)。
+	if let Some(pipeline) = audio_pipeline.as_mut() {
+		pipeline.flush(&mut octx)?;
+	}
 
 	octx.write_trailer()
 		.map_err(|source| MediaError::Mux { source })?;
@@ -446,19 +493,29 @@ fn open_selected_encoder(
 		}
 		EncoderSelection::Auto => {
 			let candidates = encoder_select::select()?;
+			let retry_config = concurrency::RetryConfig::default();
 			let mut last_err: Option<MediaError> = None;
 			for choice in candidates {
-				let attempt = encode::open_encoder(
-					octx,
-					EncoderSpec {
-						name: choice.name,
-						options: choice.to_dictionary(),
-						width: preset.width,
-						height: preset.height,
-						time_base,
-						frame_rate,
-						bit_rate,
-						global_header,
+				// HW エンコーダのセッション枯渇(-12903 相当)による open 失敗は、
+				// 他ジョブの完了を待てば解消することが多いため、次候補へ進む前に
+				// 待機リトライする(`concurrency` モジュール冒頭コメント参照)。
+				let attempt = concurrency::retry_on_encoder_open(
+					&retry_config,
+					&|duration| std::thread::sleep(duration),
+					|| {
+						encode::open_encoder(
+							octx,
+							EncoderSpec {
+								name: choice.name,
+								options: choice.to_dictionary(),
+								width: preset.width,
+								height: preset.height,
+								time_base,
+								frame_rate,
+								bit_rate,
+								global_header,
+							},
+						)
 					},
 				);
 				match attempt {
@@ -581,7 +638,7 @@ fn drain_encoder(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn pull_filtered(
+fn pull_filtered<F: Fn() -> Instant>(
 	graph: &mut filter::Graph,
 	encoder: &mut ffmpeg::encoder::Video,
 	octx: &mut format::context::Output,
@@ -591,8 +648,8 @@ fn pull_filtered(
 	filtered: &mut frame::Video,
 	encoded: &mut Packet,
 	frame_count: &mut u64,
-	total_frames: Option<u64>,
-	on_progress: &dyn Fn(Progress),
+	last_out_time_secs: &mut f64,
+	tracker: &mut ProgressTracker<'_, F>,
 ) -> Result<()> {
 	loop {
 		let has_frame = graph
@@ -618,30 +675,28 @@ fn pull_filtered(
 			encoded,
 		)?;
 		*frame_count += 1;
-		on_progress(Progress::new(*frame_count, total_frames));
+		// フィルタ出力フレームの pts が判明していれば out_time_secs を更新する
+		// (`buffersink` は通常 `best_effort_timestamp` を保つが、まれに不明な場合は
+		// 直前の値を引き継ぎ 0 に巻き戻さない)。
+		if let Some(pts) = filtered.timestamp() {
+			*last_out_time_secs = pts_to_secs(pts, ist_time_base);
+		}
+		tracker.update(*frame_count, *last_out_time_secs);
 	}
 	Ok(())
+}
+
+/// pts(`time_base` 単位の整数)を秒に変換する。
+fn pts_to_secs(pts: i64, time_base: Rational) -> f64 {
+	pts as f64 * f64::from(time_base.numerator()) / f64::from(time_base.denominator())
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 
-	// --- Progress::new (既存の Wave 1 テストの範囲。回帰確認用) -------------------------
-
-	#[test]
-	fn progress_percent_is_none_when_total_unknown() {
-		let progress = Progress::new(5, None);
-		assert_eq!(progress.frame, 5);
-		assert_eq!(progress.total_frames, None);
-		assert_eq!(progress.percent, None);
-	}
-
-	#[test]
-	fn progress_percent_is_clamped_to_100() {
-		let progress = Progress::new(120, Some(100));
-		assert_eq!(progress.percent, Some(100.0));
-	}
+	// --- Progress の構造体本体・生成ロジックのテストは `progress.rs` へ移設した
+	//     (Wave 3 統合。`Progress` はもうこのファイルに定義を持たない)。
 
 	// --- temp_output_path --------------------------------------------------------------
 
