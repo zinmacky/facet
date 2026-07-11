@@ -7,7 +7,8 @@
 		"dev": "tauri dev",
 		"build": "vite build",
 		"preview": "vite preview",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run"
 	},
 	"dependencies": {
 		"@facet/contract": "workspace:*",
@@ -22,11 +23,16 @@
 	"devDependencies": {
 		"@tailwindcss/vite": "^4",
 		"@tauri-apps/cli": "^2.11.4",
+		"@testing-library/jest-dom": "^6.9.1",
+		"@testing-library/react": "^16.3.2",
+		"@testing-library/user-event": "^14.6.1",
 		"@types/react": "^18.3.9",
 		"@types/react-dom": "^18.3.0",
 		"@vitejs/plugin-react": "^5.2.0",
+		"jsdom": "^29.1.1",
 		"tailwindcss": "^4.3.2",
 		"typescript": "^6.0.3",
-		"vite": "^7.3.6"
+		"vite": "^7.3.6",
+		"vitest": "^3.2.7"
 	}
 }
