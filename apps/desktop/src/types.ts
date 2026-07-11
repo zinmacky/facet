@@ -4,7 +4,7 @@ import type { CropRect, EditSpec, FitMode, Trim } from "@facet/core";
  * web ローカルの切り抜き(Clip)モデル。
  * 元画面では「時間トリム(見せる範囲)」+「空間クロップ枠(どの部分を見せるか)」を決める。
  * クロップ枠のアスペクト比はテンプレートで選ぶ。最終的なプラットフォーム別アスペクトと
- * フィット(そのまま/ぼかし背景)は UPLOAD モーダルで決める。
+ * フィット(そのまま/ぼかし背景)はアップロード画面で決める。
  */
 export interface Clip {
 	id: string;

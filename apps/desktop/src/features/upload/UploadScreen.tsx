@@ -25,6 +25,7 @@ import {
 	msToLocalInput,
 } from "../../lib/schedule";
 import { type PreviewState, usePreview } from "../../lib/usePreview";
+import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
 import { Modal } from "../../components/ui/Modal";
 import { Button } from "../../components/ui/Button";
 import { IconButton } from "../../components/ui/IconButton";
@@ -37,17 +38,25 @@ import { useConfirm } from "../../components/ui/confirm";
 import { cn } from "../../components/ui/cn";
 
 /**
- * UPLOAD モーダル(Post / Output の二層モデル)。
+ * アップロード画面(Post / Output の二層モデル)。
  * Post = 「どの切り抜きを何時に投稿するか」。1 Post は複数の出力先(Output)を持ち、
  * すべて同じ publishAt(=同時刻)で投稿される。各 Output はターゲット/フィット/メタを持つ。
+ * ウィザードの一部として常時マウントされる(active=false のときも DOM に存在する)。
  */
 
-interface UploadModalProps {
-	open: boolean;
+interface UploadScreenProps {
+	/** true のとき現在表示中の画面(ウィザードのアクティブステップ)。 */
+	active: boolean;
 	source: { inputPath: string; probe: MediaInfo } | null;
 	clips: Clip[];
-	onClose: () => void;
-	onBack: () => void;
+	/**
+	 * 増加するたびに全状態(posts/pubStatuses/preview/一括設定/スケジュール等)を
+	 * 明示的に破棄する(新しい元動画を選択したときのみ App から増分される)。
+	 */
+	resetToken: number;
+	onGoToExport: () => void;
+	/** publishAllMutation/publishPostMutation の実行中フラグを App へ押し上げる(離脱抑止用)。 */
+	onBusyChange?: (busy: boolean) => void;
 }
 
 /** 1 投稿の出力先(プラットフォーム別の書き出し・メタ)。 */
@@ -143,13 +152,14 @@ const textareaClass =
 	"min-h-[56px] w-full rounded-md border border-line bg-elevated px-2 py-1.5 " +
 	"text-xs text-neutral-200 focus:border-accent focus:outline-none";
 
-export function UploadModal({
-	open,
+export function UploadScreen({
+	active,
 	source,
 	clips,
-	onClose,
-	onBack,
-}: UploadModalProps) {
+	resetToken,
+	onGoToExport,
+	onBusyChange,
+}: UploadScreenProps) {
 	const [posts, setPosts] = useState<UploadPost[]>([]);
 	const [selectedPostId, setSelectedPostId] = useState<string | null>(null);
 	// output.id → 投稿処理の進行状態。
@@ -157,7 +167,7 @@ export function UploadModal({
 		new Map(),
 	);
 	// output.id → 最終レンダリング結果(プレビュー/DL/投稿で共有)。preview_start ベースの
-	// 共通フック(ExportModal の「クロップ内容プレビュー」と同じ実装)。
+	// 共通フック(ExportScreen の「クロップ内容プレビュー」と同じ実装)。
 	const preview = usePreview();
 	// output.id → 「フォルダへ一括書き出し」の進行状態(プレビュー品質の preview とは別軸)。
 	const [bulkExports, setBulkExports] = useState<Map<string, BulkExportTask>>(
@@ -185,9 +195,14 @@ export function UploadModal({
 	// 「予約スケジュール」モーダル(予約日時の一括割当)の開閉状態。
 	const [scheduleSettingsOpen, setScheduleSettingsOpen] = useState(false);
 
-	// 閉じたら内部状態を初期化する(再度開いたときは現在の clips から作り直す)。
+	// 非アクティブになった瞬間に配下の <video> を pause する。
+	const rootRef = usePauseVideosOnHide(active);
+
+	// 新しい元動画選択(App からの resetToken 増加)時のみ、全状態を明示的に破棄する
+	// (最重要: 旧実装の「!open で破棄」を削除し、この明示トリガのみへ置き換えた。
+	// 通常の画面往復(戻る/進む)では posts・プレビュー・スケジュール設定は保持される)。
+	// biome-ignore lint/correctness/useExhaustiveDependencies: resetToken の変化そのものがトリガ(mount 時の初回実行は無害)
 	useEffect(() => {
-		if (open) return;
 		setPosts([]);
 		setSelectedPostId(null);
 		setPubStatuses(new Map());
@@ -204,10 +219,10 @@ export function UploadModal({
 		for (const unsub of bulkUnsubsRef.current.values()) unsub();
 		bulkUnsubsRef.current.clear();
 		setBulkExports(new Map());
-	}, [open, preview.reset]);
+	}, [resetToken]);
 
-	// アンマウント時に一括書き出しの購読を解除する(モーダルを開いたまま親が
-	// アンマウントされるケースの保険。通常は上の open effect で解除済み)。
+	// アンマウント時に一括書き出しの購読を解除する(保険。通常は上の resetToken effect や
+	// 個々のジョブの onDone/onError で解除済み)。
 	useEffect(() => {
 		const unsubs = bulkUnsubsRef.current;
 		return () => {
@@ -216,9 +231,10 @@ export function UploadModal({
 		};
 	}, []);
 
-	// open 時に posts を初期化(空のときのみ)。各 clip につき 1 Post(Output 1 つ)。
+	// clips が揃っていて posts が空のときのみ初期化する(active/open には依存しない)。
+	// 画面を離れて戻ってきても既存の posts はそのまま保持する。
 	useEffect(() => {
-		if (!open) return;
+		if (clips.length === 0) return;
 		setPosts((prev) => {
 			if (prev.length > 0) return prev;
 			const created = clips.map((clip) => createPost(clip.id));
@@ -226,7 +242,7 @@ export function UploadModal({
 			setSelectedPostId(created[0]?.id ?? null);
 			return created;
 		});
-	}, [open, clips]);
+	}, [clips]);
 
 	// 選択中 id が posts に無い場合は先頭へ補正する(削除・並び替え時の担保)。
 	useEffect(() => {
@@ -466,8 +482,8 @@ export function UploadModal({
 	/**
 	 * 現在の設定でレンダリング済みなら再利用し、無い/古い場合のみ `preview_start`
 	 * (低ビットレート・spec ハッシュキャッシュ)で再レンダリングする。
-	 * このモーダルの「最終プレビュー」欄・DL・投稿はすべてこの結果を再利用する
-	 * (実際の書き出し品質(reframe_start, 8Mbps)は EXPORT モーダル側が担う。
+	 * この画面の「最終プレビュー」欄・DL・投稿はすべてこの結果を再利用する
+	 * (実際の書き出し品質(reframe_start, 8Mbps)は書き出し画面(ExportScreen)側が担う。
 	 * このため DL される実体は投稿確認用のプレビュー品質(2Mbps)である点に注意 —
 	 * Phase 3 で実際の IG/YouTube 投稿を実装する際に、投稿直前の本書き出しへの
 	 * 差し替えを検討する)。
@@ -590,6 +606,11 @@ export function UploadModal({
 	});
 
 	const busy = publishPostMutation.isPending || publishAllMutation.isPending;
+
+	// busy 状態を App(StepIndicator の離脱抑止)へ押し上げる。
+	useEffect(() => {
+		onBusyChange?.(busy);
+	}, [busy, onBusyChange]);
 
 	// 一括書き出し可否の判定に使う全 Output 数。
 	const totalOutputs = posts.reduce((sum, p) => sum + p.outputs.length, 0);
@@ -746,169 +767,158 @@ export function UploadModal({
 		void ensureRendered(post, output).catch(() => undefined);
 	};
 
-	const footer = (
-		<>
-			<Button variant="ghost" onClick={onBack} disabled={busy}>
-				戻る
-			</Button>
-			<Button variant="secondary" onClick={onClose} disabled={busy}>
-				閉じる
-			</Button>
-			<Button
-				variant="primary"
-				onClick={() => publishAllMutation.mutate()}
-				disabled={busy || totalOutputs === 0 || !PUBLISH_SUPPORTED}
-				title={
-					PUBLISH_SUPPORTED
-						? undefined
-						: "デスクトップ版では未対応(Phase 3 で対応予定)"
-				}
-			>
-				すべて投稿
-			</Button>
-		</>
-	);
-
 	// 中央詳細に表示する選択中の Post。
 	const selectedPost = posts.find((p) => p.id === selectedPostId) ?? null;
 
 	return (
-		<Modal
-			open={open}
-			title="アップロード"
-			onClose={onClose}
-			footer={footer}
-			widthClass="max-w-7xl"
-			scrollBody={false}
-			dismissable={!busy}
-		>
-			<div className="flex min-h-0 flex-1 flex-col gap-3">
-				{!PUBLISH_SUPPORTED && (
-					<div className="shrink-0 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-300">
-						投稿(YouTube / Instagram)はデスクトップ版では未対応です(Phase 3
-						で対応予定)。書き出し済みファイルは右の「フォルダへ一括書き出し」で取得してください。
-					</div>
-				)}
-				<div className="flex min-h-0 flex-1 gap-3">
-					{/* 中央: 選択中 Post の詳細 */}
-					<div className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
-						{selectedPost ? (
-							<PostDetail
-								key={selectedPost.id}
-								post={selectedPost}
-								clips={clips}
-								renders={preview.states}
-								pubStatuses={pubStatuses}
-								busy={busy}
-								onPatchPost={(patch) => patchPost(selectedPost.id, patch)}
-								onPatchOutput={(outputId, patch) =>
-									patchOutput(selectedPost.id, outputId, patch)
-								}
-								onAddOutput={() => addOutput(selectedPost.id)}
-								onRemoveOutput={(outputId) =>
-									removeOutput(selectedPost.id, outputId)
-								}
-								onPreviewOutput={(output) =>
-									previewOutput(selectedPost, output)
-								}
-								onPublishOutput={(output) =>
-									void publishOutput(selectedPost, output).catch(
-										() => undefined,
-									)
-								}
-								onPublishPost={() => publishPostMutation.mutate(selectedPost)}
-							/>
-						) : (
-							<p className="rounded-md border border-dashed border-line px-3 py-10 text-center text-xs text-neutral-400">
-								右の一覧から投稿を選択してください。
-							</p>
-						)}
-					</div>
-
-					{/* 右: 投稿(Post)一覧 */}
-					<div className="min-h-0 w-72 shrink-0 overflow-y-auto border-l border-line pl-3">
-						<div className="flex flex-col gap-2">
-							<Button
-								variant="secondary"
-								size="sm"
-								onClick={() => setBulkSettingsOpen(true)}
-							>
-								一括設定…
-							</Button>
-							<Button
-								variant="secondary"
-								size="sm"
-								onClick={() => setScheduleSettingsOpen(true)}
-							>
-								予約スケジュール…
-							</Button>
-							<Button
-								variant="secondary"
-								size="sm"
-								onClick={() => bulkExportMutation.mutate()}
-								disabled={totalOutputs === 0 || bulkExportMutation.isPending}
-							>
-								{bulkExportMutation.isPending
-									? "書き出し中…"
-									: "フォルダへ一括書き出し"}
-							</Button>
-							{bulkExports.size > 0 && (
-								<div className="flex items-center justify-between gap-2">
-									<span className="text-[11px] text-neutral-400">
-										完了 {bulkExportDone} / {bulkExports.size} 件
-										{bulkExportErrors > 0
-											? `(失敗 ${bulkExportErrors} 件)`
-											: ""}
-									</span>
-									{bulkExportMutation.isPending && (
-										<Button
-											variant="ghost"
-											size="sm"
-											onClick={cancelBulkExport}
-										>
-											キャンセル
-										</Button>
-									)}
-								</div>
-							)}
-							{bulkExportMutation.isError && (
-								<span className="text-[11px] text-danger">
-									{(bulkExportMutation.error as Error).message}
-								</span>
-							)}
-							<Button
-								variant="secondary"
-								size="sm"
-								onClick={addPost}
-								disabled={clips.length === 0}
-							>
-								+ 投稿を追加
-							</Button>
+		<>
+			<section ref={rootRef} className="flex h-full min-h-0 flex-col">
+				<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-4">
+					{!PUBLISH_SUPPORTED && (
+						<div className="shrink-0 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-300">
+							投稿(YouTube / Instagram)はデスクトップ版では未対応です(Phase 3
+							で対応予定)。書き出し済みファイルは右の「フォルダへ一括書き出し」で取得してください。
 						</div>
-
-						<div className="mt-3 flex flex-col gap-1.5">
-							{posts.length === 0 && (
-								<p className="rounded-md border border-dashed border-line px-2 py-4 text-center text-[11px] text-neutral-400">
-									投稿がありません。
+					)}
+					<div className="flex min-h-0 flex-1 gap-3">
+						{/* 中央: 選択中 Post の詳細 */}
+						<div className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
+							{selectedPost ? (
+								<PostDetail
+									key={selectedPost.id}
+									post={selectedPost}
+									clips={clips}
+									renders={preview.states}
+									pubStatuses={pubStatuses}
+									busy={busy}
+									onPatchPost={(patch) => patchPost(selectedPost.id, patch)}
+									onPatchOutput={(outputId, patch) =>
+										patchOutput(selectedPost.id, outputId, patch)
+									}
+									onAddOutput={() => addOutput(selectedPost.id)}
+									onRemoveOutput={(outputId) =>
+										removeOutput(selectedPost.id, outputId)
+									}
+									onPreviewOutput={(output) =>
+										previewOutput(selectedPost, output)
+									}
+									onPublishOutput={(output) =>
+										void publishOutput(selectedPost, output).catch(
+											() => undefined,
+										)
+									}
+									onPublishPost={() => publishPostMutation.mutate(selectedPost)}
+								/>
+							) : (
+								<p className="rounded-md border border-dashed border-line px-3 py-10 text-center text-xs text-neutral-400">
+									右の一覧から投稿を選択してください。
 								</p>
 							)}
-							{posts.map((post, index) => (
-								<PostRow
-									key={post.id}
-									post={post}
-									index={index}
-									total={posts.length}
-									clips={clips}
-									selected={post.id === selectedPostId}
-									onSelect={() => setSelectedPostId(post.id)}
-									onMove={(dir) => movePost(index, dir)}
-									onRemove={() => removePost(post.id)}
-								/>
-							))}
+						</div>
+
+						{/* 右: 投稿(Post)一覧 */}
+						<div className="min-h-0 w-72 shrink-0 overflow-y-auto border-l border-line pl-3">
+							<div className="flex flex-col gap-2">
+								<Button
+									variant="secondary"
+									size="sm"
+									onClick={() => setBulkSettingsOpen(true)}
+								>
+									一括設定…
+								</Button>
+								<Button
+									variant="secondary"
+									size="sm"
+									onClick={() => setScheduleSettingsOpen(true)}
+								>
+									予約スケジュール…
+								</Button>
+								<Button
+									variant="secondary"
+									size="sm"
+									onClick={() => bulkExportMutation.mutate()}
+									disabled={totalOutputs === 0 || bulkExportMutation.isPending}
+								>
+									{bulkExportMutation.isPending
+										? "書き出し中…"
+										: "フォルダへ一括書き出し"}
+								</Button>
+								{bulkExports.size > 0 && (
+									<div className="flex items-center justify-between gap-2">
+										<span className="text-[11px] text-neutral-400">
+											完了 {bulkExportDone} / {bulkExports.size} 件
+											{bulkExportErrors > 0
+												? `(失敗 ${bulkExportErrors} 件)`
+												: ""}
+										</span>
+										{bulkExportMutation.isPending && (
+											<Button
+												variant="ghost"
+												size="sm"
+												onClick={cancelBulkExport}
+											>
+												キャンセル
+											</Button>
+										)}
+									</div>
+								)}
+								{bulkExportMutation.isError && (
+									<span className="text-[11px] text-danger">
+										{(bulkExportMutation.error as Error).message}
+									</span>
+								)}
+								<Button
+									variant="secondary"
+									size="sm"
+									onClick={addPost}
+									disabled={clips.length === 0}
+								>
+									+ 投稿を追加
+								</Button>
+							</div>
+
+							<div className="mt-3 flex flex-col gap-1.5">
+								{posts.length === 0 && (
+									<p className="rounded-md border border-dashed border-line px-2 py-4 text-center text-[11px] text-neutral-400">
+										投稿がありません。
+									</p>
+								)}
+								{posts.map((post, index) => (
+									<PostRow
+										key={post.id}
+										post={post}
+										index={index}
+										total={posts.length}
+										clips={clips}
+										selected={post.id === selectedPostId}
+										onSelect={() => setSelectedPostId(post.id)}
+										onMove={(dir) => movePost(index, dir)}
+										onRemove={() => removePost(post.id)}
+									/>
+								))}
+							</div>
 						</div>
 					</div>
 				</div>
-			</div>
+
+				<footer className="flex shrink-0 items-center justify-end gap-2 border-t border-line px-4 py-3">
+					<Button variant="ghost" onClick={onGoToExport} disabled={busy}>
+						戻る
+					</Button>
+					<Button
+						variant="primary"
+						onClick={() => publishAllMutation.mutate()}
+						disabled={busy || totalOutputs === 0 || !PUBLISH_SUPPORTED}
+						title={
+							PUBLISH_SUPPORTED
+								? undefined
+								: "デスクトップ版では未対応(Phase 3 で対応予定)"
+						}
+					>
+						すべて投稿
+					</Button>
+				</footer>
+			</section>
 
 			<BulkPresetsModal
 				open={bulkSettingsOpen}
@@ -939,7 +949,7 @@ export function UploadModal({
 				onSetTime={setTimeFor}
 				onAssign={assignSchedule}
 			/>
-		</Modal>
+		</>
 	);
 }
 
@@ -962,9 +972,9 @@ interface BulkPresetsModalProps {
 /**
  * 「一括設定」モーダル: 出力先(ターゲット×フィット)の組み合わせを編集し、
  * 全 Post の出力先へ一括適用する。適用は破壊的(既存メタデータをリセット)なため、
- * 実際の適用は UploadModal 側の `applyPresets` 内で `useConfirm` による確認を挟む。
+ * 実際の適用は UploadScreen 側の `applyPresets` 内で `useConfirm` による確認を挟む。
  * 確認でキャンセルされた場合はこのモーダルを開いたままにする
- * (UploadModal 側が applyPresets の戻り値を見て onClose を呼ぶかどうかを決める)。
+ * (UploadScreen 側が applyPresets の戻り値を見て onClose を呼ぶかどうかを決める)。
  */
 function BulkPresetsModal(props: BulkPresetsModalProps) {
 	return (
