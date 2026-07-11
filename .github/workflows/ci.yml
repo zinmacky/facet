@@ -96,9 +96,23 @@ jobs:
           rm -rf .ffmpeg-tmp
 
       # ffmpeg-sys-next のビルドスクリプト(bindgen)が libclang を要求する。
-      - name: Install libclang (bindgen 用)
+      # 併せて facet-desktop (src-tauri) のコンパイルに必要な Tauri v2 の Linux
+      # バックエンド依存(gtk/webkit2gtk 等)も導入する(build-essential / curl /
+      # wget / file はランナーに導入済み)。
+      # https://v2.tauri.app/start/prerequisites/#linux
+      - name: Install libclang (bindgen 用) + Tauri Linux dependencies
         if: matrix.task == 'clippy' || matrix.task == 'test'
-        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            libclang-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev
 
       - name: Set FFMPEG_DIR / LIBCLANG_PATH / LD_LIBRARY_PATH
         if: matrix.task == 'clippy' || matrix.task == 'test'
@@ -124,23 +138,13 @@ jobs:
         if: matrix.task == 'fmt'
         run: cargo fmt --check
 
-      # facet-desktop (src-tauri) は Tauri v2 の Linux バックエンド依存として
-      # gtk/webkit2gtk/gio 等の pkg-config 済みシステムライブラリ
-      # (libwebkit2gtk-4.1-dev, libgtk-3-dev 等)を要求するが、この ubuntu
-      # ランナーには未導入のため gio-sys/gobject-sys/glib-sys のビルドスクリプトが
-      # 「Package gio-2.0 was not found in the pkg-config search path」で失敗する
-      # (#17 実行時に確認: rust (clippy) / rust (test) が exit code 101 で失敗)。
-      # rust-windows-check ジョブと同様に crates/* のみを対象にして回避する。
-      # TODO(Phase 2 以降): facet-desktop 向けに Linux 依存を apt でセットアップし、
-      # このジョブの対象へ facet-desktop を戻す(パッケージング整備のタイミングで
-      # 着手するのが計画的にも自然。Phase 2 の検査対象は media-core が本丸)。
-      - name: cargo clippy --workspace (facet-desktop は Linux 依存未整備のため除外)
+      - name: cargo clippy --workspace
         if: matrix.task == 'clippy'
-        run: cargo clippy --workspace --exclude facet-desktop -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
 
-      - name: cargo test --workspace (facet-desktop は Linux 依存未整備のため除外)
+      - name: cargo test --workspace
         if: matrix.task == 'test'
-        run: cargo test --workspace --exclude facet-desktop
+        run: cargo test --workspace
 
       # ライセンス検査: GPL/AGPL 系は allow リストに含めないことで既定 deny になる
       # (apps/desktop/deny.toml 参照)。
@@ -210,8 +214,5 @@ jobs:
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
           echo "$ffmpegDir\bin" >> $env:GITHUB_PATH
 
-      # facet-desktop (src-tauri) は Windows 向けビルド時に icons/icon.ico を要求するが
-      # 現状 icons/icon.png のみで未整備(Phase 0/1 スキャフォルド時点の既知ギャップ、
-      # Wave 0 のスコープ外)。crates/* のみを対象にして libav ビルド回帰を確認する。
-      - name: cargo check (crates/* のみ、facet-desktop は icon.ico 未整備のため除外)
-        run: cargo check --workspace --exclude facet-desktop
+      - name: cargo check --workspace
+        run: cargo check --workspace
