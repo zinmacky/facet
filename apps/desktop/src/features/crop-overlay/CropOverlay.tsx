@@ -131,12 +131,22 @@ export function CropOverlay({
 					y: clamp(orig.y + dy, 0, 1 - orig.height),
 				});
 			};
+			// pointerup 以外にも pointercancel(ブラウザ/OS のジェスチャ割り込み等で
+			// ポインタ操作が中断された場合)・lostpointercapture(setPointerCapture が
+			// 明示的解除以外の理由で失われた場合)でも必ず片付ける。up を pointerup
+			// のみに束縛していると、これらのイベントで move リスナーが外れずに残り続け
+			// (リスナーリーク)、以後その座標のマウス移動がすべて crop 更新を発火し
+			// 続けてしまう。
 			const up = () => {
 				window.removeEventListener("pointermove", move);
 				window.removeEventListener("pointerup", up);
+				window.removeEventListener("pointercancel", up);
+				window.removeEventListener("lostpointercapture", up);
 			};
 			window.addEventListener("pointermove", move);
 			window.addEventListener("pointerup", up);
+			window.addEventListener("pointercancel", up);
+			window.addEventListener("lostpointercapture", up);
 		},
 		[crop, onChange, toNorm],
 	);
@@ -193,12 +203,18 @@ export function CropOverlay({
 
 				onChange({ x, y, width: w, height: h });
 			};
+			// beginMove と同様、pointercancel/lostpointercapture でもリスナーを解除する
+			// (リスナーリーク防止)。
 			const up = () => {
 				window.removeEventListener("pointermove", move);
 				window.removeEventListener("pointerup", up);
+				window.removeEventListener("pointercancel", up);
+				window.removeEventListener("lostpointercapture", up);
 			};
 			window.addEventListener("pointermove", move);
 			window.addEventListener("pointerup", up);
+			window.addEventListener("pointercancel", up);
+			window.addEventListener("lostpointercapture", up);
 		},
 		[crop, onChange, snap, aspect, containerAspectRatio],
 	);

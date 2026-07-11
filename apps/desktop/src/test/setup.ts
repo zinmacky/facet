@@ -17,6 +17,8 @@ import {
  *   `./tauri-mock` の実装へ差し替える(実 IPC は無いため、Tauri 外の vitest では
  *   invoke/listen が undefined でエラーになる)。
  * - jsdom に無い `ResizeObserver`(CropOverlay の snap effect が使う)を最小スタブで補う。
+ * - jsdom に無い `setPointerCapture`/`releasePointerCapture`/`hasPointerCapture`
+ *   (CropOverlay/Timeline のドラッグ実装が使う)を最小スタブで補う。
  */
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -49,6 +51,19 @@ class ResizeObserverStub {
 	disconnect(): void {}
 }
 vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+
+// jsdom は Pointer Events の capture 系メソッドを実装していない
+// (呼ぶと "not a function" で即エラーになる)。CropOverlay/Timeline のドラッグ
+// ハンドラが `e.currentTarget.setPointerCapture(...)` を呼ぶため no-op で補う。
+if (!Element.prototype.setPointerCapture) {
+	Element.prototype.setPointerCapture = () => {};
+}
+if (!Element.prototype.releasePointerCapture) {
+	Element.prototype.releasePointerCapture = () => {};
+}
+if (!Element.prototype.hasPointerCapture) {
+	Element.prototype.hasPointerCapture = () => false;
+}
 
 // jsdom は <video>/<audio> の再生を実装していない(play/pause/load は
 // "Not implemented" 警告を吐く)。ClipEditor・usePauseVideosOnHide が
