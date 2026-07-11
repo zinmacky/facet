@@ -189,7 +189,7 @@ Instagram Graph API
 | フロント | **React/Vite を継続** | 全面書き直し | UI 品質はシェル言語に非依存。既存資産を移植でき無駄がない |
 | 配布 | **Tauri bundler + 署名/公証** | 手動配布 | dmg/MSI 生成・自動アップデータ内蔵 |
 
-> Windows 実機検証(2026-07-11、暫定 go): `h264_amf` を第一候補とする(詳細→
+> Windows 実機検証(2026-07-11、go 確定): `h264_amf` を第一候補とする(詳細→
 > [docs/phase2-0-windows-setup.md](./phase2-0-windows-setup.md) §7)。
 
 **リポジトリ形態: モノレポに `apps/desktop` を追加**。`apps/scheduler` と
@@ -446,8 +446,9 @@ TS 側ツーリング(Biome / turbo)と干渉させない。
     Windows の HW 方針を再検討(§10・§5 の HW アクセル前提の見直し)。
   - **この 2-0 が緑になるまで media-core 本体(下記)の Windows 対応部分は着手しない**
     (未実証の基盤の上に積まないため)。
-  - **実機検証結果(2026-07-11, 暫定 go)**: AMD Radeon RX 9070 XT 実機で `h264_amf`
+  - **実機検証結果(2026-07-11, go 確定)**: AMD Radeon RX 9070 XT 実機で `h264_amf`
     が HW 稼働(video codec engine 最大 37.17%)・高画質(SSIM=0.9988)を確認。
+    2026-07-11 に目視再生確認も完了(色破綻・ブロックノイズ・コマ落ちなし)。
     Windows 既定エンコーダは `h264_amf` を第一候補とし、`h264_mf`
     (`hw_encoding=1` 指定時のみ HW 稼働)はフォールバック候補とする。詳細は
     [docs/phase2-0-windows-setup.md](./phase2-0-windows-setup.md) §7 参照。
