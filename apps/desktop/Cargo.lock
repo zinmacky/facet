@@ -773,10 +773,12 @@ dependencies = [
 name = "facet-desktop"
 version = "0.0.0"
 dependencies = [
+ "media-core",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "uuid",
 ]
 
 [[package]]
