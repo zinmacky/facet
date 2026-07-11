@@ -14,9 +14,9 @@
 //! Wave 3 の `audio.rs` で追加予定(docs/desktop-migration-plan.md §12.1)。
 //!
 //! モジュール構成(Wave 1〜4 で順次追加):
-//! - Wave 1(このコミット): `error` / `decode` / `fit` / `encode` / `pipeline`
+//! - Wave 1: `error` / `decode` / `fit` / `encode` / `pipeline`
 //! - Wave 2: `trim` / `crop` / `encoder_select` / `probe`(`fit` は事前クロップ接続で拡張)
-//! - Wave 3: `concurrency` / `cancel` / `progress` / `audio`
+//! - Wave 3(このコミットで `progress` 追加): `concurrency` / `cancel` / `progress` / `audio`
 //! - Wave 4: `preview`
 
 pub mod decode;
@@ -24,7 +24,9 @@ pub mod encode;
 pub mod error;
 pub mod fit;
 pub mod pipeline;
+pub mod progress;
 pub mod spec;
 
 pub use error::{MediaError, Result};
-pub use pipeline::{reframe, Progress, ReframeOptions};
+pub use pipeline::{reframe, ReframeOptions};
+pub use progress::{Progress, ProgressTracker};

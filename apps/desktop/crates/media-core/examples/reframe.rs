@@ -74,10 +74,18 @@ fn run() -> Result<(), MediaError> {
 		frame_count.set(progress.frame);
 		match progress.percent {
 			Some(percent) => println!(
-				"frame={} total={:?} percent={:.1}%",
-				progress.frame, progress.total_frames, percent
+				"frame={} total={:?} percent={:.1}% out_time={:.2}s fps={:.1} speed={:.2}x",
+				progress.frame,
+				progress.total_frames,
+				percent,
+				progress.out_time_secs,
+				progress.fps,
+				progress.speed
 			),
-			None => println!("frame={} total=unknown", progress.frame),
+			None => println!(
+				"frame={} total=unknown out_time={:.2}s fps={:.1} speed={:.2}x",
+				progress.frame, progress.out_time_secs, progress.fps, progress.speed
+			),
 		}
 	};
 

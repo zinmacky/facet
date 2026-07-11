@@ -7,9 +7,10 @@
 //! 3 エージェントが並行でこのシグネチャへ接続できるようにする):
 //! - `should_cancel: &dyn Fn() -> bool` をループ境界(パケット単位)で毎回チェックする。
 //!   キャンセルを検知したら一時出力ファイルを削除して `MediaError::Cancelled` を返す。
-//! - `on_progress: &dyn Fn(Progress)` をエンコーダへフレームを送出するたびに呼ぶ。
-//!   `Progress` はフレーム数ベースの最小構造体(frame / total_frames 推定 / percent)。
-//!   Wave 3 の `progress.rs` が fps/speed 等へ拡張する前提。
+//! - `on_progress: &dyn Fn(Progress)` は `progress::ProgressTracker` 経由で呼ばれる。
+//!   `ProgressTracker` がフレームを送出するたびに fps/speed/out_time_secs/percent を
+//!   算出し、既定 200ms 間隔でスロットリングした上で `on_progress` を発火する
+//!   (`Progress` のフィールド定義・スロットリング仕様は `progress.rs` 参照)。
 //! - エンコーダ(名前 + オプション)は `encode::EncoderSpec` として引数注入する
 //!   (プラットフォーム別選択ロジックは Wave 2 の `encoder_select` に委ねる)。
 //!
@@ -20,6 +21,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use ffmpeg_next::{self as ffmpeg, filter, format, frame, Dictionary, Packet, Rational};
 
@@ -27,34 +29,12 @@ use crate::decode;
 use crate::encode::{self, EncoderSpec};
 use crate::error::{MediaError, Result};
 use crate::fit::{self, FilterGraphSpec};
+use crate::progress::ProgressTracker;
 use crate::spec::{Preset, Trim};
 
-/// パイプライン進捗の最小構造体。
-///
-/// Wave 1 時点ではフレーム数ベースの最小情報のみを持つ(fps/speed 等は Wave 3 の
-/// `progress.rs` が拡張する)。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Progress {
-	/// これまでにエンコーダへ送出したフレーム数。
-	pub frame: u64,
-	/// コンテナ申告値等から見積もった総フレーム数(不明なら `None`)。
-	pub total_frames: Option<u64>,
-	/// 0.0〜100.0(見積り不能なら `None`)。
-	pub percent: Option<f64>,
-}
-
-impl Progress {
-	fn new(frame: u64, total_frames: Option<u64>) -> Self {
-		let percent = total_frames
-			.filter(|&total| total > 0)
-			.map(|total| (frame as f64 / total as f64 * 100.0).min(100.0));
-		Progress {
-			frame,
-			total_frames,
-			percent,
-		}
-	}
-}
+/// パイプライン進捗の構造体。定義本体は Wave 3 で `progress.rs` へ移設した
+/// (frame/total_frames/percent に加え out_time_secs/fps/speed を持つ)。
+pub use crate::progress::Progress;
 
 /// [`reframe`] に渡すオプション一式。
 pub struct ReframeOptions<'a> {
@@ -188,6 +168,11 @@ fn run_pipeline(
 	let mut filtered = frame::Video::empty();
 	let mut encoded = Packet::empty();
 	let mut frame_count: u64 = 0;
+	// 直近で得られたフレームの pts を秒に変換した値(`Progress.out_time_secs` の元)。
+	// フィルタ出力フレームの pts が稀に不明(`None`)な場合でも 0 に巻き戻らないよう、
+	// 判明したときだけ更新する(`pull_filtered` 内)。
+	let mut last_out_time_secs: f64 = 0.0;
+	let mut progress_tracker = ProgressTracker::new(total_frames, on_progress);
 
 	for (stream, packet) in input.packets() {
 		if should_cancel() {
@@ -213,8 +198,8 @@ fn run_pipeline(
 				&mut filtered,
 				&mut encoded,
 				&mut frame_count,
-				total_frames,
-				on_progress,
+				&mut last_out_time_secs,
+				&mut progress_tracker,
 			)?;
 		}
 		if should_cancel() {
@@ -240,8 +225,8 @@ fn run_pipeline(
 			&mut filtered,
 			&mut encoded,
 			&mut frame_count,
-			total_frames,
-			on_progress,
+			&mut last_out_time_secs,
+			&mut progress_tracker,
 		)?;
 	}
 	flush_filter_source(&mut graph)?;
@@ -255,8 +240,8 @@ fn run_pipeline(
 		&mut filtered,
 		&mut encoded,
 		&mut frame_count,
-		total_frames,
-		on_progress,
+		&mut last_out_time_secs,
+		&mut progress_tracker,
 	)?;
 
 	encoder
@@ -270,6 +255,9 @@ fn run_pipeline(
 		ost_time_base,
 		&mut encoded,
 	)?;
+	// 完了時は必ず最終進捗を通知する(直前の update がスロットリングで間引かれていても、
+	// 呼び出し側は 100% の Progress を確実に受け取れる)。
+	progress_tracker.finish(frame_count, last_out_time_secs);
 
 	octx.write_trailer()
 		.map_err(|source| MediaError::Mux { source })?;
@@ -380,7 +368,7 @@ fn drain_encoder(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn pull_filtered(
+fn pull_filtered<F: Fn() -> Instant>(
 	graph: &mut filter::Graph,
 	encoder: &mut ffmpeg::encoder::Video,
 	octx: &mut format::context::Output,
@@ -390,8 +378,8 @@ fn pull_filtered(
 	filtered: &mut frame::Video,
 	encoded: &mut Packet,
 	frame_count: &mut u64,
-	total_frames: Option<u64>,
-	on_progress: &dyn Fn(Progress),
+	last_out_time_secs: &mut f64,
+	tracker: &mut ProgressTracker<'_, F>,
 ) -> Result<()> {
 	loop {
 		let has_frame = graph
@@ -417,7 +405,18 @@ fn pull_filtered(
 			encoded,
 		)?;
 		*frame_count += 1;
-		on_progress(Progress::new(*frame_count, total_frames));
+		// フィルタ出力フレームの pts が判明していれば out_time_secs を更新する
+		// (`buffersink` は通常 `best_effort_timestamp` を保つが、まれに不明な場合は
+		// 直前の値を引き継ぎ 0 に巻き戻さない)。
+		if let Some(pts) = filtered.timestamp() {
+			*last_out_time_secs = pts_to_secs(pts, ist_time_base);
+		}
+		tracker.update(*frame_count, *last_out_time_secs);
 	}
 	Ok(())
+}
+
+/// pts(`time_base` 単位の整数)を秒に変換する。
+fn pts_to_secs(pts: i64, time_base: Rational) -> f64 {
+	pts as f64 * f64::from(time_base.numerator()) / f64::from(time_base.denominator())
 }
