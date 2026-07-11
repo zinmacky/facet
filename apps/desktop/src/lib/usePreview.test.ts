@@ -44,30 +44,28 @@ describe("usePreview", () => {
 		});
 	});
 
-	it("同一 key への重複 ensure() 呼び出しは同じ Promise に合流する(preview_start は 1 回だけ)", async () => {
-		// 合流条件(ensure 実装)は `pending && cached?.rendering` — cached は state の
-		// ref ミラーで render commit 後にしか更新されない。よって「1 回目の
-		// rendering:true が画面に反映された後」に呼ばれた 2 回目のみ合流する
-		// (同一 tick 内で連続呼び出すと cached がまだ undefined で合流しない — これは
-		// usePreview の実装上の制約で、実際の呼び出し元(ボタン押下やクリップ選択)は
-		// 別 tick から呼ぶため通常問題にならない)。
+	it("同一 key への重複 ensure() 呼び出しは同一 tick 内でも同じ Promise に合流する(preview_start は 1 回だけ)", async () => {
+		// P1 バグ修正の固定テスト: 合流判定は以前 `pending && cached?.rendering` だった。
+		// cached は state の ref ミラーで render commit 後にしか更新されないため、
+		// 同一 tick 内で連続呼び出すと 1 回目の rendering:true がまだ cached へ反映
+		// されておらず合流に失敗し、preview_start が二重発火していた
+		// (usePreview.ensure の重複ガード競合)。合流判定を `pendingRef`(同期的に
+		// 更新される Map)のみに単純化した現在は、同一 tick 内の連続呼び出しでも
+		// 確実に合流する。
 		const { result } = renderHook(() => usePreview());
 
 		let p1!: Promise<string>;
-		act(() => {
-			p1 = result.current.ensure("clip-1", "/in.mp4", SPEC, "sig-1");
-		});
-		await waitFor(() =>
-			expect(result.current.states.get("clip-1")?.rendering).toBe(true),
-		);
-
 		let p2!: Promise<string>;
 		act(() => {
+			p1 = result.current.ensure("clip-1", "/in.mp4", SPEC, "sig-1");
 			p2 = result.current.ensure("clip-1", "/in.mp4", SPEC, "sig-1");
 		});
 
 		expect(p1).toBe(p2);
-		await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+		await waitFor(() =>
+			expect(result.current.states.get("clip-1")?.rendering).toBe(true),
+		);
+		expect(mockInvoke).toHaveBeenCalledTimes(1);
 	});
 
 	it("sig が一致し rendering でない完了済みキャッシュは再生成せず即解決する", async () => {
