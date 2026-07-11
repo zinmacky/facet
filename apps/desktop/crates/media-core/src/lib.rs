@@ -17,7 +17,7 @@
 //! - Wave 1: `error` / `decode` / `fit` / `encode` / `pipeline`
 //! - Wave 2: `trim` / `crop` / `encoder_select` / `probe`(`fit` は事前クロップ接続で拡張)
 //! - Wave 3: `concurrency` / `cancel` / `progress` / `audio`
-//! - Wave 4: `preview`
+//! - Wave 4: `preview`(低ビットレート仮エンコード + spec ハッシュキャッシュ)
 
 pub mod audio;
 pub mod cancel;
@@ -29,6 +29,7 @@ pub mod encoder_select;
 pub mod error;
 pub mod fit;
 pub mod pipeline;
+pub mod preview;
 pub mod probe;
 pub mod progress;
 pub mod spec;
@@ -37,4 +38,5 @@ pub mod trim;
 pub use cancel::CancelToken;
 pub use error::{MediaError, Result};
 pub use pipeline::{reframe, EncoderSelection, ReframeOptions};
+pub use preview::{preview_cache_key, render_preview, PREVIEW_BITRATE};
 pub use progress::{Progress, ProgressTracker};
