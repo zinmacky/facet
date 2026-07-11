@@ -2,6 +2,7 @@
 name = "facet-desktop"
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 description = "Facet desktop app (Tauri v2 shell)"
 license = ""
 repository = ""

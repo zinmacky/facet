@@ -2,6 +2,7 @@
 name = "contract-rs"
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 description = "packages/contract の JSON Schema から生成する serde 型の re-export(Phase 0/2 で実装)"
 
 [lib]
