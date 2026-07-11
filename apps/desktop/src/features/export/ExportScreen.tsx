@@ -13,16 +13,26 @@ import {
 	startReframe,
 } from "../../lib/tauri";
 import { type PreviewState, usePreview } from "../../lib/usePreview";
-import { Modal } from "../../components/ui/Modal";
+import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
 import { Button } from "../../components/ui/Button";
 import { cn } from "../../components/ui/cn";
+import type { ExportSummary } from "../wizard/StepIndicator";
 
-interface ExportModalProps {
-	open: boolean;
+interface ExportScreenProps {
+	/** true のとき現在表示中の画面(ウィザードのアクティブステップ)。 */
+	active: boolean;
 	source: { inputPath: string; probe: MediaInfo } | null;
 	clips: Clip[];
-	onClose: () => void;
-	onProceedToUpload: () => void;
+	/**
+	 * 増加するたびに全状態を明示的に破棄する(新しい元動画を選択したときのみ App
+	 * から増分される)。通常の clip 編集(トリム/クロップ/アスペクト変更)では
+	 * 増分されない — その場合は clip 単位の細粒度無効化(下記 sig 比較)で足りる。
+	 */
+	resetToken: number;
+	onGoToEdit: () => void;
+	onGoToUpload: () => void;
+	/** results から導出した進捗サマリを App(StepIndicator バッジ)へ押し上げる。 */
+	onProgressSummary?: (summary: ExportSummary) => void;
 }
 
 /** clip 単位の書き出し進捗・結果。 */
@@ -36,11 +46,17 @@ interface TaskState {
 	jobId?: string;
 	/** フォールバック等の一時通知(例: ソフトウェアエンコードで再試行中)。 */
 	notice?: string;
+	/**
+	 * 生成時点の clipPreviewSig。clips 側の対応する clip の現在の sig と異なれば
+	 * この結果は古い(要無効化) — clip 単位の細粒度無効化に使う。
+	 */
+	sig: string;
 }
 
 /**
  * masterSpec(クロップ内容)に影響する clip フィールドのシグネチャ。
- * これが変わればプレビューは古い(要更新) — usePreview の sig として使う。
+ * これが変わればプレビュー/書き出し結果は古い(要更新) — usePreview の sig、
+ * および results エントリの sig として使う。
  */
 function clipPreviewSig(clip: Clip): string {
 	const crop = clip.crop
@@ -50,20 +66,24 @@ function clipPreviewSig(clip: Clip): string {
 }
 
 /**
- * EXPORT モーダル: 各 clip のマスター(クロップ内容そのもの)を書き出す。
- * open が true でソースがあるとき、まだ done でない clip をレンダリング開始する。
- * 再オープンでは既存の done 結果を保持して再レンダしない。
+ * 書き出し画面: 各 clip のマスター(クロップ内容そのもの)を書き出す。
+ * ウィザードの一部として常時マウントされる(active=false のときも DOM に存在し、
+ * ジョブ購読は継続する)。active でソースがあり、まだ done でない clip を
+ * レンダリング開始する。clip の trim/crop/aspect が変わった場合はその clip の
+ * 結果のみを個別に無効化し、他 clip の結果はそのまま保持する。
  */
-export function ExportModal({
-	open,
+export function ExportScreen({
+	active,
 	source,
 	clips,
-	onClose,
-	onProceedToUpload,
-}: ExportModalProps) {
+	resetToken,
+	onGoToEdit,
+	onGoToUpload,
+	onProgressSummary,
+}: ExportScreenProps) {
 	const [results, setResults] = useState<Map<string, TaskState>>(new Map());
 
-	// 明示的に「書き出しを開始」するまでレンダリングを始めない(開いた瞬間に
+	// 明示的に「書き出しを開始」するまでレンダリングを始めない(切替直後に
 	// 全 clip のレンダリングを走らせて CPU を占有しないため)。
 	const [started, setStarted] = useState(false);
 	// 書き出し先フォルダの選択中(ダイアログ表示中)フラグ。
@@ -83,20 +103,44 @@ export function ExportModal({
 	const outputDirRef = useRef<string | null>(null);
 
 	// クロップ内容プレビュー(preview_start、低ビットレート・app キャッシュ、DL/保存 UI 無し)。
-	// UploadModal の「最終プレビュー」と同じ実装を共有する。
+	// UploadScreen の「最終プレビュー」と同じ実装を共有する。
 	const preview = usePreview();
 
-	// clips の入れ替え時は古い結果・購読を破棄する。
-	// biome-ignore lint/correctness/useExhaustiveDependencies: clips は本文で参照しないが入れ替え検知のトリガとして意図的に指定
+	// 非アクティブになった瞬間に配下の <video> を pause する。
+	const rootRef = usePauseVideosOnHide(active);
+
+	// 新しい元動画選択(App からの resetToken 増加)時のみ、全状態を明示的に破棄する。
+	// biome-ignore lint/correctness/useExhaustiveDependencies: resetToken の変化そのものがトリガ(mount 時の初回実行は無害)
 	useEffect(() => {
 		for (const unsub of unsubsRef.current.values()) unsub();
 		unsubsRef.current.clear();
-		resultsRef.current = new Map();
 		setResults(new Map());
 		preview.reset();
-		// clips が入れ替わったら再度「開始」を要求する。
 		setStarted(false);
-	}, [clips]);
+		setSelectedClipId(null);
+		outputDirRef.current = null;
+	}, [resetToken]);
+
+	// clip 単位の細粒度無効化(最重要): 配列参照が変わるたびに全消去していた旧実装をやめ、
+	// 「削除された clip」「trim/crop/aspect が変わった(sig が変わった) clip」の結果のみを
+	// 個別に破棄する。他 clip の結果・購読・プレビューはそのまま保持する。
+	useEffect(() => {
+		const next = new Map(resultsRef.current);
+		let changed = false;
+		for (const [id, task] of resultsRef.current) {
+			const clip = clips.find((c) => c.id === id);
+			const stale = clip === undefined || task.sig !== clipPreviewSig(clip);
+			if (!stale) continue;
+			unsubsRef.current.get(id)?.();
+			unsubsRef.current.delete(id);
+			preview.remove(id);
+			next.delete(id);
+			changed = true;
+		}
+		if (changed) setResults(next);
+		// 選択中 clip が削除されていたら、selectedClipId 側は別 effect(下記)で
+		// 先頭 clip に補正される。
+	}, [clips, preview.remove]);
 
 	/** 選択中 clip のクロップ内容プレビューを生成(または更新)する。 */
 	const handlePreviewClip = (clip: Clip) => {
@@ -121,10 +165,12 @@ export function ExportModal({
 		}
 	};
 
-	// レンダリング開始。開始操作後・open・source・出力先があり、done 結果を持たない clip のみ対象。
+	// レンダリング開始。開始操作後・source・出力先があり、done 結果を持たない clip のみ対象。
+	// 画面が非アクティブ(離脱済み)でも起動判定は続ける — 常時マウントのウィザードでは
+	// 「編集画面へ戻っている間に書き出しが進む」が期待挙動のため。
 	useEffect(() => {
 		const dir = outputDirRef.current;
-		if (!started || !open || !source || !dir) return;
+		if (!started || !source || !dir) return;
 		const probe = source.probe;
 		const input = source.inputPath;
 
@@ -133,11 +179,13 @@ export function ExportModal({
 			if (existing && existing.status === "done") continue;
 			if (unsubsRef.current.has(clip.id)) continue; // 実行中は二重起動しない
 
+			const sig = clipPreviewSig(clip);
+
 			// running としてマーク(仮の unsubscribe を先に登録し二重起動を防ぐ)。
 			unsubsRef.current.set(clip.id, () => {});
 			setResults((prev) => {
 				const next = new Map(prev);
-				next.set(clip.id, { status: "running", ratio: 0 });
+				next.set(clip.id, { status: "running", ratio: 0, sig });
 				return next;
 			});
 
@@ -149,7 +197,7 @@ export function ExportModal({
 			const update = (patch: Partial<TaskState>) => {
 				setResults((prev) => {
 					const next = new Map(prev);
-					const cur = next.get(clip.id) ?? { status: "running", ratio: 0 };
+					const cur = next.get(clip.id) ?? { status: "running", ratio: 0, sig };
 					next.set(clip.id, { ...cur, ...patch });
 					return next;
 				});
@@ -191,7 +239,7 @@ export function ExportModal({
 				}
 			})();
 		}
-	}, [started, open, source, clips]);
+	}, [started, source, clips]);
 
 	// アンマウント時に全購読を解除。
 	useEffect(() => {
@@ -212,6 +260,22 @@ export function ExportModal({
 		return paths;
 	}, [clips, results]);
 
+	// 進捗サマリを App(StepIndicator バッジ)へ押し上げる。
+	const progressSummary = useMemo<ExportSummary>(() => {
+		let done = 0;
+		let running = 0;
+		for (const clip of clips) {
+			const task = results.get(clip.id);
+			if (task?.status === "done") done += 1;
+			else if (task?.status === "running") running += 1;
+		}
+		return { total: clips.length, done, running };
+	}, [clips, results]);
+
+	useEffect(() => {
+		onProgressSummary?.(progressSummary);
+	}, [progressSummary, onProgressSummary]);
+
 	// 書き出し先フォルダを OS 既定のファイルマネージャで開く。
 	// studio 版は書き出し結果を HTTP 経由の ZIP ダウンロードで渡すが、desktop には
 	// studio-server が存在しないため同じ経路は使えない(既知ギャップ)。書き出し済み
@@ -224,140 +288,135 @@ export function ExportModal({
 		},
 	});
 
-	// open 時、または選択中 clip が clips から消えたときは先頭 clip を選択する。
+	// 選択中 clip が clips から消えたとき(または未選択のとき)は先頭 clip を選択する。
 	useEffect(() => {
-		if (!open) return;
 		setSelectedClipId((prev) => {
 			if (prev !== null && clips.some((clip) => clip.id === prev)) return prev;
 			return clips[0]?.id ?? null;
 		});
-	}, [open, clips]);
+	}, [clips]);
 
 	const selectedClip = clips.find((clip) => clip.id === selectedClipId) ?? null;
 
 	return (
-		<Modal
-			open={open}
-			title="書き出し(クロップ内容)"
-			onClose={onClose}
-			widthClass="max-w-4xl"
-			footer={
-				<>
-					{!started && (
-						<p className="mr-auto max-w-xs truncate text-xs text-neutral-400">
-							{clips.length} 本を書き出します(順次レンダリング)。
-						</p>
-					)}
-					{!started && (
-						<Button
-							variant="primary"
-							disabled={clips.length === 0 || pickingDir}
-							onClick={() => void handleStart()}
-						>
-							{pickingDir
-								? "書き出し先フォルダを選択中…"
-								: `書き出しを開始(${clips.length}本)`}
-						</Button>
-					)}
-					<Button variant="ghost" onClick={onClose}>
-						閉じる
-					</Button>
-					<Button
-						variant="primary"
-						disabled={clips.length === 0}
-						onClick={onProceedToUpload}
-					>
-						アップロードへ進む
-					</Button>
-				</>
-			}
-		>
-			{!started ? (
-				<div className="flex gap-4">
-					{/* 中央: 選択中 clip のクロップ内容プレビュー */}
-					<div className="flex min-w-0 flex-1 flex-col gap-2">
-						{selectedClip ? (
-							<ExportPreviewDetail
-								clip={selectedClip}
-								state={preview.states.get(selectedClip.id)}
-								onGenerate={() => handlePreviewClip(selectedClip)}
-								onCancel={() => preview.cancel(selectedClip.id)}
-							/>
-						) : (
-							<p className="text-sm text-neutral-400">
-								プレビューする切り抜きがありません。
-							</p>
-						)}
-					</div>
-
-					{/* 右: clip 一覧(プレビュー状態) */}
-					<div className="flex w-60 shrink-0 flex-col gap-1 overflow-y-auto border-l border-line pl-4">
-						{clips.map((clip) => (
-							<ExportPreviewListItem
-								key={clip.id}
-								clip={clip}
-								state={preview.states.get(clip.id)}
-								selected={clip.id === selectedClipId}
-								onSelect={() => setSelectedClipId(clip.id)}
-							/>
-						))}
-					</div>
-				</div>
-			) : (
-				<div className="flex gap-4">
-					{/* 中央: 選択中 clip の詳細 */}
-					<div className="flex min-w-0 flex-1 flex-col gap-2">
-						{selectedClip ? (
-							<ExportDetail
-								clip={selectedClip}
-								task={results.get(selectedClip.id)}
-							/>
-						) : (
-							<p className="text-sm text-neutral-400">
-								書き出す切り抜きがありません。
-							</p>
-						)}
-					</div>
-
-					{/* 右: 一括DL + clip 一覧 */}
-					<div className="flex w-60 shrink-0 flex-col gap-3 border-l border-line pl-4">
-						<div className="flex flex-col gap-1.5">
-							<Button
-								size="sm"
-								variant="secondary"
-								disabled={openFolderMutation.status === "pending"}
-								onClick={() => openFolderMutation.mutate()}
-							>
-								{openFolderMutation.status === "pending"
-									? "開いています…"
-									: "出力先フォルダを開く"}
-							</Button>
-							<span className="text-[11px] text-neutral-400">
-								完了 {donePaths.length} / {clips.length} 件
-							</span>
-							{openFolderMutation.isError && (
-								<span className="text-xs text-danger">
-									フォルダを開けませんでした:{" "}
-									{(openFolderMutation.error as Error).message}
-								</span>
+		<section ref={rootRef} className="flex h-full min-h-0 flex-col">
+			<div className="min-h-0 flex-1 overflow-y-auto p-4">
+				{!started ? (
+					<div className="flex gap-4">
+						{/* 中央: 選択中 clip のクロップ内容プレビュー */}
+						<div className="flex min-w-0 flex-1 flex-col gap-2">
+							{selectedClip ? (
+								<ExportPreviewDetail
+									clip={selectedClip}
+									state={preview.states.get(selectedClip.id)}
+									onGenerate={() => handlePreviewClip(selectedClip)}
+									onCancel={() => preview.cancel(selectedClip.id)}
+								/>
+							) : (
+								<p className="text-sm text-neutral-400">
+									プレビューする切り抜きがありません。
+								</p>
 							)}
 						</div>
 
-						<div className="flex flex-col gap-1 overflow-y-auto">
+						{/* 右: clip 一覧(プレビュー状態) */}
+						<div className="flex w-60 shrink-0 flex-col gap-1 overflow-y-auto border-l border-line pl-4">
 							{clips.map((clip) => (
-								<ExportListItem
+								<ExportPreviewListItem
 									key={clip.id}
 									clip={clip}
-									task={results.get(clip.id)}
+									state={preview.states.get(clip.id)}
 									selected={clip.id === selectedClipId}
 									onSelect={() => setSelectedClipId(clip.id)}
 								/>
 							))}
 						</div>
 					</div>
-				</div>
-			)}
-		</Modal>
+				) : (
+					<div className="flex gap-4">
+						{/* 中央: 選択中 clip の詳細 */}
+						<div className="flex min-w-0 flex-1 flex-col gap-2">
+							{selectedClip ? (
+								<ExportDetail
+									clip={selectedClip}
+									task={results.get(selectedClip.id)}
+								/>
+							) : (
+								<p className="text-sm text-neutral-400">
+									書き出す切り抜きがありません。
+								</p>
+							)}
+						</div>
+
+						{/* 右: 一括DL + clip 一覧 */}
+						<div className="flex w-60 shrink-0 flex-col gap-3 border-l border-line pl-4">
+							<div className="flex flex-col gap-1.5">
+								<Button
+									size="sm"
+									variant="secondary"
+									disabled={openFolderMutation.status === "pending"}
+									onClick={() => openFolderMutation.mutate()}
+								>
+									{openFolderMutation.status === "pending"
+										? "開いています…"
+										: "出力先フォルダを開く"}
+								</Button>
+								<span className="text-[11px] text-neutral-400">
+									完了 {donePaths.length} / {clips.length} 件
+								</span>
+								{openFolderMutation.isError && (
+									<span className="text-xs text-danger">
+										フォルダを開けませんでした:{" "}
+										{(openFolderMutation.error as Error).message}
+									</span>
+								)}
+							</div>
+
+							<div className="flex flex-col gap-1 overflow-y-auto">
+								{clips.map((clip) => (
+									<ExportListItem
+										key={clip.id}
+										clip={clip}
+										task={results.get(clip.id)}
+										selected={clip.id === selectedClipId}
+										onSelect={() => setSelectedClipId(clip.id)}
+									/>
+								))}
+							</div>
+						</div>
+					</div>
+				)}
+			</div>
+
+			<footer className="flex shrink-0 items-center justify-end gap-2 border-t border-line px-4 py-3">
+				<Button variant="ghost" onClick={onGoToEdit} className="mr-auto">
+					編集に戻る
+				</Button>
+				{!started && (
+					<p className="max-w-xs truncate text-xs text-neutral-400">
+						{clips.length} 本を書き出します(順次レンダリング)。
+					</p>
+				)}
+				{!started && (
+					<Button
+						variant="primary"
+						disabled={clips.length === 0 || pickingDir}
+						onClick={() => void handleStart()}
+					>
+						{pickingDir
+							? "書き出し先フォルダを選択中…"
+							: `書き出しを開始(${clips.length}本)`}
+					</Button>
+				)}
+				<Button
+					variant="primary"
+					disabled={clips.length === 0}
+					onClick={onGoToUpload}
+				>
+					アップロードへ進む
+				</Button>
+			</footer>
+		</section>
 	);
 }
 
@@ -476,7 +535,7 @@ function ExportPreviewListItem({
 /**
  * 中央: 選択中 clip 1 本ぶんのクロップ内容プレビュー。「書き出しを開始」前の画面用。
  * `preview_start`(低ビットレート・app キャッシュ)を使い、ユーザー向けの
- * ファイルダウンロード/保存は行わない(結果はモーダル内の <video> 表示のみ)。
+ * ファイルダウンロード/保存は行わない(結果は画面内の <video> 表示のみ)。
  */
 function ExportPreviewDetail({
 	clip,

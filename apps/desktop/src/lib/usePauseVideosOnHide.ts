@@ -8,7 +8,7 @@ import { useEffect, useRef } from "react";
  */
 export function usePauseVideosOnHide(
 	active: boolean,
-): RefObject<HTMLElement | null> {
+): RefObject<HTMLElement> {
 	const rootRef = useRef<HTMLElement>(null);
 	const wasActiveRef = useRef(active);
 
