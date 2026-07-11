@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
 	convertFileSrc,
@@ -21,12 +20,6 @@ import { Button } from "./components/ui/Button";
 import { IconButton } from "./components/ui/IconButton";
 import { PlusIcon } from "./components/ui/icons";
 import { useConfirm } from "./components/ui/confirm";
-
-// Tauri のネイティブシェル外(通常のブラウザでの vite dev/preview)では
-// window.__TAURI_INTERNALS__ が存在せず invoke が使えないため、呼び出し前にガードする
-function isTauriRuntime(): boolean {
-	return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
 
 /** 選択済みソース(実パス + probe 結果)。 */
 export interface Source {
@@ -73,18 +66,6 @@ export function App() {
 	// 元動画プレーヤー(ClipEditor)を命令的に操作するための参照。
 	// 編集画面から離れるときに再生を止めるために使う。
 	const clipEditorRef = useRef<ClipEditorHandle>(null);
-
-	// Tauri invoke 疎通確認(Phase 1 の受け入れ基準)。開発用の小さな表示としてフッタに残す。
-	const [pingResult, setPingResult] = useState("(未実行)");
-	useEffect(() => {
-		if (!isTauriRuntime()) {
-			setPingResult("Tauri 外での実行のため invoke をスキップしました");
-			return;
-		}
-		invoke<string>("ping")
-			.then((result) => setPingResult(result))
-			.catch((error) => setPingResult(`invoke 失敗: ${String(error)}`));
-	}, []);
 
 	const pickMutation = useMutation({
 		mutationFn: async (): Promise<Source | null> => {
@@ -305,11 +286,6 @@ export function App() {
 					),
 				}}
 			/>
-
-			{/* 開発用フッタ: Tauri invoke 疎通確認(Phase 1 の受け入れ基準)。 */}
-			<footer className="flex h-6 shrink-0 items-center border-t border-line px-4 font-mono text-[10px] text-neutral-600">
-				invoke(ping): {pingResult}
-			</footer>
 		</div>
 	);
 }
