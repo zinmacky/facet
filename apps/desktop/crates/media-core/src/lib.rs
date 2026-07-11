@@ -19,6 +19,7 @@
 //! - Wave 3: `concurrency` / `cancel` / `progress` / `audio`
 //! - Wave 4: `preview`
 
+pub mod crop;
 pub mod decode;
 pub mod encode;
 pub mod error;
