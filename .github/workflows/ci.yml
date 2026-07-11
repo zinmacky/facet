@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        task: [typecheck, lint, test]
+        task: [build, typecheck, lint, test]
     steps:
       - uses: actions/checkout@v7
 
@@ -36,3 +36,9 @@ jobs:
 
       - name: Run ${{ matrix.task }}
         run: pnpm ${{ matrix.task }}
+
+      # contract の JSON Schema(schema/*.json)は zod スキーマから生成される
+      # コミット対象の中間表現。build 後に差分が残っていれば生成漏れ。
+      - name: Check contract schema is up to date
+        if: matrix.task == 'build'
+        run: git diff --exit-code -- packages/contract/schema/
