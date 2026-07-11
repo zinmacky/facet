@@ -31,4 +31,4 @@ pub mod spec;
 pub mod trim;
 
 pub use error::{MediaError, Result};
-pub use pipeline::{reframe, Progress, ReframeOptions};
+pub use pipeline::{reframe, EncoderSelection, Progress, ReframeOptions};

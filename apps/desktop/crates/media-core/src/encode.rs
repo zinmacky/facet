@@ -88,11 +88,18 @@ pub struct EncoderSpec<'a> {
 	pub global_header: bool,
 }
 
-/// エンコーダを構築し、出力コンテキストへストリームとして追加した上で open する。
+/// エンコーダを構築して open し、成功した場合のみ出力コンテキストへストリームとして
+/// 追加する。
 ///
+/// **ストリーム追加は open 成功後に行う**(Wave 2 で `encoder_select::Auto` の候補
+/// リトライループから呼ばれるようになったための設計判断)。`octx.add_stream()` は
+/// `avformat_new_stream` を直接呼ぶため、一度追加したストリームを取り消す API は
+/// ffmpeg-next に存在しない。open 前に追加してしまうと、候補が open に失敗した際に
+/// 中身のない不正なストリームが出力コンテキストに残り続け、次の候補で追加した
+/// 正しいストリームと合わせて 2 本のストリームを持つ壊れた mp4 になってしまう
 /// (`ost.set_parameters()` はエンコーダの open 後にしか正しい値を持たないため、
-/// 「ストリーム追加」と「エンコーダ open」は本関数内で不可分に行う。
-/// スパイク `spikes/libav-reframe/src/reframe.rs` の該当処理と同じ順序。)
+/// 元々「ストリーム追加」と「エンコーダ open」は不可分に行っていたが、順序を
+/// 「open → 追加」に入れ替えることで、この 2 つの不可分性を保ったまま安全にリトライできる)。
 ///
 /// 戻り値の `format::Pixel` は、エンコーダが実際に受け付けるピクセルフォーマット
 /// (`pick_pixel_format` の結果)。フィルタグラフ末尾の `format=` と必ず一致させる
@@ -108,14 +115,6 @@ pub fn open_encoder(
 	})?;
 
 	let pixel_format = pick_pixel_format(codec);
-
-	let mut ost = octx
-		.add_stream(codec)
-		.map_err(|source| MediaError::EncoderOpen {
-			name: spec.name.to_string(),
-			source,
-		})?;
-	let stream_index = ost.index();
 
 	let mut encoder_ctx = codec::context::Context::new_with_codec(codec)
 		.encoder()
@@ -142,6 +141,15 @@ pub fn open_encoder(
 			name: spec.name.to_string(),
 			source,
 		})?;
+
+	// ここまで到達したら open は成功している。ここで初めてストリームを追加する。
+	let mut ost = octx
+		.add_stream(codec)
+		.map_err(|source| MediaError::EncoderOpen {
+			name: spec.name.to_string(),
+			source,
+		})?;
+	let stream_index = ost.index();
 	ost.set_parameters(&opened);
 
 	Ok((opened, pixel_format, stream_index))

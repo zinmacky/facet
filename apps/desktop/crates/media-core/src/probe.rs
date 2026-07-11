@@ -109,7 +109,14 @@ pub fn probe(path: &Path) -> Result<MediaInfo> {
 /// コンテナ全体の尺(秒)。TS 版が `format.duration` を優先し、無ければ映像ストリーム
 /// 側の `duration` にフォールバックするのと同じ優先順位。
 /// どちらも不明・不正(0 以下 / 非有限)なら 0 を返す(TS 版の `Number.isFinite` ガードと同じ)。
-fn duration_seconds(ctx: &decode::DecodeContext, video_stream: &ffmpeg_next::Stream<'_>) -> f64 {
+///
+/// `pub(crate)`: pipeline.rs が trim 適用後の `Progress.total_frames` を見積もる際、
+/// probe 用に別途ファイルを開き直さず同じ `decode::DecodeContext` から尺を得るために使う
+/// (Wave 2 配線)。
+pub(crate) fn duration_seconds(
+	ctx: &decode::DecodeContext,
+	video_stream: &ffmpeg_next::Stream<'_>,
+) -> f64 {
 	let container = positive_duration(ctx.input.duration(), ffmpeg_next::rescale::TIME_BASE);
 	let stream = positive_duration(video_stream.duration(), ctx.time_base);
 	let duration = container.or(stream).unwrap_or(0.0);

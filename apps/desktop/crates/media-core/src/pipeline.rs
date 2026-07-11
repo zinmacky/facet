@@ -10,24 +10,43 @@
 //! - `on_progress: &dyn Fn(Progress)` をエンコーダへフレームを送出するたびに呼ぶ。
 //!   `Progress` はフレーム数ベースの最小構造体(frame / total_frames 推定 / percent)。
 //!   Wave 3 の `progress.rs` が fps/speed 等へ拡張する前提。
-//! - エンコーダ(名前 + オプション)は `encode::EncoderSpec` として引数注入する
-//!   (プラットフォーム別選択ロジックは Wave 2 の `encoder_select` に委ねる)。
+//! - エンコーダは [`EncoderSelection`] として引数注入する(`Explicit` は明示指定、
+//!   `Auto` はプラットフォーム別候補を `encoder_select` から取得し順に試す。
+//!   Wave 2 配線で確定)。
 //!
 //! **キャンセル/失敗時の出力の扱い**: 出力は一時ファイル名(`<stem>.tmp.<ext>`)に書き、
 //! 正常終了時のみ最終ファイル名へリネームする。途中終了(エラー・キャンセルいずれも)は
 //! 一時ファイルを削除するため、`output_path` に不完全な mp4 が残ることはない
 //! (docs/desktop-migration-plan.md §6.2)。
+//!
+//! **Wave 2 で接続したモジュール**:
+//! - `trim`: `open_input` 直後に `TrimWindow::new(trim, trim::AV_TIME_BASE)` の
+//!   `start_ts()` で demuxer をシークし(`start_ts == 0` ならシーク自体を省略)、
+//!   デコードループでは `ist_time_base` の `TrimWindow` で各フレームを
+//!   `classify()` する(`Skip` は破棄して継続、`Stop` はループを抜けて flush、
+//!   `Keep` は `rebase()` で pts を再基準化してから通常処理)。`trim` が `None` の
+//!   場合、`TrimWindow` は no-op(常に `Keep`・恒等 rebase)になるため、分岐を
+//!   増やさずに同じコードパスで扱える。
+//! - `crop`: `ReframeOptions.crop`(+ `source`)から `crop::crop_filter()` で
+//!   文字列化し、`fit::FilterGraphSpec.pre_crop` へ接続する。
+//! - `encoder_select`: `ReframeOptions.encoder` が `Auto` の場合、候補を先頭から
+//!   順に `encode::open_encoder` で試し、`MediaError::EncoderOpen` なら次候補へ、
+//!   それ以外の失敗は即座に返す。
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use ffmpeg_next::{self as ffmpeg, filter, format, frame, Dictionary, Packet, Rational};
 
+use crate::crop;
 use crate::decode;
 use crate::encode::{self, EncoderSpec};
+use crate::encoder_select;
 use crate::error::{MediaError, Result};
 use crate::fit::{self, FilterGraphSpec};
-use crate::spec::{Preset, Trim};
+use crate::probe;
+use crate::spec::{CropRect, Preset, SourceDimensions, Trim};
+use crate::trim::{self, TrimDecision, TrimWindow};
 
 /// パイプライン進捗の最小構造体。
 ///
@@ -56,20 +75,36 @@ impl Progress {
 	}
 }
 
+/// エンコーダの選び方。`Explicit` はテスト・CLI での明示指定用、`Auto` は
+/// `encoder_select` のプラットフォーム別候補を先頭から順に試す(Wave 2 配線)。
+pub enum EncoderSelection<'a> {
+	/// `encoder_select::select()` が返す候補を先頭から順に試す。
+	/// 全滅した場合は最後の `MediaError::EncoderOpen`(候補が 1 つも登録されて
+	/// いない場合は `MediaError::NoEncoderCandidate`)を返す。
+	Auto,
+	/// エンコーダ名 + 追加オプションを直接指定する(単体テスト・CLI の
+	/// 明示指定用途)。`encoder_select` を経由しない。
+	Explicit {
+		name: &'a str,
+		options: Dictionary<'a>,
+	},
+}
+
 /// [`reframe`] に渡すオプション一式。
 pub struct ReframeOptions<'a> {
 	pub preset: &'a Preset,
 	/// blur-pad の gblur sigma。既定は [`fit::DEFAULT_SIGMA`]。
 	pub sigma: u32,
-	/// 計算済みの事前クロップフィルタ文字列。
-	/// TODO(Wave 2): `crop.rs` 実装後、`EditSpec.crop` から自動算出して渡す形にする。
-	pub pre_crop: Option<&'a str>,
-	/// TODO(Wave 2): `trim.rs` 実装後、秒単位のイン/アウト点を入力側のシーク
-	/// (`format::context::Input::seek`)と尺制限へ変換して適用する。
-	/// Wave 1 時点では受け取るのみで未適用(常に全尺を処理する)。
+	/// ソース側の事前クロップ矩形(0..1 正規化)。`None` なら事前クロップなし
+	/// (`EditSpec.crop` に対応、Wave 2 配線)。
+	pub crop: Option<CropRect>,
+	/// 元動画の実ピクセル寸法。`crop` を実ピクセルの `crop=` フィルタへ解決するのに
+	/// 使う(`crop` が `None` の場合は未使用。`EditSpec.source` に対応)。
+	pub source: SourceDimensions,
+	/// 秒単位のイン/アウト点。`None` なら全尺を処理する(`EditSpec.trim` に対応、
+	/// Wave 2 配線)。
 	pub trim: Option<Trim>,
-	pub encoder_name: &'a str,
-	pub encoder_options: Dictionary<'a>,
+	pub encoder: EncoderSelection<'a>,
 	pub bit_rate: usize,
 	pub should_cancel: &'a dyn Fn() -> bool,
 	pub on_progress: &'a dyn Fn(Progress),
@@ -80,14 +115,23 @@ pub struct ReframeOptions<'a> {
 /// で追加予定 — `lib.rs` 冒頭コメント参照)。
 ///
 /// 出力は完了時のみ `output_path` に現れる(§6.2、モジュール冒頭コメント参照)。
-pub fn reframe(input_path: &Path, output_path: &Path, options: ReframeOptions<'_>) -> Result<()> {
+///
+/// 戻り値は実際に使われたエンコーダ名(`encode::open_encoder` に渡した
+/// `EncoderSpec.name`)。`EncoderSelection::Auto` の場合、どの候補が採用されたかを
+/// 呼び出し側(ログ・実機検証・将来の UI 表示)が確認できるようにするための情報
+/// (Wave 2 配線)。
+pub fn reframe(
+	input_path: &Path,
+	output_path: &Path,
+	options: ReframeOptions<'_>,
+) -> Result<String> {
 	ffmpeg::init().map_err(|source| MediaError::Init { source })?;
 
 	let tmp_output_path = temp_output_path(output_path);
 	match run_pipeline(input_path, &tmp_output_path, options) {
-		Ok(()) => {
+		Ok(encoder_name) => {
 			fs::rename(&tmp_output_path, output_path)?;
-			Ok(())
+			Ok(encoder_name)
 		}
 		Err(err) => {
 			// 途中終了(エラー・キャンセル)。一時出力が存在すれば削除する
@@ -121,14 +165,14 @@ fn run_pipeline(
 	input_path: &Path,
 	tmp_output_path: &Path,
 	options: ReframeOptions<'_>,
-) -> Result<()> {
+) -> Result<String> {
 	let ReframeOptions {
 		preset,
 		sigma,
-		pre_crop,
-		trim: _trim,
-		encoder_name,
-		encoder_options,
+		crop,
+		source,
+		trim,
+		encoder,
 		bit_rate,
 		should_cancel,
 		on_progress,
@@ -137,7 +181,45 @@ fn run_pipeline(
 	let mut decode_ctx = decode::open_input(input_path)?;
 	let ist_index = decode_ctx.stream_index;
 	let ist_time_base = decode_ctx.time_base;
-	let total_frames = decode_ctx.total_frames;
+	let container_total_frames = decode_ctx.total_frames;
+	let frame_rate = decode_ctx.decoder.frame_rate();
+
+	// trim: demuxer シーク(統合ガイド 1.、trim.rs 冒頭コメント参照)。
+	// `trim` が `None` の場合、`TrimWindow::new(None, ..)` は start_ts=0 の no-op
+	// window になるため、以下は無条件に実行してよい(start_ts==0 ならシーク省略)。
+	let seek_window = TrimWindow::new(trim.as_ref(), trim::AV_TIME_BASE);
+	if seek_window.start_ts() != 0 {
+		decode_ctx
+			.input
+			.seek(seek_window.start_ts(), ..)
+			.map_err(|source| MediaError::Seek {
+				path: input_path.to_path_buf(),
+				source,
+			})?;
+	}
+
+	// trim ありの場合のみ、実効尺(ソース尺 - trim)から総フレーム数を見積もり直す
+	// (統合ガイド 3.)。trim なしなら従来どおりコンテナ申告値を使う(数値計算自体は
+	// [`total_frames_with_trim`] に切り出してユニットテスト可能にしている)。
+	let total_frames = match trim.as_ref() {
+		Some(t) => {
+			let video_stream =
+				decode_ctx
+					.input
+					.stream(ist_index)
+					.ok_or(MediaError::InputStreamMissing {
+						path: input_path.to_path_buf(),
+						index: ist_index,
+					})?;
+			let source_duration_secs = probe::duration_seconds(&decode_ctx, &video_stream);
+			total_frames_with_trim(t, frame_rate, source_duration_secs)
+		}
+		None => container_total_frames,
+	};
+
+	// フレーム単位の trim 分類・再基準化用ウィンドウ(ストリームのタイムベース)。
+	let frame_window = TrimWindow::new(trim.as_ref(), ist_time_base);
+
 	// `input`/`decoder` を別々の可変参照として取り出す(同一ループ内で両方を
 	// 独立に可変借用するため。DecodeContext のフィールドは互いに素なので安全)。
 	let decoder = &mut decode_ctx.decoder;
@@ -149,24 +231,21 @@ fn run_pipeline(
 	})?;
 
 	let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
-	let (mut encoder, enc_pix_fmt, stream_index) = encode::open_encoder(
+	let (mut encoder_ctx, enc_pix_fmt, stream_index, encoder_name_used) = open_selected_encoder(
 		&mut octx,
-		EncoderSpec {
-			name: encoder_name,
-			options: encoder_options,
-			width: preset.width,
-			height: preset.height,
-			time_base: ist_time_base,
-			frame_rate: decoder.frame_rate(),
-			bit_rate,
-			global_header,
-		},
+		encoder,
+		preset,
+		ist_time_base,
+		frame_rate,
+		bit_rate,
+		global_header,
 	)?;
 
 	let enc_pix_name = encode::pix_fmt_name(enc_pix_fmt);
+	let pre_crop = crop.map(|rect| crop::crop_filter(rect, source));
 	let filter_spec_str = fit::build_filter_graph(&FilterGraphSpec {
 		preset,
-		pre_crop,
+		pre_crop: pre_crop.as_deref(),
 		pix_fmt: &enc_pix_name,
 		sigma,
 	});
@@ -188,8 +267,13 @@ fn run_pipeline(
 	let mut filtered = frame::Video::empty();
 	let mut encoded = Packet::empty();
 	let mut frame_count: u64 = 0;
+	// trim の end に到達してループを早期終了したか(統合ガイド 2. `Stop`)。
+	// 早期終了時はデコーダ内部にまだ残っているかもしれない未取得フレームも
+	// (pts が単調増加である限り)すべて end 以降のため、デコーダ側の EOF flush は
+	// 行わずフィルタ/エンコーダの flush のみ行う。
+	let mut stopped_early = false;
 
-	for (stream, packet) in input.packets() {
+	'decode: for (stream, packet) in input.packets() {
 		if should_cancel() {
 			return Err(MediaError::Cancelled);
 		}
@@ -200,12 +284,18 @@ fn run_pipeline(
 			.send_packet(&packet)
 			.map_err(|source| MediaError::Decode { source })?;
 		while decoder.receive_frame(&mut decoded).is_ok() {
-			let ts = decoded.timestamp();
-			decoded.set_pts(ts);
+			match classify_and_rebase(&mut decoded, &frame_window) {
+				TrimDecision::Skip => continue,
+				TrimDecision::Stop => {
+					stopped_early = true;
+					break 'decode;
+				}
+				TrimDecision::Keep => {}
+			}
 			push_to_filter(&mut graph, &decoded)?;
 			pull_filtered(
 				&mut graph,
-				&mut encoder,
+				&mut encoder_ctx,
 				&mut octx,
 				stream_index,
 				ist_time_base,
@@ -223,31 +313,38 @@ fn run_pipeline(
 	}
 
 	// flush: decoder → filter → encoder(スパイク同様の 3 段 flush)。
-	decoder
-		.send_eof()
-		.map_err(|source| MediaError::Decode { source })?;
-	while decoder.receive_frame(&mut decoded).is_ok() {
-		let ts = decoded.timestamp();
-		decoded.set_pts(ts);
-		push_to_filter(&mut graph, &decoded)?;
-		pull_filtered(
-			&mut graph,
-			&mut encoder,
-			&mut octx,
-			stream_index,
-			ist_time_base,
-			ost_time_base,
-			&mut filtered,
-			&mut encoded,
-			&mut frame_count,
-			total_frames,
-			on_progress,
-		)?;
+	// trim の end で早期終了した場合はデコーダ側の flush をスキップする
+	// (上の `stopped_early` コメント参照)。
+	if !stopped_early {
+		decoder
+			.send_eof()
+			.map_err(|source| MediaError::Decode { source })?;
+		while decoder.receive_frame(&mut decoded).is_ok() {
+			match classify_and_rebase(&mut decoded, &frame_window) {
+				TrimDecision::Skip => continue,
+				TrimDecision::Stop => break,
+				TrimDecision::Keep => {}
+			}
+			push_to_filter(&mut graph, &decoded)?;
+			pull_filtered(
+				&mut graph,
+				&mut encoder_ctx,
+				&mut octx,
+				stream_index,
+				ist_time_base,
+				ost_time_base,
+				&mut filtered,
+				&mut encoded,
+				&mut frame_count,
+				total_frames,
+				on_progress,
+			)?;
+		}
 	}
 	flush_filter_source(&mut graph)?;
 	pull_filtered(
 		&mut graph,
-		&mut encoder,
+		&mut encoder_ctx,
 		&mut octx,
 		stream_index,
 		ist_time_base,
@@ -259,11 +356,11 @@ fn run_pipeline(
 		on_progress,
 	)?;
 
-	encoder
+	encoder_ctx
 		.send_eof()
 		.map_err(|source| MediaError::Encode { source })?;
 	drain_encoder(
-		&mut encoder,
+		&mut encoder_ctx,
 		&mut octx,
 		stream_index,
 		ist_time_base,
@@ -277,7 +374,111 @@ fn run_pipeline(
 	// ここで明示的に出力コンテキストを閉じる(Drop で avio を close する)。
 	drop(octx);
 
-	Ok(())
+	Ok(encoder_name_used)
+}
+
+/// デコード済みフレームの trim 分類を行い、`Keep` の場合は pts を再基準化する
+/// (統合ガイド 2.)。pts が不明な場合は分類できないため `Keep`(素通し、pts は
+/// 変更しない)として扱う(防御的フォールバック。通常のストリームでは発生しない)。
+fn classify_and_rebase(decoded: &mut frame::Video, frame_window: &TrimWindow) -> TrimDecision {
+	match decoded.timestamp() {
+		Some(pts) => {
+			let decision = frame_window.classify(pts);
+			if decision == TrimDecision::Keep {
+				decoded.set_pts(Some(frame_window.rebase(pts)));
+			}
+			decision
+		}
+		None => TrimDecision::Keep,
+	}
+}
+
+/// trim 適用時の `Progress.total_frames` を見積もる(統合ガイド 3.)。
+/// フレームレートが不明(`frame_rate: None`)な場合は見積り不能として `None` を返す。
+/// `trim なし` のケースはこの関数の外側(呼び出し側、`run_pipeline`)で
+/// コンテナ申告値をそのまま使うため、ここでは扱わない。
+fn total_frames_with_trim(
+	trim: &Trim,
+	frame_rate: Option<Rational>,
+	source_duration_secs: f64,
+) -> Option<u64> {
+	let frame_rate = frame_rate?;
+	trim::estimate_total_frames(
+		trim::effective_duration_secs(Some(trim), source_duration_secs),
+		frame_rate,
+	)
+}
+
+/// [`EncoderSelection`] に従ってエンコーダを開く。戻り値の `String` は実際に
+/// 使われたエンコーダ名(`reframe` の戻り値としてそのまま呼び出し側へ伝わる)。
+///
+/// `Auto` の場合は `encoder_select::select()` が返す候補を先頭から順に試し、
+/// `MediaError::EncoderOpen`(open 失敗)なら次候補へ進む。それ以外の失敗
+/// (`EncoderNotFound` 等)は即座に返す。全候補が `EncoderOpen` で失敗した場合は
+/// 最後に発生した `EncoderOpen` を返す(§11-2: libx264 等へのソフトウェア
+/// フォールバックはしない)。
+#[allow(clippy::too_many_arguments)]
+fn open_selected_encoder(
+	octx: &mut format::context::Output,
+	selection: EncoderSelection<'_>,
+	preset: &Preset,
+	time_base: Rational,
+	frame_rate: Option<Rational>,
+	bit_rate: usize,
+	global_header: bool,
+) -> Result<(ffmpeg::encoder::Video, format::Pixel, usize, String)> {
+	match selection {
+		EncoderSelection::Explicit { name, options } => {
+			let (opened, pixel_format, stream_index) = encode::open_encoder(
+				octx,
+				EncoderSpec {
+					name,
+					options,
+					width: preset.width,
+					height: preset.height,
+					time_base,
+					frame_rate,
+					bit_rate,
+					global_header,
+				},
+			)?;
+			Ok((opened, pixel_format, stream_index, name.to_string()))
+		}
+		EncoderSelection::Auto => {
+			let candidates = encoder_select::select()?;
+			let mut last_err: Option<MediaError> = None;
+			for choice in candidates {
+				let attempt = encode::open_encoder(
+					octx,
+					EncoderSpec {
+						name: choice.name,
+						options: choice.to_dictionary(),
+						width: preset.width,
+						height: preset.height,
+						time_base,
+						frame_rate,
+						bit_rate,
+						global_header,
+					},
+				);
+				match attempt {
+					Ok((opened, pixel_format, stream_index)) => {
+						return Ok((opened, pixel_format, stream_index, choice.name.to_string()))
+					}
+					Err(err @ MediaError::EncoderOpen { .. }) => last_err = Some(err),
+					Err(err) => return Err(err),
+				}
+			}
+			// `encoder_select::select()` は候補が 1 つもない場合
+			// `MediaError::NoEncoderCandidate` を返す(=ここには来ない)ため、
+			// `last_err` は理論上必ず `Some` になる。防御的に `None` の場合は
+			// `unwrap`/`expect` せず明確なエラーを返す。
+			Err(last_err.unwrap_or(MediaError::NoEncoderCandidate {
+				platform: "auto".to_string(),
+				attempted: Vec::new(),
+			}))
+		}
+	}
 }
 
 /// `buffer`/`buffersink` を使った最小のフィルタグラフを構築する
@@ -420,4 +621,94 @@ fn pull_filtered(
 		on_progress(Progress::new(*frame_count, total_frames));
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// --- Progress::new (既存の Wave 1 テストの範囲。回帰確認用) -------------------------
+
+	#[test]
+	fn progress_percent_is_none_when_total_unknown() {
+		let progress = Progress::new(5, None);
+		assert_eq!(progress.frame, 5);
+		assert_eq!(progress.total_frames, None);
+		assert_eq!(progress.percent, None);
+	}
+
+	#[test]
+	fn progress_percent_is_clamped_to_100() {
+		let progress = Progress::new(120, Some(100));
+		assert_eq!(progress.percent, Some(100.0));
+	}
+
+	// --- temp_output_path --------------------------------------------------------------
+
+	#[test]
+	fn temp_output_path_preserves_extension() {
+		let tmp = temp_output_path(Path::new("/out/video.mp4"));
+		assert_eq!(tmp, PathBuf::from("/out/video.tmp.mp4"));
+	}
+
+	#[test]
+	fn temp_output_path_without_extension_appends_tmp_suffix() {
+		let tmp = temp_output_path(Path::new("/out/video"));
+		assert_eq!(tmp, PathBuf::from("/out/video.tmp"));
+	}
+
+	// --- open_selected_encoder: Auto の全滅時に Explicit ではなく候補ループを
+	//     経由すること自体は実 FFmpeg 依存なので実機検証で確認する(このファイルの
+	//     ユニットテストでは encoder_select 側の候補選択ロジックのみを検証する)。
+
+	// --- total_frames_with_trim ----------------------------------------------------------
+
+	#[test]
+	fn total_frames_with_trim_uses_effective_duration_and_frame_rate() {
+		let t = Trim {
+			start: 5.0,
+			end: 15.0,
+		};
+		// 実効尺は 10 秒(effective_duration_secs と同じ計算)、30fps。
+		let result = total_frames_with_trim(&t, Some(Rational(30, 1)), 20.0);
+		assert_eq!(result, Some(300));
+	}
+
+	#[test]
+	fn total_frames_with_trim_clamps_to_source_duration() {
+		// end がソース尺を超えるケース: effective_duration_secs 側でクランプされる。
+		let t = Trim {
+			start: 2.0,
+			end: 100.0,
+		};
+		let result = total_frames_with_trim(&t, Some(Rational(30, 1)), 10.0);
+		// 実効尺 = 10.0 - 2.0 = 8.0 秒 -> 8.0 * 30 = 240 フレーム。
+		assert_eq!(result, Some(240));
+	}
+
+	#[test]
+	fn total_frames_with_trim_unknown_frame_rate_is_none() {
+		let t = Trim {
+			start: 0.0,
+			end: 5.0,
+		};
+		assert_eq!(total_frames_with_trim(&t, None, 10.0), None);
+	}
+
+	#[test]
+	fn encoder_selection_explicit_holds_name_and_options() {
+		let mut options = Dictionary::new();
+		options.set("hw_encoding", "1");
+		let selection = EncoderSelection::Explicit {
+			name: "h264_mf",
+			options,
+		};
+		match selection {
+			EncoderSelection::Explicit { name, options } => {
+				assert_eq!(name, "h264_mf");
+				assert_eq!(options.get("hw_encoding"), Some("1"));
+			}
+			EncoderSelection::Auto => panic!("expected Explicit"),
+		}
+	}
 }

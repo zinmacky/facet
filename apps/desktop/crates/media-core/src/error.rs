@@ -132,6 +132,14 @@ pub enum MediaError {
 	#[error("キャンセルされました")]
 	Cancelled,
 
+	/// trim 開始点への demuxer シーク(`format::context::Input::seek`)が失敗した。
+	#[error("シークに失敗しました: {path} ({source})")]
+	Seek {
+		path: PathBuf,
+		#[source]
+		source: ffmpeg_next::Error,
+	},
+
 	/// `encoder_select` モジュール: プラットフォーム別の HW エンコーダ候補が
 	/// 1 つも使えなかった。`attempted` は候補テーブルの全エンコーダ名
 	/// (非対応プラットフォームで候補自体が 0 件の場合は空)。
