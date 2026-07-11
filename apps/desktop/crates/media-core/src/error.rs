@@ -120,4 +120,21 @@ pub enum MediaError {
 	/// (pipeline.rs の実装契約)。
 	#[error("キャンセルされました")]
 	Cancelled,
+
+	/// `encoder_select` モジュール: プラットフォーム別の HW エンコーダ候補が
+	/// 1 つも使えなかった。`attempted` は候補テーブルの全エンコーダ名
+	/// (非対応プラットフォームで候補自体が 0 件の場合は空)。
+	///
+	/// この判定は `ffmpeg_next::encoder::find_by_name` による登録確認のみに基づく
+	/// (`encoder_select::select` の責務)。実際の HW 初期化成否(open 失敗、
+	/// ドライバ/セッション枯渇等)はここでは検出できない — その扱いは
+	/// `candidates()` の返す順で `encode::open_encoder` を試す呼び出し側の
+	/// 候補ループに委ねる(`EncoderOpen` が個々の open 失敗を表す)。
+	/// Phase 2 では libx264 等のソフトウェアエンコーダへのフォールバックを
+	/// 行わない(docs/desktop-migration-plan.md §11-2)。
+	#[error("利用可能な HW エンコーダが見つかりません(platform={platform}, 候補={attempted:?})")]
+	NoEncoderCandidate {
+		platform: String,
+		attempted: Vec<String>,
+	},
 }
