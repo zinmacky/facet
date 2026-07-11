@@ -19,6 +19,7 @@
 //! - Wave 3: `concurrency` / `cancel` / `progress` / `audio`
 //! - Wave 4: `preview`
 
+pub mod cancel;
 pub mod decode;
 pub mod encode;
 pub mod error;
@@ -26,5 +27,6 @@ pub mod fit;
 pub mod pipeline;
 pub mod spec;
 
+pub use cancel::CancelToken;
 pub use error::{MediaError, Result};
 pub use pipeline::{reframe, Progress, ReframeOptions};
