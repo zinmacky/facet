@@ -180,6 +180,8 @@ export function UploadModal({
 		{ targetId: string; fit: FitMode }[]
 	>([{ targetId: DEFAULT_TARGET_ID, fit: DEFAULT_FIT }]);
 	const [presetNote, setPresetNote] = useState<string | null>(null);
+	// 「一括設定」モーダル(出力先の組み合わせ一括適用)の開閉状態。
+	const [bulkSettingsOpen, setBulkSettingsOpen] = useState(false);
 
 	// 閉じたら内部状態を初期化する(再度開いたときは現在の clips から作り直す)。
 	useEffect(() => {
@@ -194,6 +196,7 @@ export function UploadModal({
 		setAssignNote(null);
 		setOutputPresets([{ targetId: DEFAULT_TARGET_ID, fit: DEFAULT_FIT }]);
 		setPresetNote(null);
+		setBulkSettingsOpen(false);
 		// 実行中の一括書き出しジョブを止めてから状態をクリアする。
 		for (const unsub of bulkUnsubsRef.current.values()) unsub();
 		bulkUnsubsRef.current.clear();
@@ -417,15 +420,17 @@ export function UploadModal({
 
 	// テンプレートの (ターゲット×フィット) 一式を全 Post の出力先として一括適用する。
 	// 各 Post の出力先を作り直す(メタデータはリセット)。
-	const applyPresets = async () => {
-		if (outputPresets.length === 0) return;
+	// 戻り値は実際に適用したか(確認ダイアログでキャンセルされた場合は false)。
+	// モーダル側はこれを見て、適用時のみモーダルを閉じる。
+	const applyPresets = async (): Promise<boolean> => {
+		if (outputPresets.length === 0) return false;
 		const ok = await confirm({
 			title: "出力先を一括適用",
 			body: `全 ${posts.length} 投稿の出力先をこの組み合わせで作り直します。入力済みのタイトル・キャプションはリセットされます。`,
 			confirmLabel: "適用",
 			tone: "danger",
 		});
-		if (!ok) return;
+		if (!ok) return false;
 		setPosts((prev) =>
 			prev.map((p) => ({
 				...p,
@@ -442,6 +447,7 @@ export function UploadModal({
 		setPresetNote(
 			`全 ${posts.length} 投稿に ${outputPresets.length} 出力先を適用しました。`,
 		);
+		return true;
 	};
 
 	// ---- レンダリング --------------------------------------------------------
@@ -770,13 +776,11 @@ export function UploadModal({
 					</div>
 				)}
 				<div className="shrink-0">
-					<BulkSettings
+					<ScheduleSettings
 						startDate={startDate}
 						endDate={endDate}
 						weekdayTimes={weekdayTimes}
 						note={assignNote}
-						outputPresets={outputPresets}
-						presetNote={presetNote}
 						onStartDate={setStartDate}
 						onEndDate={setEndDate}
 						onToggleWeekday={toggleWeekday}
@@ -784,10 +788,6 @@ export function UploadModal({
 						onRemoveTime={removeTimeFor}
 						onSetTime={setTimeFor}
 						onAssign={assignSchedule}
-						onAddPreset={addPreset}
-						onRemovePreset={removePreset}
-						onSetPreset={setPreset}
-						onApplyPresets={applyPresets}
 					/>
 				</div>
 
@@ -830,6 +830,13 @@ export function UploadModal({
 					{/* 右: 投稿(Post)一覧 */}
 					<div className="min-h-0 w-72 shrink-0 overflow-y-auto border-l border-line pl-3">
 						<div className="flex flex-col gap-2">
+							<Button
+								variant="secondary"
+								size="sm"
+								onClick={() => setBulkSettingsOpen(true)}
+							>
+								一括設定…
+							</Button>
 							<Button
 								variant="secondary"
 								size="sm"
@@ -897,19 +904,139 @@ export function UploadModal({
 					</div>
 				</div>
 			</div>
+
+			<BulkPresetsModal
+				open={bulkSettingsOpen}
+				onClose={() => setBulkSettingsOpen(false)}
+				outputPresets={outputPresets}
+				presetNote={presetNote}
+				onAddPreset={addPreset}
+				onRemovePreset={removePreset}
+				onSetPreset={setPreset}
+				onApply={async () => {
+					const applied = await applyPresets();
+					if (applied) setBulkSettingsOpen(false);
+				}}
+			/>
 		</Modal>
 	);
 }
 
-// ---- 一括設定(出力先テンプレート + 予約スケジュール) ----------------------
+// ---- 一括設定(出力先テンプレートのモーダル) --------------------------------
 
-interface BulkSettingsProps {
+interface BulkPresetsModalProps {
+	open: boolean;
+	onClose: () => void;
+	outputPresets: { targetId: string; fit: FitMode }[];
+	presetNote: string | null;
+	onAddPreset: () => void;
+	onRemovePreset: (index: number) => void;
+	onSetPreset: (
+		index: number,
+		patch: Partial<{ targetId: string; fit: FitMode }>,
+	) => void;
+	onApply: () => void;
+}
+
+/**
+ * 「一括設定」モーダル: 出力先(ターゲット×フィット)の組み合わせを編集し、
+ * 全 Post の出力先へ一括適用する。適用は破壊的(既存メタデータをリセット)なため、
+ * 実際の適用は UploadModal 側の `applyPresets` 内で `useConfirm` による確認を挟む。
+ * 確認でキャンセルされた場合はこのモーダルを開いたままにする
+ * (UploadModal 側が applyPresets の戻り値を見て onClose を呼ぶかどうかを決める)。
+ */
+function BulkPresetsModal(props: BulkPresetsModalProps) {
+	return (
+		<Modal
+			open={props.open}
+			title="一括設定"
+			onClose={props.onClose}
+			widthClass="max-w-xl"
+			footer={
+				<>
+					<Button variant="ghost" onClick={props.onClose}>
+						閉じる
+					</Button>
+					<Button variant="primary" size="sm" onClick={props.onApply}>
+						全ての投稿に出力先を適用
+					</Button>
+				</>
+			}
+		>
+			<div className="flex flex-col gap-2">
+				<span className="text-[11px] font-medium text-neutral-300">
+					出力先の一括設定
+				</span>
+				<div className="flex flex-col gap-1.5">
+					{props.outputPresets.map((preset, index) => (
+						// biome-ignore lint/suspicious/noArrayIndexKey: プリセットは配列位置で識別され(onSetPreset が index を使用)安定IDを持たない
+						<div key={index} className="flex items-center gap-2">
+							<select
+								className={selectClass}
+								value={preset.targetId}
+								onChange={(e) =>
+									props.onSetPreset(index, { targetId: e.target.value })
+								}
+							>
+								{OUTPUT_TARGETS.map((target) => (
+									<option key={target.id} value={target.id}>
+										{target.label}
+									</option>
+								))}
+							</select>
+							<select
+								className={selectClass}
+								value={preset.fit}
+								onChange={(e) =>
+									props.onSetPreset(index, {
+										fit: e.target.value as FitMode,
+									})
+								}
+							>
+								{FIT_OPTIONS.map((opt) => (
+									<option key={opt.value} value={opt.value}>
+										{opt.label}
+									</option>
+								))}
+							</select>
+							{props.outputPresets.length > 1 && (
+								<IconButton
+									tone="danger"
+									size="md"
+									aria-label="組み合わせを削除"
+									onClick={() => props.onRemovePreset(index)}
+								>
+									<TrashIcon />
+								</IconButton>
+							)}
+						</div>
+					))}
+				</div>
+				<div className="flex items-center gap-3">
+					<Button variant="ghost" size="sm" onClick={props.onAddPreset}>
+						+ 組み合わせを追加
+					</Button>
+					{props.presetNote && (
+						<span className="text-[11px] text-neutral-400">
+							{props.presetNote}
+						</span>
+					)}
+				</div>
+				<p className="text-[11px] text-neutral-400">
+					適用すると各投稿の出力先をこの組み合わせで作り直します(メタデータはリセット)。
+				</p>
+			</div>
+		</Modal>
+	);
+}
+
+// ---- 予約スケジュール(一括割当) --------------------------------------------
+
+interface ScheduleSettingsProps {
 	startDate: string;
 	endDate: string;
 	weekdayTimes: Record<number, string[]>;
 	note: string | null;
-	outputPresets: { targetId: string; fit: FitMode }[];
-	presetNote: string | null;
 	onStartDate: (v: string) => void;
 	onEndDate: (v: string) => void;
 	onToggleWeekday: (day: number) => void;
@@ -917,16 +1044,9 @@ interface BulkSettingsProps {
 	onRemoveTime: (day: number, index: number) => void;
 	onSetTime: (day: number, index: number, value: string) => void;
 	onAssign: () => void;
-	onAddPreset: () => void;
-	onRemovePreset: (index: number) => void;
-	onSetPreset: (
-		index: number,
-		patch: Partial<{ targetId: string; fit: FitMode }>,
-	) => void;
-	onApplyPresets: () => void;
 }
 
-function BulkSettings(props: BulkSettingsProps) {
+function ScheduleSettings(props: ScheduleSettingsProps) {
 	const [expanded, setExpanded] = useState(false);
 	const selectedDays = Object.keys(props.weekdayTimes)
 		.map(Number)
@@ -943,88 +1063,10 @@ function BulkSettings(props: BulkSettingsProps) {
 				<span className="text-[11px] text-neutral-400">
 					{expanded ? "▼" : "▶"}
 				</span>
-				一括設定
+				予約スケジュール
 			</button>
 			{expanded && (
 				<div className="mt-2 flex flex-col gap-4">
-					{/* 出力先(ターゲット×フィット)の一括設定 */}
-					<div className="flex flex-col gap-2">
-						<span className="text-[11px] font-medium text-neutral-300">
-							出力先の一括設定
-						</span>
-						<div className="flex flex-col gap-1.5">
-							{props.outputPresets.map((preset, index) => (
-								// biome-ignore lint/suspicious/noArrayIndexKey: プリセットは配列位置で識別され(onSetPreset が index を使用)安定IDを持たない
-								<div key={index} className="flex items-center gap-2">
-									<select
-										className={selectClass}
-										value={preset.targetId}
-										onChange={(e) =>
-											props.onSetPreset(index, { targetId: e.target.value })
-										}
-									>
-										{OUTPUT_TARGETS.map((target) => (
-											<option key={target.id} value={target.id}>
-												{target.label}
-											</option>
-										))}
-									</select>
-									<select
-										className={selectClass}
-										value={preset.fit}
-										onChange={(e) =>
-											props.onSetPreset(index, {
-												fit: e.target.value as FitMode,
-											})
-										}
-									>
-										{FIT_OPTIONS.map((opt) => (
-											<option key={opt.value} value={opt.value}>
-												{opt.label}
-											</option>
-										))}
-									</select>
-									{props.outputPresets.length > 1 && (
-										<IconButton
-											tone="danger"
-											size="md"
-											aria-label="組み合わせを削除"
-											onClick={() => props.onRemovePreset(index)}
-										>
-											<TrashIcon />
-										</IconButton>
-									)}
-								</div>
-							))}
-						</div>
-						<div className="flex items-center gap-3">
-							<Button variant="ghost" size="sm" onClick={props.onAddPreset}>
-								+ 組み合わせを追加
-							</Button>
-							<Button
-								variant="secondary"
-								size="sm"
-								onClick={props.onApplyPresets}
-							>
-								全ての投稿に出力先を適用
-							</Button>
-							{props.presetNote && (
-								<span className="text-[11px] text-neutral-400">
-									{props.presetNote}
-								</span>
-							)}
-						</div>
-						<p className="text-[11px] text-neutral-400">
-							適用すると各投稿の出力先をこの組み合わせで作り直します(メタデータはリセット)。
-						</p>
-					</div>
-
-					<div className="h-px bg-line" />
-
-					{/* 予約スケジュール */}
-					<span className="text-[11px] font-medium text-neutral-300">
-						予約スケジュール
-					</span>
 					<div className="flex flex-wrap items-center gap-3">
 						<label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
 							開始日
