@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { CropRect, Trim } from "@facet/core";
 import type { MediaInfo } from "../../lib/tauri";
 import type { Clip } from "../../types";
@@ -40,7 +40,18 @@ export function ClipEditor({ clip, probe, videoSrc, onChange }: ClipEditorProps)
 	const [currentTime, setCurrentTime] = useState(0);
 	const [playing, setPlaying] = useState(false);
 	const [videoLoading, setVideoLoading] = useState(true);
+	// 動画の読み込み失敗メッセージ。asset プロトコル未許可・破損ファイル等で
+	// <video> の load が失敗しても spinner が回り続けるだけで気付けないことがあった
+	// ため、明示的にエラーを表示する。
+	const [videoError, setVideoError] = useState<string | null>(null);
 	const stopAtRef = useRef<number | null>(null);
+
+	// videoSrc(= 選択し直した元動画)が変わったら、前回の読み込みエラー表示をリセットする。
+	// biome-ignore lint/correctness/useExhaustiveDependencies: videoSrc は本文で参照しないが再実行のトリガとして意図的に指定
+	useEffect(() => {
+		setVideoError(null);
+		setVideoLoading(true);
+	}, [videoSrc]);
 
 	const crop = clip.crop ?? FULL_CROP;
 	const ratio = aspectRatio(clip.aspect);
@@ -120,6 +131,13 @@ export function ClipEditor({ clip, probe, videoSrc, onChange }: ClipEditorProps)
 						onWaiting={() => setVideoLoading(true)}
 						onPlaying={() => setVideoLoading(false)}
 						onCanPlay={() => setVideoLoading(false)}
+						onError={(e) => {
+							setVideoLoading(false);
+							const code = e.currentTarget.error?.code;
+							setVideoError(
+								`動画の読み込みに失敗しました${code ? `(エラーコード ${code})` : ""}。ファイル形式や読み取り権限を確認してください。`,
+							);
+						}}
 						className="block max-h-[52vh] max-w-full rounded"
 					/>
 					<CropOverlay
@@ -128,7 +146,12 @@ export function ClipEditor({ clip, probe, videoSrc, onChange }: ClipEditorProps)
 						aspect={ratio ?? undefined}
 						snap={snap}
 					/>
-					{videoLoading && (
+					{videoError && (
+						<div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/70 px-4 text-center text-xs text-danger">
+							{videoError}
+						</div>
+					)}
+					{!videoError && videoLoading && (
 						<div className="pointer-events-none absolute inset-0 flex items-center justify-center">
 							<SpinnerIcon size={28} className="text-neutral-300" />
 						</div>
