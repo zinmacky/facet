@@ -32,12 +32,21 @@
 //! - `encoder_select`: `ReframeOptions.encoder` が `Auto` の場合、候補を先頭から
 //!   順に `encode::open_encoder` で試し、`MediaError::EncoderOpen` なら次候補へ、
 //!   それ以外の失敗は即座に返す。
+//!
+//! **Wave 3 で接続したモジュール**:
+//! - `audio`: 入力に音声ストリームがあれば [`crate::audio::AudioPipeline`] を構築し、
+//!   映像と同じパケットループ内でインターリーブして駆動する(`stream.index()` で
+//!   映像/音声どちらのパケットかを振り分ける)。音声が無い入力では従来どおり映像のみの
+//!   パイプラインとして動作する(`ReframeOptions` に音声の有効/無効フラグは存在しない
+//!   — `packages/ffmpeg-runner` の `-map 0:a?` と同じ「あれば通す」挙動)。
+//!   詳細な設計(trim/リサンプル/FIFO/pts 再基準化)は `audio.rs` モジュール冒頭コメント参照。
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use ffmpeg_next::{self as ffmpeg, filter, format, frame, Dictionary, Packet, Rational};
 
+use crate::audio;
 use crate::crop;
 use crate::decode;
 use crate::encode::{self, EncoderSpec};
@@ -220,6 +229,11 @@ fn run_pipeline(
 	// フレーム単位の trim 分類・再基準化用ウィンドウ(ストリームのタイムベース)。
 	let frame_window = TrimWindow::new(trim.as_ref(), ist_time_base);
 
+	// 音声ストリームの検出(`decoder`/`input` を可変参照へ分割する前に、共有の
+	// `decode_ctx.input` から不変借用で読む。audio.rs モジュール冒頭コメント参照)。
+	// 無ければ `None`(映像のみのパイプラインとして継続する)。
+	let audio_source = audio::open_audio_decoder(&decode_ctx.input)?;
+
 	// `input`/`decoder` を別々の可変参照として取り出す(同一ループ内で両方を
 	// 独立に可変借用するため。DecodeContext のフィールドは互いに素なので安全)。
 	let decoder = &mut decode_ctx.decoder;
@@ -251,6 +265,19 @@ fn run_pipeline(
 	});
 	let mut graph = open_filter_graph(decoder, ist_time_base, &filter_spec_str, enc_pix_fmt)?;
 
+	// 音声パイプラインの構築(出力ストリームの追加・エンコーダ open まで)。
+	// 映像のストリーム追加(`open_selected_encoder` 内の `add_stream`)より後に
+	// 呼ぶことで、出力コンテナのストリーム順を「映像 0・音声 1」に保つ。
+	let mut audio_pipeline = match audio_source {
+		Some(source) => Some(audio::AudioPipeline::open(
+			&mut octx,
+			source,
+			trim.as_ref(),
+			global_header,
+		)?),
+		None => None,
+	};
+
 	// mp4 に +faststart(moov 先頭。docs/desktop-migration-plan.md §12.1/§6.2)。
 	let mut mux_opts = Dictionary::new();
 	mux_opts.set("movflags", "+faststart");
@@ -262,6 +289,9 @@ fn run_pipeline(
 			index: stream_index,
 		})?
 		.time_base();
+	if let Some(pipeline) = audio_pipeline.as_mut() {
+		pipeline.bind_output_time_base(&octx)?;
+	}
 
 	let mut decoded = frame::Video::empty();
 	let mut filtered = frame::Video::empty();
@@ -277,35 +307,41 @@ fn run_pipeline(
 		if should_cancel() {
 			return Err(MediaError::Cancelled);
 		}
-		if stream.index() != ist_index {
-			continue;
-		}
-		decoder
-			.send_packet(&packet)
-			.map_err(|source| MediaError::Decode { source })?;
-		while decoder.receive_frame(&mut decoded).is_ok() {
-			match classify_and_rebase(&mut decoded, &frame_window) {
-				TrimDecision::Skip => continue,
-				TrimDecision::Stop => {
-					stopped_early = true;
-					break 'decode;
+		let packet_stream_index = stream.index();
+		if packet_stream_index == ist_index {
+			decoder
+				.send_packet(&packet)
+				.map_err(|source| MediaError::Decode { source })?;
+			while decoder.receive_frame(&mut decoded).is_ok() {
+				match classify_and_rebase(&mut decoded, &frame_window) {
+					TrimDecision::Skip => continue,
+					TrimDecision::Stop => {
+						stopped_early = true;
+						break 'decode;
+					}
+					TrimDecision::Keep => {}
 				}
-				TrimDecision::Keep => {}
+				push_to_filter(&mut graph, &decoded)?;
+				pull_filtered(
+					&mut graph,
+					&mut encoder_ctx,
+					&mut octx,
+					stream_index,
+					ist_time_base,
+					ost_time_base,
+					&mut filtered,
+					&mut encoded,
+					&mut frame_count,
+					total_frames,
+					on_progress,
+				)?;
 			}
-			push_to_filter(&mut graph, &decoded)?;
-			pull_filtered(
-				&mut graph,
-				&mut encoder_ctx,
-				&mut octx,
-				stream_index,
-				ist_time_base,
-				ost_time_base,
-				&mut filtered,
-				&mut encoded,
-				&mut frame_count,
-				total_frames,
-				on_progress,
-			)?;
+		} else if let Some(pipeline) = audio_pipeline.as_mut() {
+			// 音声ストリームのパケットは映像と同じループ内でインターリーブして
+			// 処理する(audio.rs モジュール冒頭コメント参照。stream index で振り分け)。
+			if packet_stream_index == pipeline.stream_index() {
+				pipeline.process_packet(&packet, &mut octx)?;
+			}
 		}
 		if should_cancel() {
 			return Err(MediaError::Cancelled);
@@ -367,6 +403,15 @@ fn run_pipeline(
 		ost_time_base,
 		&mut encoded,
 	)?;
+
+	// 音声パイプラインの flush(デコーダ EOF・リサンプラ・FIFO の残り・エンコーダ
+	// flush をまとめて行う。`AudioPipeline::flush` 参照)。`stopped_early`(映像側の
+	// trim end 早期終了)とは独立に、常に実行する — 音声自身の trim end 到達判定
+	// (`AudioPipeline` 内部の `stopped`)は映像側の早期終了と一致するとは限らないため
+	// (audio.rs モジュール冒頭コメント参照)。
+	if let Some(pipeline) = audio_pipeline.as_mut() {
+		pipeline.flush(&mut octx)?;
+	}
 
 	octx.write_trailer()
 		.map_err(|source| MediaError::Mux { source })?;
