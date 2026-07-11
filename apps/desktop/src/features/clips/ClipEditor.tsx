@@ -150,6 +150,23 @@ export const ClipEditor = forwardRef<ClipEditorHandle, ClipEditorProps>(
 		}
 	}, []);
 
+	// 再生位置バーの滑らか化: video の timeupdate は実装依存で更新頻度が粗い
+	// (概ね 4Hz 程度)ため、再生中は requestAnimationFrame で currentTime を
+	// 毎フレームポーリングして再生ヘッドを滑らかに動かす。再生停止中は rAF を
+	// 回さない(無駄な再描画を避ける)。timeupdate ハンドラ(下の <video> 側)は
+	// 区間プレビューの停止判定に使うためそのまま残す。
+	useEffect(() => {
+		if (!playing) return;
+		let rafId: number;
+		const tick = () => {
+			const v = videoRef.current;
+			if (v) setCurrentTime(v.currentTime);
+			rafId = requestAnimationFrame(tick);
+		};
+		rafId = requestAnimationFrame(tick);
+		return () => cancelAnimationFrame(rafId);
+	}, [playing]);
+
 	// 音量を <video> 要素へ反映(UI プレビュー専用。書き出し音声には影響しない)。
 	useEffect(() => {
 		const v = videoRef.current;

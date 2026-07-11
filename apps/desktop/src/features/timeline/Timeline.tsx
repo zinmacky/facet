@@ -100,58 +100,65 @@ export function Timeline({
 				</span>
 			</div>
 
-			<div
-				ref={trackRef}
-				className="relative h-10 w-full rounded-md bg-elevated"
-				onPointerDown={(e) => {
-					// ハンドル以外を押したらシーク(ハンドルは stopPropagation する)。
-					if (!disabled) onSeek?.(pxToSeconds(e.clientX));
-				}}
-			>
-				{/* 選択レンジ */}
+			<div className="flex flex-col gap-1.5">
+				{/* 再生バー: シーク + トリム範囲の可視化 + 再生ヘッド。
+				    トリムハンドルは重ならないよう下のレーンへ分離している。 */}
 				<div
-					className="absolute inset-y-0 rounded-md bg-accent/20 ring-1 ring-inset ring-accent/50"
-					style={{ left: `${startPct}%`, right: `${100 - endPct}%` }}
-				/>
+					ref={trackRef}
+					className="relative h-8 w-full rounded-md bg-elevated"
+					onPointerDown={(e) => {
+						if (!disabled) onSeek?.(pxToSeconds(e.clientX));
+					}}
+				>
+					{/* 選択レンジ */}
+					<div
+						className="absolute inset-y-0 rounded-md bg-accent/20 ring-1 ring-inset ring-accent/50"
+						style={{ left: `${startPct}%`, right: `${100 - endPct}%` }}
+					/>
 
-				{/* トリム外の暗幕 */}
-				<div
-					className="absolute inset-y-0 left-0 rounded-l-md bg-black/40"
-					style={{ width: `${startPct}%` }}
-				/>
-				<div
-					className="absolute inset-y-0 right-0 rounded-r-md bg-black/40"
-					style={{ width: `${100 - endPct}%` }}
-				/>
+					{/* トリム外の暗幕 */}
+					<div
+						className="absolute inset-y-0 left-0 rounded-l-md bg-black/40"
+						style={{ width: `${startPct}%` }}
+					/>
+					<div
+						className="absolute inset-y-0 right-0 rounded-r-md bg-black/40"
+						style={{ width: `${100 - endPct}%` }}
+					/>
 
-				{/* 再生ヘッド */}
-				<div
-					className="pointer-events-none absolute inset-y-0 w-px bg-white/80"
-					style={{ left: `${clamp(playheadPct, 0, 100)}%` }}
-				/>
+					{/* 再生ヘッド */}
+					<div
+						className="pointer-events-none absolute inset-y-0 w-px bg-white/80"
+						style={{ left: `${clamp(playheadPct, 0, 100)}%` }}
+					/>
+				</div>
 
-				{/* start ハンドル */}
-				<Handle
-					label="開始点"
-					pct={startPct}
-					seconds={start}
-					min={0}
-					max={end - 0.05}
-					onPointerDown={beginDrag("start")}
-					onKeyCommit={(v) => onChange({ start: v, end })}
-					disabled={disabled}
-				/>
-				{/* end ハンドル */}
-				<Handle
-					label="終了点"
-					pct={endPct}
-					seconds={end}
-					min={start + 0.05}
-					max={duration}
-					onPointerDown={beginDrag("end")}
-					onKeyCommit={(v) => onChange({ start, end: v })}
-					disabled={disabled}
-				/>
+				{/* トリムハンドルレーン: 再生ヘッドと同一線上に重なると紛らわしいため
+				    再生バーの下に分離する。クリック当たり判定も再生バーとは独立する。 */}
+				<div className="relative h-6 w-full">
+					{/* start ハンドル */}
+					<Handle
+						label="開始点"
+						pct={startPct}
+						seconds={start}
+						min={0}
+						max={end - 0.05}
+						onPointerDown={beginDrag("start")}
+						onKeyCommit={(v) => onChange({ start: v, end })}
+						disabled={disabled}
+					/>
+					{/* end ハンドル */}
+					<Handle
+						label="終了点"
+						pct={endPct}
+						seconds={end}
+						min={start + 0.05}
+						max={duration}
+						onPointerDown={beginDrag("end")}
+						onKeyCommit={(v) => onChange({ start, end: v })}
+						disabled={disabled}
+					/>
+				</div>
 			</div>
 
 			{/* 数値入力(秒) */}
@@ -207,7 +214,7 @@ function Handle({
 			aria-valuetext={formatTime(seconds)}
 			tabIndex={disabled ? -1 : 0}
 			className={
-				"absolute top-1/2 z-10 h-8 w-3 -translate-x-1/2 -translate-y-1/2 rounded-sm border border-accent bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 " +
+				"absolute top-1/2 z-10 h-5 w-3 -translate-x-1/2 -translate-y-1/2 rounded-sm border border-accent bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 " +
 				(disabled
 					? "cursor-not-allowed opacity-40"
 					: "cursor-ew-resize hover:bg-accent-hover")
