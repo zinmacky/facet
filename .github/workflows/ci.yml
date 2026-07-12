@@ -11,6 +11,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# GITHUB_TOKEN は読み取り専用で足りる(全ジョブがビルド・テストのみ)
+permissions:
+  contents: read
+
 jobs:
   check:
     name: ${{ matrix.task }}
