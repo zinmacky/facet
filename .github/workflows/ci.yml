@@ -242,13 +242,9 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup rust-cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: apps/desktop -> target
-
       # Mac では FFMPEG_DIR は不要 — Homebrew の ffmpeg は pkg-config 経由で自動的に
-      # リンクされる(docs/mac-handover.md §3)。
+      # リンクされる(docs/mac-handover.md §3)。rust-cache より先にインストールするのは、
+      # 正確なバージョン(リビジョン込み)をキャッシュキーに含めるため(下記)。
       - name: Install FFmpeg (Homebrew)
         run: brew install ffmpeg
 
@@ -256,6 +252,7 @@ jobs:
       # Homebrew ffmpeg フォーミュラが常に 8.x を配っているとは限らないため明示的に
       # 検証する(フォーミュラが古い/新しい場合はここで早期に気づける)。
       - name: Verify FFmpeg version
+        id: ffmpeg
         run: |
           set -eu
           ffmpeg -version
@@ -264,6 +261,19 @@ jobs:
             echo "::error::Homebrew ffmpeg is ${major:-unknown}.x, but ffmpeg-next 8.1 requires FFmpeg 8.x headers. Pin/update the Homebrew formula (or this check) accordingly."
             exit 1
           fi
+          # リビジョン込みの正確なバージョン(例: "ffmpeg 8.1.2_1")をキャッシュキー用に出力
+          echo "version=$(brew list --versions ffmpeg | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+
+      # ffmpeg-sys-next のビルドスクリプト出力は Homebrew Cellar の実パス
+      # (/opt/homebrew/Cellar/ffmpeg/<バージョン_リビジョン>/lib)を埋め込む。
+      # formula が bump されるとパスが変わり、古いキャッシュのリンク探索パスが
+      # 死んで `ld: library 'avutil' not found` になる(2026-07-13 の 8.1.2→8.1.2_1
+      # bump で実際に発生)。キーに正確なバージョンを含め、bump 時は作り直させる。
+      - name: Setup rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop -> target
+          key: ${{ steps.ffmpeg.outputs.version }}
 
       - name: cargo test --workspace
         run: cargo test --workspace
