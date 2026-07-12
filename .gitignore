@@ -27,5 +27,9 @@ coverage/
 target/
 apps/desktop/src-tauri/gen/
 
+# Phase 4: リリース用 LGPL FFmpeg DLL ステージング(scripts/fetch-ffmpeg-lgpl.ps1 が生成)。
+apps/desktop/src-tauri/ffmpeg-dist/
+.cache/
+
 # Claude Code: 個人の permission 蓄積(共有は .claude/settings.json 側)
 .claude/settings.local.json

@@ -7,6 +7,7 @@
 		"dev": "tauri dev",
 		"dev:mock": "vite --mode mock --port 5190",
 		"build": "vite build",
+		"build:release": "tauri build --config src-tauri/tauri.release.conf.json",
 		"preview": "vite preview",
 		"typecheck": "tsc --noEmit",
 		"test": "vitest run"
