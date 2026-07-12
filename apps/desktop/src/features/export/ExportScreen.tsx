@@ -59,7 +59,7 @@ export function ExportScreen({
 	// 購読解除関数に反映」する部分は UploadScreen の一括書き出しと共通のため
 	// `useReframeQueue` に集約している(queue.tasksRef が旧 resultsRef 相当の同期ミラー)。
 	const queue = useReframeQueue();
-	const { settings } = useSettings();
+	const { settings, updateSettings } = useSettings();
 
 	// 明示的に「書き出しを開始」するまでレンダリングを始めない(切替直後に
 	// 全 clip のレンダリングを走らせて CPU を占有しないため)。
@@ -125,7 +125,9 @@ export function ExportScreen({
 	 * 書き出し先フォルダを決めてからレンダリングを開始する。
 	 * 設定で既定の書き出し先(`settings.defaultExportDir`)が設定されていれば、
 	 * ダイアログを出さずそのままそのパスを使う。未設定なら従来どおりダイアログで選ばせる
-	 * (ダイアログで選んだパスは、この操作では設定へ書き戻さない)。キャンセル時は何もしない。
+	 * (ダイアログの初期表示先には前回選択したフォルダ `settings.lastExportDir` を渡し、
+	 * 選択確定時に更新する — デスクトップが既定表示される問題を避けるため)。
+	 * キャンセル時は何もしない。
 	 */
 	const handleStart = async () => {
 		const preset = settings.defaultExportDir;
@@ -136,9 +138,13 @@ export function ExportScreen({
 		}
 		setPickingDir(true);
 		try {
-			const dir = await pickExportDirectory();
+			const dir = await pickExportDirectory(
+				"書き出し先フォルダを選択",
+				settings.lastExportDir,
+			);
 			if (!dir) return;
 			outputDirRef.current = dir;
+			updateSettings({ lastExportDir: dir });
 			setStarted(true);
 		} finally {
 			setPickingDir(false);

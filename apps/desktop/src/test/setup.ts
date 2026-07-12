@@ -4,6 +4,7 @@ import { cleanup } from "@testing-library/react";
 import {
 	mockConvertFileSrc,
 	mockDialogOpen,
+	mockDocumentDir,
 	mockInvoke,
 	mockIsPermissionGranted,
 	mockJoin,
@@ -36,6 +37,8 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@tauri-apps/api/path", () => ({
 	join: (...args: Parameters<typeof mockJoin>) => mockJoin(...args),
+	documentDir: (...args: Parameters<typeof mockDocumentDir>) =>
+		mockDocumentDir(...args),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({

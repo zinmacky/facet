@@ -1,6 +1,7 @@
 import type { EditSpec } from "@facet/core";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { documentDir } from "@tauri-apps/api/path";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { EncoderPreference } from "./settings";
 
@@ -65,17 +66,45 @@ export async function pickVideoFile(): Promise<PickResult> {
 	return { path: selected };
 }
 
-/** 書き出し先フォルダを 1 つ選ぶ。キャンセル時は `null`。 */
+/**
+ * 書き出し先フォルダを 1 つ選ぶ。キャンセル時は `null`。
+ *
+ * `preferredDefaultPath`(前回選択したフォルダ等、呼び出し側の永続化値)があれば
+ * ダイアログの初期表示先として渡す。無ければ書類フォルダ(`documentDir()`、
+ * macOS/Windows どちらも「書類」相当に解決される)を試み、取得に失敗した場合は
+ * `defaultPath` を渡さない(OS 既定 = 現状挙動)。
+ *
+ * `defaultPath` が指す先が既に存在しない場合の扱いは Tauri v2 dialog プラグインの
+ * 型定義コメントに準拠する: ディレクトリでなくなっていれば「親フォルダを開いた状態」に
+ * 自動でフォールバックする(親フォルダも無い等の極端なケースはネイティブダイアログ
+ * 側の実装に委ねる)。フロントエンド側で事前に存在確認はしない。
+ */
 export async function pickExportDirectory(
 	title = "書き出し先フォルダを選択",
+	preferredDefaultPath?: string | null,
 ): Promise<string | null> {
+	// `||` で空文字列も「未指定」扱いにする(壊れた/手編集の永続化値が "" の場合、
+	// `??` だと documentDir() へのフォールバックが起きず defaultPath 無しに
+	// 落ちてしまう — ExportScreen.tsx の `if (preset)` と同じ truthy 判定に揃える)。
+	const defaultPath =
+		preferredDefaultPath || (await resolveDefaultExportDialogPath());
 	const selected = await open({
 		multiple: false,
 		directory: true,
 		title,
+		...(defaultPath ? { defaultPath } : {}),
 	});
 	if (!selected || Array.isArray(selected)) return null;
 	return selected;
+}
+
+/** `documentDir()` の取得に失敗したら `undefined`(defaultPath 無し)にフォールバックする。 */
+async function resolveDefaultExportDialogPath(): Promise<string | undefined> {
+	try {
+		return await documentDir();
+	} catch {
+		return undefined;
+	}
 }
 
 // ---- 進捗(reframe / preview 共通) --------------------------------------

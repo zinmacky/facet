@@ -80,7 +80,7 @@ export function UploadScreen({
 	// ExportScreen の書き出しと共通のため `useReframeQueue` に集約している。
 	const bulkExportQueue = useReframeQueue();
 	const confirm = useConfirm();
-	const { settings } = useSettings();
+	const { settings, updateSettings } = useSettings();
 
 	// 一括予約スケジュールの入力状態。
 	const [startDate, setStartDate] = useState("");
@@ -545,8 +545,15 @@ export function UploadScreen({
 			{ canceled: true } | { canceled: false; ok: number; total: number }
 		> => {
 			if (!source) throw new Error("元動画が未選択です。");
-			const dir = await pickExportDirectory("書き出し先フォルダを選択");
+			// ダイアログの初期表示先には前回選択したフォルダを渡し、選択確定時に更新する
+			// (ExportScreen の書き出し先選択と同じパターン。デスクトップが既定表示される
+			// 問題を避けるため)。
+			const dir = await pickExportDirectory(
+				"書き出し先フォルダを選択",
+				settings.lastExportDir,
+			);
 			if (!dir) return { canceled: true };
+			updateSettings({ lastExportDir: dir });
 
 			// 対象の (post, output, clip, target) を洗い出す。
 			const tasks: {

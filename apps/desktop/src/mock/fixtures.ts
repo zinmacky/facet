@@ -14,6 +14,9 @@ export const MOCK_SOURCE_PATH = "C:\\Users\\mock\\Videos\\sample-source.mp4";
 /** `pickExportDirectory` が返す固定のダミー書き出し先ディレクトリ。 */
 export const MOCK_EXPORT_DIR = "C:\\Users\\mock\\Videos\\exports";
 
+/** `documentDir()` が返す固定のダミー書類フォルダ(`pickExportDirectory` の defaultPath 解決用)。 */
+export const MOCK_DOCUMENT_DIR = "C:\\Users\\mock\\Documents";
+
 /**
  * `convertFileSrc` が返すサンプル動画の URL(dev サーバの `public/mock/sample.mp4`)。
  * 元動画プレビュー・書き出し結果プレビュー・最終プレビューのすべてで同じサンプルを使う
