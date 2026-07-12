@@ -193,3 +193,52 @@ pub enum MediaError {
 	)]
 	AudioStreamProducedNoPackets,
 }
+
+/// `ffmpeg_next::Error` が「実エラーではない、ループの正常な終端」を表しているかを
+/// 判定する(P1-4)。
+///
+/// `receive_frame`/`receive_packet`(デコーダ/エンコーダ)や `sink().frame()`
+/// (フィルタグラフ)は、内部キューが一時的に空(まだ出力できるものがない)の場合に
+/// `EAGAIN`、`send_eof` 後に完全に枯渇した場合に `Eof` を返す。この 2 つは
+/// 「もう取り出すものがない」という正常なループ終了条件であり、それ以外の `Err`
+/// (デコード不能なデータ、リサイズ不整合等)とは区別して呼び出し側の
+/// `MediaError::Decode`/`Encode`/`Filter` として伝搬させる必要がある
+/// (修正前は `while ....is_ok()` で両者を一律に「ループ終了」として握りつぶしていた)。
+///
+/// `ffmpeg_next` 側のドキュメント(`util/error.rs` 冒頭のコメント)が明示する通り、
+/// `AVERROR(EAGAIN)` は `Error::Other { errno: EAGAIN }` として表現される
+/// (`Error::Eof` のような専用 variant は存在しない)。`ffmpeg_next::Error` は
+/// `PartialEq`/`Eq` を実装しているため、値の等価比較でそのまま判定できる。
+pub fn is_again_or_eof(err: &ffmpeg_next::Error) -> bool {
+	matches!(err, ffmpeg_next::Error::Eof)
+		|| *err
+			== ffmpeg_next::Error::Other {
+				errno: ffmpeg_next::error::EAGAIN,
+			}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn is_again_or_eof_true_for_eagain() {
+		let err = ffmpeg_next::Error::Other {
+			errno: ffmpeg_next::error::EAGAIN,
+		};
+		assert!(is_again_or_eof(&err));
+	}
+
+	#[test]
+	fn is_again_or_eof_true_for_eof() {
+		assert!(is_again_or_eof(&ffmpeg_next::Error::Eof));
+	}
+
+	#[test]
+	fn is_again_or_eof_false_for_other_errors() {
+		assert!(!is_again_or_eof(&ffmpeg_next::Error::InvalidData));
+		assert!(!is_again_or_eof(&ffmpeg_next::Error::Other {
+			errno: ffmpeg_next::error::EINVAL,
+		}));
+	}
+}

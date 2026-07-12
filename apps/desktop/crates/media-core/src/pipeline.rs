@@ -64,7 +64,7 @@ use crate::crop;
 use crate::decode;
 use crate::encode::{self, EncoderSpec};
 use crate::encoder_select;
-use crate::error::{MediaError, Result};
+use crate::error::{is_again_or_eof, MediaError, Result};
 use crate::fit::{self, FilterGraphSpec};
 use crate::probe;
 use crate::progress::ProgressTracker;
@@ -412,7 +412,12 @@ fn run_pipeline(
 			decoder
 				.send_packet(&packet)
 				.map_err(|source| MediaError::Decode { source })?;
-			while decoder.receive_frame(&mut decoded).is_ok() {
+			loop {
+				match decoder.receive_frame(&mut decoded) {
+					Ok(()) => {}
+					Err(err) if is_again_or_eof(&err) => break,
+					Err(source) => return Err(MediaError::Decode { source }),
+				}
 				match classify_and_rebase(&mut decoded, &frame_window) {
 					TrimDecision::Skip => continue,
 					TrimDecision::Stop => {
@@ -455,7 +460,12 @@ fn run_pipeline(
 		decoder
 			.send_eof()
 			.map_err(|source| MediaError::Decode { source })?;
-		while decoder.receive_frame(&mut decoded).is_ok() {
+		loop {
+			match decoder.receive_frame(&mut decoded) {
+				Ok(()) => {}
+				Err(err) if is_again_or_eof(&err) => break,
+				Err(source) => return Err(MediaError::Decode { source }),
+			}
 			match classify_and_rebase(&mut decoded, &frame_window) {
 				TrimDecision::Skip => continue,
 				TrimDecision::Stop => break,
@@ -728,7 +738,12 @@ fn drain_encoder(
 	ost_time_base: Rational,
 	encoded: &mut Packet,
 ) -> Result<()> {
-	while encoder.receive_packet(encoded).is_ok() {
+	loop {
+		match encoder.receive_packet(encoded) {
+			Ok(()) => {}
+			Err(err) if is_again_or_eof(&err) => break,
+			Err(source) => return Err(MediaError::Encode { source }),
+		}
 		encoded.set_stream(stream_index);
 		encoded.rescale_ts(ist_time_base, ost_time_base);
 		encoded
@@ -753,16 +768,17 @@ fn pull_filtered<F: Fn() -> Instant>(
 	tracker: &mut ProgressTracker<'_, F>,
 ) -> Result<()> {
 	loop {
-		let has_frame = graph
+		let sink_result = graph
 			.get("out")
 			.ok_or_else(|| MediaError::FilterNotFound {
 				name: "out".to_string(),
 			})?
 			.sink()
-			.frame(filtered)
-			.is_ok();
-		if !has_frame {
-			break;
+			.frame(filtered);
+		match sink_result {
+			Ok(()) => {}
+			Err(err) if is_again_or_eof(&err) => break,
+			Err(source) => return Err(MediaError::Filter { source }),
 		}
 		encoder
 			.send_frame(filtered)

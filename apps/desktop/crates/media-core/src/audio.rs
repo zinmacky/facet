@@ -40,7 +40,7 @@ use ffmpeg_next::{
 	Dictionary, Packet, Rational,
 };
 
-use crate::error::{MediaError, Result};
+use crate::error::{is_again_or_eof, MediaError, Result};
 use crate::spec::Trim;
 use crate::trim::{TrimDecision, TrimWindow};
 
@@ -507,7 +507,12 @@ impl AudioPipeline {
 			.send_packet(packet)
 			.map_err(|source| MediaError::Decode { source })?;
 		let mut decoded = frame::Audio::empty();
-		while self.decoder.receive_frame(&mut decoded).is_ok() {
+		loop {
+			match self.decoder.receive_frame(&mut decoded) {
+				Ok(()) => {}
+				Err(err) if is_again_or_eof(&err) => break,
+				Err(source) => return Err(MediaError::Decode { source }),
+			}
 			match classify(&decoded, &self.frame_window) {
 				TrimDecision::Skip => continue,
 				TrimDecision::Stop => {
@@ -532,7 +537,12 @@ impl AudioPipeline {
 				.send_eof()
 				.map_err(|source| MediaError::Decode { source })?;
 			let mut decoded = frame::Audio::empty();
-			while self.decoder.receive_frame(&mut decoded).is_ok() {
+			loop {
+				match self.decoder.receive_frame(&mut decoded) {
+					Ok(()) => {}
+					Err(err) if is_again_or_eof(&err) => break,
+					Err(source) => return Err(MediaError::Decode { source }),
+				}
 				match classify(&decoded, &self.frame_window) {
 					TrimDecision::Skip => continue,
 					TrimDecision::Stop => break,
@@ -633,7 +643,12 @@ impl AudioPipeline {
 	}
 
 	fn drain_encoder(&mut self, octx: &mut format::context::Output) -> Result<()> {
-		while self.encoder.receive_packet(&mut self.encoded).is_ok() {
+		loop {
+			match self.encoder.receive_packet(&mut self.encoded) {
+				Ok(()) => {}
+				Err(err) if is_again_or_eof(&err) => break,
+				Err(source) => return Err(MediaError::Encode { source }),
+			}
 			self.encoded.set_stream(self.ost_index);
 			self.encoded
 				.rescale_ts(self.encoder_time_base, self.ost_time_base);
