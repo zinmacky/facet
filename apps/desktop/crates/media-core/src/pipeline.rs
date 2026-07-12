@@ -17,10 +17,21 @@
 //!   `Auto` はプラットフォーム別候補を `encoder_select` から取得し順に試す。
 //!   Wave 2 配線で確定)。
 //!
-//! **キャンセル/失敗時の出力の扱い**: 出力は一時ファイル名(`<stem>.tmp.<ext>`)に書き、
-//! 正常終了時のみ最終ファイル名へリネームする。途中終了(エラー・キャンセルいずれも)は
-//! 一時ファイルを削除するため、`output_path` に不完全な mp4 が残ることはない
-//! (docs/desktop-migration-plan.md §6.2)。
+//! **キャンセル/失敗時の出力の扱い**: 出力は一時ファイル名(既定では `output_path` と
+//! 同じディレクトリの `<stem>.tmp.<ext>`)に書き、正常終了時のみ最終ファイル名へ
+//! リネームする。途中終了(エラー・キャンセルいずれも)は一時ファイルを削除するため、
+//! `output_path` に不完全な mp4 が残ることはない(docs/desktop-migration-plan.md §6.2)。
+//!
+//! **`ReframeOptions.staging_dir`**: `Some(dir)` を渡すと、一時ファイルを `output_path`
+//! と同じディレクトリではなく `dir` 配下に書く(ファイル名は衝突回避のため
+//! [`staging_temp_output_path`] が一意化する)。書き出し先(例: デスクトップ)に
+//! ユーザーから見える中間ファイルを一切出したくない用途向け(呼び出し側 —
+//! `src-tauri/src/commands/reframe.rs` — がアプリ管理のステージングディレクトリを
+//! 渡す)。完了時は [`finalize_output`] が `dir` から `output_path` へ確定させる
+//! (通常は `fs::rename`、別ボリューム等で失敗した場合のみ `fs::copy` + 削除に
+//! フォールバックする。同関数冒頭コメント参照)。`None`(既定)の場合は
+//! 全体を通じて従来どおりの「出力先と同じディレクトリに `.tmp` を作り rename する」
+//! 挙動のみを使う。
 //!
 //! **Wave 2 で接続したモジュール**:
 //! - `trim`: `open_input` 直後に `TrimWindow::new(trim, trim::AV_TIME_BASE)` の
@@ -57,12 +68,15 @@
 //!   セッション枯渇等)はリトライ後も次候補へ進む(`concurrency.rs` 冒頭コメント参照)。
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ffmpeg_next::{self as ffmpeg, filter, format, frame, Dictionary, Packet, Rational};
+use sha2::{Digest, Sha256};
 
 use crate::audio;
 use crate::cancel::CancelToken;
@@ -116,6 +130,12 @@ pub struct ReframeOptions<'a> {
 	/// クローン可能・スレッド安全なキャンセルトークン([`CancelToken`] 冒頭コメント参照)。
 	pub cancel: &'a CancelToken,
 	pub on_progress: &'a dyn Fn(Progress),
+	/// 一時出力ファイルを書くディレクトリ。`Some(dir)` なら `output_path` と同じ
+	/// ディレクトリではなく `dir` 配下に一時ファイルを書く(モジュール冒頭コメント
+	/// 「`ReframeOptions.staging_dir`」参照)。`None`(既定)は従来どおり
+	/// `output_path` と同じディレクトリに `.tmp` を作る挙動を完全に維持する
+	/// (既存の呼び出し元・テスト・CLI example に影響を与えない)。
+	pub staging_dir: Option<PathBuf>,
 }
 
 /// 実行中の出力先パス(`output_path`)をプロセス全体で追跡するグローバルレジストリ
@@ -220,28 +240,37 @@ pub fn reframe(
 		None => return Err(MediaError::Cancelled),
 	};
 
-	let tmp_output_path = temp_output_path(output_path);
-	// パイプライン自体の失敗・成功後の `rename` 失敗のいずれでも、完成済みの
-	// `.tmp.<ext>` が `output_path` へリネームされないまま残ることを防ぐため、
+	let tmp_output_path = temp_output_path(output_path, options.staging_dir.as_deref());
+	// パイプライン自体の失敗・成功後の確定処理(`finalize_output`)失敗のいずれでも、
+	// 完成済みの一時ファイルが `output_path` へ反映されないまま残ることを防ぐため、
 	// 掃除(`remove_file`)を両パスで共通化する(P1-1: リネーム失敗時の一時ファイル
 	// 放置対策)。`rename` 失敗は Windows ではファイルロック等で起こりうる。
 	let result = run_pipeline(input_path, &tmp_output_path, options).and_then(|encoder_name| {
-		fs::rename(&tmp_output_path, output_path)
-			.map(|()| encoder_name)
-			.map_err(MediaError::from)
+		finalize_output(&tmp_output_path, output_path).map(|()| encoder_name)
 	});
 	if result.is_err() {
-		// 途中終了(パイプライン失敗・キャンセル・リネーム失敗のいずれか)。
+		// 途中終了(パイプライン失敗・キャンセル・確定処理失敗のいずれか)。
 		// 一時出力が存在すれば削除する(存在しない場合の Err は無視してよい)。
 		let _ = fs::remove_file(&tmp_output_path);
 	}
 	result
 }
 
-/// 一時出力ファイルパスを組み立てる。最終的な拡張子(muxer 判定に使われる)を
-/// 保つよう `<stem>.tmp.<ext>` の形にする(`<path>.tmp` のように末尾へ単純追加すると
-/// `format::output` が拡張子からコンテナ形式を推測できなくなるため)。
-fn temp_output_path(output: &Path) -> PathBuf {
+/// 一時出力ファイルパスを組み立てる。`staging_dir` が `Some` ならそのディレクトリ配下、
+/// `None` なら従来どおり `output` と同じディレクトリに置く(モジュール冒頭コメント
+/// 「`ReframeOptions.staging_dir`」参照)。
+fn temp_output_path(output: &Path, staging_dir: Option<&Path>) -> PathBuf {
+	match staging_dir {
+		Some(dir) => staging_temp_output_path(dir, output),
+		None => sibling_temp_output_path(output),
+	}
+}
+
+/// `output` と同じディレクトリに一時ファイルパスを組み立てる(`staging_dir: None` の
+/// 従来挙動)。最終的な拡張子(muxer 判定に使われる)を保つよう `<stem>.tmp.<ext>` の
+/// 形にする(`<path>.tmp` のように末尾へ単純追加すると `format::output` が拡張子から
+/// コンテナ形式を推測できなくなるため)。
+fn sibling_temp_output_path(output: &Path) -> PathBuf {
 	match output.extension().and_then(|ext| ext.to_str()) {
 		Some(ext) => {
 			let mut tmp = output.with_extension("").into_os_string();
@@ -253,6 +282,121 @@ fn temp_output_path(output: &Path) -> PathBuf {
 			let mut tmp = output.as_os_str().to_os_string();
 			tmp.push(".tmp");
 			PathBuf::from(tmp)
+		}
+	}
+}
+
+/// `dir` 配下に一時ファイルパスを組み立てる(`staging_dir: Some(dir)` の場合)。
+/// 同じ `dir` を複数ジョブが同時に使っても衝突しないよう、ファイル名に
+/// [`unique_staging_token`] を挟む(media-core は job_id を知らないため、出力パス+
+/// プロセス内カウンタ+時刻から一意化する)。拡張子の扱いは [`sibling_temp_output_path`]
+/// と同じ理由で保つ。
+fn staging_temp_output_path(dir: &Path, output: &Path) -> PathBuf {
+	let stem = output
+		.file_stem()
+		.and_then(|stem| stem.to_str())
+		.unwrap_or("output");
+	let token = unique_staging_token(output);
+	let file_name = match output.extension().and_then(|ext| ext.to_str()) {
+		Some(ext) => format!("{stem}-{token}.tmp.{ext}"),
+		None => format!("{stem}-{token}.tmp"),
+	};
+	dir.join(file_name)
+}
+
+/// `staging_temp_output_path` 用の一意なファイル名トークンを払い出すプロセス内カウンタ。
+static STAGING_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// `output` パス + プロセス ID + プロセス内カウンタ + 現在時刻(ナノ秒)を材料に sha256 して
+/// 先頭 16 桁(64bit 相当)を返す。`preview.rs::preview_cache_key` と同じ「決定性は不要、
+/// 衝突回避のみが目的」というハッシュの使い方だが、こちらは意図的にプロセス起動ごと・
+/// 呼び出しごとに変わる非決定的な材料(カウンタ・時刻)を混ぜて一意性を担保する。
+fn unique_staging_token(output: &Path) -> String {
+	let counter = STAGING_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+	let nanos = SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.map(|d| d.as_nanos())
+		.unwrap_or(0);
+
+	let mut material = String::new();
+	let _ = write!(
+		material,
+		"{}\u{1}{}\u{1}{}\u{1}{}",
+		output.to_string_lossy(),
+		std::process::id(),
+		counter,
+		nanos,
+	);
+
+	let digest = Sha256::digest(material.as_bytes());
+	let mut hex = String::with_capacity(16);
+	for byte in digest.iter().take(8) {
+		let _ = write!(hex, "{byte:02x}");
+	}
+	hex
+}
+
+/// `tmp_output_path` を `output_path` へ確定させる。まず `fs::rename` を試み、
+/// (`staging_dir` が `output_path` と別ボリュームにある等の理由で)失敗した場合のみ
+/// [`finalize_via_copy`] へフォールバックする。
+///
+/// Windows で書き込み中ハンドルが残ったままリネームすると失敗しうる点は
+/// `run_pipeline` 末尾で `octx` を明示 drop 済みのため、この関数に到達する時点では
+/// 一時ファイルへの書き込みハンドルは既に閉じている。
+fn finalize_output(tmp_output_path: &Path, output_path: &Path) -> Result<()> {
+	match fs::rename(tmp_output_path, output_path) {
+		Ok(()) => Ok(()),
+		Err(rename_err) => finalize_via_copy(tmp_output_path, output_path, rename_err),
+	}
+}
+
+/// [`finalize_output`] で `fs::rename` が失敗した場合のフォールバック(既定の
+/// `staging_dir: None` では同一ボリュームのため通常発生しないが、`staging_dir` が
+/// `output_path` と別ボリュームにある場合は `rename` が失敗しうる)。
+///
+/// `tmp_output_path` から `output_path` へ直接 `fs::copy` し、成功すれば元の
+/// `tmp_output_path` を削除する。**トレードオフ**: `fs::copy` は `fs::rename` と異なり
+/// 原子的ではないため、コピー中の一瞬だけ `output_path` に不完全なファイルが見える
+/// (これは `rename` が失敗するケース — 主に別ボリューム間の書き出し — でのみ発生し、
+/// 同一ボリュームでは常に `rename` が成功するため発生しない)。
+///
+/// `copy` 自体も失敗した場合は、`copy` のエラーではなく引数で受け取った**元の
+/// `rename` エラー**を返す(`rename` 失敗の根本原因 — 権限不足やディスク枯渇等 — が
+/// そのまま `copy` の失敗原因にもなっていることが多く、呼び出し側にとって診断的に
+/// 意味があるのは通常 `rename` 側のエラーであるため。`copy_err` はベストエフォートで
+/// `eprintln!` に残す)。このとき `output_path` の削除は、この呼び出し**以前に
+/// `output_path` が存在しなかった場合のみ**行う(= 今回の失敗した `copy` が作った
+/// 可能性がある不完全なファイルの後始末に限定する)。`output_path` が呼び出し前から
+/// 存在していた場合は削除しない — 既存ファイルへの上書き書き出し中に `copy` が失敗した
+/// ケースで、ユーザーの既存ファイルを消してしまう事故を避けるため(`fs::copy` は
+/// 内部で宛先を作成/truncate してから書き込むため、この保護があっても truncate 済みに
+/// なっている可能性はゼロではないが、少なくとも「ファイル自体を消す」追加のデータ損失は
+/// 避けられる)。
+///
+/// `rename_err` を引数として受け取る形に切り出しているのは、単体テストで
+/// `fs::rename` を実際に失敗させずに(≒ 実ボリュームをまたぐ環境を用意せずに)
+/// このフォールバック経路単体を検証できるようにするため。
+fn finalize_via_copy(
+	tmp_output_path: &Path,
+	output_path: &Path,
+	rename_err: std::io::Error,
+) -> Result<()> {
+	let output_existed_before = output_path.exists();
+	match fs::copy(tmp_output_path, output_path) {
+		Ok(_) => {
+			let _ = fs::remove_file(tmp_output_path);
+			Ok(())
+		}
+		Err(copy_err) => {
+			eprintln!(
+				"facet media-core: 出力の確定に失敗しました(rename: {rename_err}, copy fallback: {copy_err}): {} -> {}",
+				tmp_output_path.display(),
+				output_path.display()
+			);
+			if !output_existed_before {
+				let _ = fs::remove_file(output_path);
+			}
+			Err(MediaError::from(rename_err))
 		}
 	}
 }
@@ -272,6 +416,9 @@ fn run_pipeline(
 		bit_rate,
 		cancel,
 		on_progress,
+		// `tmp_output_path` は呼び出し元(`reframe()`)が既に `staging_dir` を
+		// 織り込んで計算済みのため、ここでは使わない。
+		staging_dir: _,
 	} = options;
 
 	// 入力オープン前の早期キャンセルチェック(P1-3)。`reframe()` 冒頭のチェック
@@ -860,18 +1007,161 @@ mod tests {
 	// --- Progress の構造体本体・生成ロジックのテストは `progress.rs` へ移設した
 	//     (Wave 3 統合。`Progress` はもうこのファイルに定義を持たない)。
 
-	// --- temp_output_path --------------------------------------------------------------
+	// --- temp_output_path(staging_dir: None、従来挙動の回帰) --------------------------
 
 	#[test]
 	fn temp_output_path_preserves_extension() {
-		let tmp = temp_output_path(Path::new("/out/video.mp4"));
+		let tmp = temp_output_path(Path::new("/out/video.mp4"), None);
 		assert_eq!(tmp, PathBuf::from("/out/video.tmp.mp4"));
 	}
 
 	#[test]
 	fn temp_output_path_without_extension_appends_tmp_suffix() {
-		let tmp = temp_output_path(Path::new("/out/video"));
+		let tmp = temp_output_path(Path::new("/out/video"), None);
 		assert_eq!(tmp, PathBuf::from("/out/video.tmp"));
+	}
+
+	// --- temp_output_path(staging_dir: Some、新規) -------------------------------------
+
+	#[test]
+	fn temp_output_path_with_staging_dir_places_tmp_under_staging_dir() {
+		let staging_dir = Path::new("/staging");
+		let tmp = temp_output_path(Path::new("/out/video.mp4"), Some(staging_dir));
+
+		assert_eq!(tmp.parent(), Some(staging_dir));
+		let file_name = tmp.file_name().and_then(|n| n.to_str()).unwrap();
+		assert!(
+			file_name.starts_with("video-") && file_name.ends_with(".tmp.mp4"),
+			"unexpected staging tmp file name: {file_name}"
+		);
+	}
+
+	#[test]
+	fn temp_output_path_with_staging_dir_without_extension_appends_tmp_suffix() {
+		let staging_dir = Path::new("/staging");
+		let tmp = temp_output_path(Path::new("/out/video"), Some(staging_dir));
+
+		assert_eq!(tmp.parent(), Some(staging_dir));
+		let file_name = tmp.file_name().and_then(|n| n.to_str()).unwrap();
+		assert!(
+			file_name.starts_with("video-") && file_name.ends_with(".tmp"),
+			"unexpected staging tmp file name: {file_name}"
+		);
+	}
+
+	#[test]
+	fn temp_output_path_with_staging_dir_is_unique_across_calls() {
+		let staging_dir = Path::new("/staging");
+		let output = Path::new("/out/video.mp4");
+
+		let first = temp_output_path(output, Some(staging_dir));
+		let second = temp_output_path(output, Some(staging_dir));
+
+		assert_ne!(
+			first, second,
+			"同じ output に対する staging tmp パスは呼び出しごとに一意であるべき"
+		);
+	}
+
+	// --- finalize_output / finalize_via_copy --------------------------------------------
+	//
+	// `finalize_via_copy` を独立した関数に切り出しているため、実際に `fs::rename` を
+	// 失敗させる(≒ 実ボリュームをまたぐ環境を用意する)ことなく、copy フォールバック
+	// 経路単体をユニットテストできる(モジュール内 `finalize_via_copy` 冒頭コメント参照)。
+
+	fn unique_test_dir(name: &str) -> PathBuf {
+		let nanos = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.map(|d| d.as_nanos())
+			.unwrap_or(0);
+		let dir = std::env::temp_dir().join(format!("facet-pipeline-finalize-test-{name}-{nanos}"));
+		fs::create_dir_all(&dir).expect("create unique test dir");
+		dir
+	}
+
+	fn dummy_rename_err() -> std::io::Error {
+		std::io::Error::other("simulated rename failure for test")
+	}
+
+	#[test]
+	fn finalize_via_copy_moves_content_and_removes_tmp_on_success() {
+		let dir = unique_test_dir("copy-success");
+		let tmp = dir.join("source.tmp.mp4");
+		let output = dir.join("output.mp4");
+		fs::write(&tmp, b"hello staging").expect("write tmp file");
+
+		let result = finalize_via_copy(&tmp, &output, dummy_rename_err());
+
+		assert!(result.is_ok(), "expected Ok, got {result:?}");
+		assert!(!tmp.exists(), "tmp file should be removed after copy");
+		assert_eq!(
+			fs::read(&output).expect("read finalized output"),
+			b"hello staging"
+		);
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn finalize_via_copy_returns_original_rename_error_and_cleans_up_on_copy_failure() {
+		let dir = unique_test_dir("copy-failure");
+		// tmp が存在しないため fs::copy は必ず失敗する(copy 失敗を安全に再現する手段)。
+		let tmp = dir.join("does-not-exist.tmp.mp4");
+		let output = dir.join("output.mp4");
+
+		let result = finalize_via_copy(&tmp, &output, dummy_rename_err());
+
+		assert!(
+			matches!(result, Err(MediaError::Io(_))),
+			"expected the original rename error to be surfaced, got {result:?}"
+		);
+		assert!(
+			!output.exists(),
+			"incomplete copy destination must not be left behind"
+		);
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn finalize_via_copy_preserves_pre_existing_output_file_when_copy_fails() {
+		let dir = unique_test_dir("copy-failure-preexisting-output");
+		// tmp が存在しないため fs::copy は必ず失敗する。
+		let tmp = dir.join("does-not-exist.tmp.mp4");
+		let output = dir.join("output.mp4");
+		fs::write(&output, b"pre-existing user file").expect("write pre-existing output file");
+
+		let result = finalize_via_copy(&tmp, &output, dummy_rename_err());
+
+		assert!(
+			matches!(result, Err(MediaError::Io(_))),
+			"expected the original rename error to be surfaced, got {result:?}"
+		);
+		assert!(
+			output.exists(),
+			"a pre-existing output_path must not be deleted just because the copy fallback failed"
+		);
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn finalize_output_renames_within_same_directory() {
+		let dir = unique_test_dir("rename-success");
+		let tmp = dir.join("source.tmp.mp4");
+		let output = dir.join("output.mp4");
+		fs::write(&tmp, b"same volume rename").expect("write tmp file");
+
+		let result = finalize_output(&tmp, &output);
+
+		assert!(result.is_ok(), "expected Ok, got {result:?}");
+		assert!(!tmp.exists(), "tmp file should be gone after rename");
+		assert_eq!(
+			fs::read(&output).expect("read finalized output"),
+			b"same volume rename"
+		);
+
+		let _ = fs::remove_dir_all(&dir);
 	}
 
 	// --- OutputPathRegistry(P1-2) ----------------------------------------------------
@@ -949,6 +1239,7 @@ mod tests {
 			bit_rate: 0,
 			cancel: &cancel,
 			on_progress: &on_progress,
+			staging_dir: None,
 		};
 
 		let result = reframe(

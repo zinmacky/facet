@@ -304,6 +304,12 @@ pub fn render_preview(
 		bit_rate: PREVIEW_BITRATE,
 		cancel,
 		on_progress,
+		// プレビューは既に `cache_dir` 内で完結しており、`output_path` 自体が
+		// アプリ管理のキャッシュディレクトリ配下(ユーザーから見える書き出し先では
+		// ない)。そのため一時ファイルも常に `output_path` と同じディレクトリ
+		// (= cache_dir)に書く従来挙動でよく、`staging_dir` は使わない
+		// (`pipeline.rs` モジュール冒頭コメント「`ReframeOptions.staging_dir`」参照)。
+		staging_dir: None,
 	};
 
 	pipeline::reframe(input, &output_path, options)?;

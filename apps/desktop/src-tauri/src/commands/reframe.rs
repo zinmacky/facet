@@ -102,10 +102,37 @@
 //! - ジョブ完了(成功・失敗・キャンセルいずれも)時、ブロッキングタスク自身が
 //!   State からエントリを削除する(完了後に `reframe_cancel` を呼んでも
 //!   "未知のジョブ" エラーになる)。
+//!
+//! ## ステージングディレクトリ
+//!
+//! `media_core::reframe` の一時出力ファイル(`pipeline.rs` の `<stem>.tmp.<ext>`)は、
+//! 既定では書き出し先(`output`)と同じディレクトリに作られる。デスクトップ書き出しの
+//! 出力先はユーザーが選ぶ実フォルダ(デスクトップ等)であることが多く、中間ファイルが
+//! そこに一時的に見えてしまう。これを避けるため `reframe_start` は
+//! `app.path().app_data_dir()/export-staging`([`resolve_staging_dir`])を
+//! `ReframeOptions.staging_dir` として渡し、一時ファイルをアプリ管理のディレクトリ
+//! 配下に隔離する(`pipeline.rs` モジュール冒頭コメント「`ReframeOptions.staging_dir`」
+//! 参照)。完了時は media-core 側が `output` へ確定させる(同一ボリュームなら
+//! `fs::rename`、別ボリュームなら `fs::copy` + 削除にフォールバック)。
+//!
+//! **孤児ファイルの掃除**: 通常は `pipeline::reframe` の finalize/キャンセル/失敗時
+//! クリーンアップで一時ファイルは即座に消えるが、アプリのクラッシュ・強制終了等で
+//! それをすり抜けた「孤児」がステージングディレクトリに残り続ける可能性がある。
+//! [`resolve_staging_dir`] は呼び出しごと(= ジョブ開始ごと)に
+//! [`sweep_orphaned_staging_files`] を実行し、24 時間以上前の一時ファイルらしき
+//! ファイルをベストエフォートで削除する(`preview.rs::evict_if_over_limit` と同じ
+//! 「読み取り/削除の失敗は個別にスキップし、呼び出し元にエラーを伝搬しない」方針)。
+//!
+//! `preview_start`([`crate::commands::preview`])は変更していない — プレビューの
+//! 一時ファイルは元から `output_path`(= プレビューキャッシュファイル)と同じ
+//! `cache_dir` 配下に書かれ、ユーザーから見える場所には出ないため
+//! (`media_core::preview::render_preview` は `staging_dir: None` のまま呼ぶ)。
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 use media_core::encoder_select::{self, EncoderChoice};
 use media_core::spec::EditSpec;
@@ -193,6 +220,116 @@ fn error_event_name(job_id: &str) -> String {
 	format!("reframe://error/{job_id}")
 }
 
+/// ステージングディレクトリ名(`app_data_dir()` からの相対。モジュール冒頭コメント
+/// 「ステージングディレクトリ」参照)。
+const STAGING_DIR_NAME: &str = "export-staging";
+
+/// 孤児ステージングファイルとみなす経過時間(24 時間)。この期間以上前の一時ファイルは
+/// `pipeline::reframe` 側のクリーンアップ(finalize/キャンセル/失敗時削除)をすり抜けた
+/// もの(アプリのクラッシュ・強制終了等)とみなし、[`sweep_orphaned_staging_files`] の
+/// 対象にする。
+const ORPHAN_STAGING_FILE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// `app` の `app_data_dir()` 配下にステージングディレクトリのパスを組み立て、
+/// 存在しなければ作成する。作成(または既存確認)後、[`sweep_orphaned_staging_files`]
+/// を呼んで孤児ファイルをベストエフォートで掃除する
+/// (`preview.rs::resolve_cache_dir` と同じパス組み立てパターン。掃除の呼び出しが
+/// 追加されている点のみ異なる — モジュール冒頭コメント参照)。
+fn resolve_staging_dir(app: &AppHandle) -> Result<PathBuf, String> {
+	let base = app
+		.path()
+		.app_data_dir()
+		.map_err(|err| format!("アプリデータディレクトリの取得に失敗しました: {err}"))?;
+	let dir = base.join(STAGING_DIR_NAME);
+	fs::create_dir_all(&dir).map_err(|err| {
+		format!(
+			"ステージングディレクトリの作成に失敗しました: {} ({err})",
+			dir.display()
+		)
+	})?;
+	sweep_orphaned_staging_files(&dir, ORPHAN_STAGING_FILE_MAX_AGE);
+	Ok(dir)
+}
+
+/// `name` が `media_core::pipeline` の staging tmp 命名規則
+/// (`<stem>-<token>.tmp.<ext>` または拡張子なしの `<stem>-<token>.tmp`)に緩く一致するかを
+/// 判定する。掃除対象を「このアプリが作った一時ファイルらしいもの」に限定し、
+/// ステージングディレクトリに万一別の何かが置かれていても誤って削除しないための
+/// 簡易フィルタ(`pipeline.rs::staging_temp_output_path` 参照)。
+fn looks_like_staging_tmp_name(name: &str) -> bool {
+	name.ends_with(".tmp") || name.contains(".tmp.")
+}
+
+/// `dir` 配下の[一時ファイルらしい名前](looks_like_staging_tmp_name)かつ `mtime` が
+/// `max_age` より古いファイルをベストエフォートで削除する
+/// (モジュール冒頭コメント「ステージングディレクトリ」参照)。
+///
+/// `preview.rs::evict_if_over_limit` と同じ方針: `read_dir`/`metadata`/`remove_file` の
+/// 失敗は個別にスキップし(ロック中のファイル等)、呼び出し元にエラーを伝搬しない。
+fn sweep_orphaned_staging_files(dir: &Path, max_age: Duration) {
+	let entries = match fs::read_dir(dir) {
+		Ok(entries) => entries,
+		Err(err) => {
+			eprintln!(
+				"facet desktop: ステージングディレクトリの読み取りに失敗しました(掃除をスキップ): {} ({err})",
+				dir.display()
+			);
+			return;
+		}
+	};
+
+	let now = SystemTime::now();
+
+	for entry in entries {
+		let entry = match entry {
+			Ok(entry) => entry,
+			Err(err) => {
+				eprintln!(
+					"facet desktop: ステージングディレクトリのエントリ読み取りに失敗しました(スキップ): {err}"
+				);
+				continue;
+			}
+		};
+		let path = entry.path();
+		let name_matches = path
+			.file_name()
+			.and_then(|name| name.to_str())
+			.is_some_and(looks_like_staging_tmp_name);
+		if !name_matches {
+			continue;
+		}
+		let metadata = match entry.metadata() {
+			Ok(metadata) => metadata,
+			Err(err) => {
+				eprintln!(
+					"facet desktop: ステージングファイルの metadata 取得に失敗しました(スキップ): {} ({err})",
+					path.display()
+				);
+				continue;
+			}
+		};
+		if !metadata.is_file() {
+			continue;
+		}
+		// mtime 取得失敗、または `now` より未来の mtime(時計のズレ等)は掃除対象に
+		// しない(保守的な既定 — 誤って新しいファイルを消すよりは掃除を見送る)。
+		let is_orphan = metadata
+			.modified()
+			.ok()
+			.and_then(|mtime| now.duration_since(mtime).ok())
+			.is_some_and(|age| age > max_age);
+		if !is_orphan {
+			continue;
+		}
+		if let Err(err) = fs::remove_file(&path) {
+			eprintln!(
+				"facet desktop: 孤児ステージングファイルの削除に失敗しました(スキップして続行): {} ({err})",
+				path.display()
+			);
+		}
+	}
+}
+
 /// `encoder` invoke パラメータ(UI の手動選択、省略可能)を [`EncoderChoice`] へ解決する。
 ///
 /// - `None` または `Some("auto")` は自動選択(`EncoderSelection::Auto` に対応)を表す
@@ -251,6 +388,7 @@ pub async fn reframe_start(
 ) -> Result<(), String> {
 	let encoder_choice =
 		encoder_choice_from_param(encoder_select::Platform::current(), encoder.as_deref())?;
+	let staging_dir = resolve_staging_dir(&app)?;
 
 	let token = CancelToken::new();
 	jobs.register(job_id.clone(), token);
@@ -266,6 +404,7 @@ pub async fn reframe_start(
 			&job_id_for_task,
 			&input_path,
 			&output_path,
+			&staging_dir,
 			spec,
 			encoder_choice,
 		);
@@ -302,11 +441,16 @@ pub fn set_max_concurrent_encodes(max: usize) {
 /// `encoder_choice` は [`encoder_choice_from_param`] が解決した結果。`None` は
 /// `EncoderSelection::Auto`、`Some(choice)` は `choice.name`/`choice.to_dictionary()`
 /// を使った `EncoderSelection::Explicit` に変換する。
+///
+/// `staging_dir` は [`resolve_staging_dir`] が解決したアプリ管理のディレクトリ
+/// (モジュール冒頭コメント「ステージングディレクトリ」参照)。`ReframeOptions.staging_dir`
+/// にそのまま渡し、一時ファイルを `output` と同じディレクトリではなくここに書かせる。
 fn run_job(
 	app: &AppHandle,
 	job_id: &str,
 	input: &Path,
 	output: &Path,
+	staging_dir: &Path,
 	spec: EditSpec,
 	encoder_choice: Option<EncoderChoice>,
 ) {
@@ -330,6 +474,7 @@ fn run_job(
 				crop: spec.crop,
 				source: spec.source,
 				trim: spec.trim,
+				staging_dir: Some(staging_dir.to_path_buf()),
 				encoder,
 				bit_rate: encode::DEFAULT_BITRATE,
 				cancel: token,
@@ -582,5 +727,114 @@ mod tests {
 		let err = encoder_choice_from_param(encoder_select::Platform::Other, Some("h264_amf"))
 			.expect_err("Other platform has no candidates");
 		assert!(err.contains("h264_amf"), "message was: {err}");
+	}
+
+	// --- looks_like_staging_tmp_name ---------------------------------------------------
+
+	#[test]
+	fn looks_like_staging_tmp_name_matches_media_core_naming_scheme() {
+		// media_core::pipeline::staging_temp_output_path が作る名前
+		// (`<stem>-<token>.tmp.<ext>` / 拡張子なしの `<stem>-<token>.tmp`)。
+		assert!(looks_like_staging_tmp_name("video-abc123def456.tmp.mp4"));
+		assert!(looks_like_staging_tmp_name("video-abc123def456.tmp"));
+	}
+
+	#[test]
+	fn looks_like_staging_tmp_name_rejects_unrelated_names() {
+		assert!(!looks_like_staging_tmp_name("video.mp4"));
+		assert!(!looks_like_staging_tmp_name("notes.txt"));
+		assert!(!looks_like_staging_tmp_name(".DS_Store"));
+	}
+
+	// --- sweep_orphaned_staging_files ---------------------------------------------------
+	//
+	// `preview.rs::evict_if_over_limit` のテストと同じ流儀(`unique_test_dir` で他テストと
+	// 独立したディレクトリを使い、`set_modified` で mtime を明示的に制御する)。
+
+	fn unique_test_dir(name: &str) -> PathBuf {
+		let nanos = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map(|d| d.as_nanos())
+			.unwrap_or(0);
+		let dir =
+			std::env::temp_dir().join(format!("facet-desktop-staging-sweep-test-{name}-{nanos}"));
+		fs::create_dir_all(&dir).expect("create unique test staging dir");
+		dir
+	}
+
+	fn write_dummy_file(dir: &Path, file_name: &str, age: Duration) -> PathBuf {
+		let path = dir.join(file_name);
+		fs::write(&path, b"dummy").expect("write dummy staging file");
+		let mtime = SystemTime::now() - age;
+		let file = std::fs::OpenOptions::new()
+			.write(true)
+			.open(&path)
+			.expect("open dummy staging file to set mtime");
+		file.set_modified(mtime).expect("set dummy file mtime");
+		path
+	}
+
+	fn dir_entries_sorted(dir: &Path) -> Vec<String> {
+		let mut names: Vec<String> = fs::read_dir(dir)
+			.expect("read test staging dir")
+			.map(|entry| {
+				entry
+					.expect("read dir entry")
+					.file_name()
+					.to_string_lossy()
+					.into_owned()
+			})
+			.collect();
+		names.sort();
+		names
+	}
+
+	#[test]
+	fn sweep_orphaned_staging_files_removes_only_old_tmp_like_files() {
+		let dir = unique_test_dir("removes-only-old-tmp");
+		// 十分古い(掃除対象)。
+		write_dummy_file(
+			&dir,
+			"old-video-aaa.tmp.mp4",
+			Duration::from_secs(2 * 60 * 60),
+		);
+		// 新しい(まだ実行中ジョブの一時ファイルかもしれないので保護)。
+		write_dummy_file(&dir, "new-video-bbb.tmp.mp4", Duration::from_secs(1));
+		// 古いが「一時ファイルらしい名前」ではない(誤って削除しない)。
+		write_dummy_file(&dir, "old-unrelated.txt", Duration::from_secs(2 * 60 * 60));
+
+		sweep_orphaned_staging_files(&dir, Duration::from_secs(60 * 60));
+
+		assert_eq!(
+			dir_entries_sorted(&dir),
+			vec!["new-video-bbb.tmp.mp4", "old-unrelated.txt"],
+			"only the old + tmp-like file should be removed"
+		);
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn sweep_orphaned_staging_files_keeps_everything_when_all_within_max_age() {
+		let dir = unique_test_dir("keeps-fresh");
+		write_dummy_file(&dir, "a-video.tmp.mp4", Duration::from_secs(1));
+		write_dummy_file(&dir, "b-video.tmp", Duration::from_secs(1));
+
+		sweep_orphaned_staging_files(&dir, Duration::from_secs(24 * 60 * 60));
+
+		assert_eq!(
+			dir_entries_sorted(&dir),
+			vec!["a-video.tmp.mp4", "b-video.tmp"]
+		);
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn sweep_orphaned_staging_files_on_missing_dir_does_not_panic() {
+		// resolve_staging_dir は作成後にのみ呼ぶが、掃除自体は best-effort な設計
+		// (`fs::read_dir` 失敗時は静かにスキップする)ことを確認する。
+		let missing = std::env::temp_dir().join("facet-desktop-staging-sweep-test-does-not-exist");
+		sweep_orphaned_staging_files(&missing, Duration::from_secs(1));
 	}
 }
