@@ -68,8 +68,15 @@ jobs:
       # 展開ルート(FFMPEG_DIR に指定すべきパス)。
       - name: Fetch LGPL FFmpeg + stage ffmpeg-dist
         run: |
-          $lgplRoot = ./scripts/fetch-ffmpeg-lgpl.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # fetch-ffmpeg-lgpl.ps1 はネイティブコマンドを呼ばないため $LASTEXITCODE は
+          # 設定されない($null -ne 0 が真になり exit 0 で静かに抜ける事故が v0.1.0 の
+          # 初回リリースビルドで実際に発生)。エラーは throw で伝播するので、戻り値の
+          # 実在検証で成否を判定する。@()[-1] は将来出力が複数行になっても最終行=パス
+          # の契約を守るため。
+          $lgplRoot = @(./scripts/fetch-ffmpeg-lgpl.ps1)[-1]
+          if (-not $lgplRoot -or -not (Test-Path $lgplRoot)) {
+            throw "fetch-ffmpeg-lgpl.ps1 が有効な展開ルートを返しませんでした: '$lgplRoot'"
+          }
           Write-Host "LGPL root: $lgplRoot"
           echo "FFMPEG_DIR=$lgplRoot" >> $env:GITHUB_ENV
 
