@@ -9,6 +9,7 @@ import {
 	mockIsPermissionGranted,
 	mockJoin,
 	mockListen,
+	mockNewJobId,
 	mockOpenPath,
 	mockRequestPermission,
 	mockSendNotification,
@@ -20,6 +21,9 @@ import {
  * - Tauri v2 の renderer 向け API(`lib/tauri.ts` が薄くラップしているもの)を
  *   `./tauri-mock` の実装へ差し替える(実 IPC は無いため、Tauri 外の vitest では
  *   invoke/listen が undefined でエラーになる)。
+ * - `lib/jobId.ts`(`reframe_start`/`preview_start` の jobId 採番)を決定的な実装へ
+ *   差し替える(`job-1`, `job-2`, … の連番。`crypto.randomUUID()` はグローバルには
+ *   差し替えない — `tauri-mock.ts` の `mockNewJobId` コメント参照)。
  * - jsdom に無い `ResizeObserver`(CropOverlay の snap effect が使う)を最小スタブで補う。
  * - jsdom に無い `setPointerCapture`/`releasePointerCapture`/`hasPointerCapture`
  *   (CropOverlay/Timeline のドラッグ実装が使う)を最小スタブで補う。
@@ -33,6 +37,10 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("@tauri-apps/api/event", () => ({
 	listen: (...args: Parameters<typeof mockListen>) => mockListen(...args),
+}));
+
+vi.mock("../lib/jobId", () => ({
+	newJobId: (...args: Parameters<typeof mockNewJobId>) => mockNewJobId(...args),
 }));
 
 vi.mock("@tauri-apps/api/path", () => ({

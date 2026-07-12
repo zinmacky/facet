@@ -7,6 +7,7 @@ import { renderWithProviders } from "../../test/render";
 import {
 	DEFAULT_MEDIA_INFO,
 	emitMockEvent,
+	invokeJobId,
 	mockDialogOpen,
 	mockInvoke,
 	mockJoin,
@@ -147,7 +148,7 @@ describe("UploadScreen: outputSig は clip の trim/crop/aspect を反映する"
 		const callIndex = mockInvoke.mock.calls.findIndex(
 			([cmd]) => cmd === "preview_start",
 		);
-		const jobId = await mockInvoke.mock.results[callIndex]?.value;
+		const jobId = invokeJobId(callIndex);
 		emitMockEvent(`preview://done/${jobId}`, { path: "/cache/out.mp4" });
 
 		// 生成直後は最新(要更新表示なし)。

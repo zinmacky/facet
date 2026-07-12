@@ -3,12 +3,13 @@
 //!
 //! [`reframe`](crate::commands::reframe) モジュールと同じパターンを踏襲する
 //! (`JobsState` 共有・`spawn_blocking`・イベント名は `reframe://` を `preview://` に
-//! 変えただけの対応形)。**キャンセルは専用コマンドを持たず、`reframe_cancel` を
-//! そのまま使う** — `preview_start` も [`JobsState`](super::reframe::JobsState) に
-//! ジョブを登録するため、ジョブ ID 空間が `reframe_start` と共有されており、
-//! `reframe_cancel(jobId)` はどちらのジョブに対しても機能する
-//! (`reframe.rs` の `JobsState::register`/`get`/`remove` を `pub(crate)` にして
-//! 本モジュールから再利用している)。
+//! 変えただけの対応形。jobId を renderer 側で採番して先に listen() を張る理由も
+//! `reframe.rs` 冒頭の「jobId 採番をフロントエンドへ移した理由」と同じ)。
+//! **キャンセルは専用コマンドを持たず、`reframe_cancel` をそのまま使う** —
+//! `preview_start` も [`JobsState`](super::reframe::JobsState) にジョブを登録するため、
+//! ジョブ ID 空間が `reframe_start` と共有されており、`reframe_cancel(jobId)` は
+//! どちらのジョブに対しても機能する(`reframe.rs` の `JobsState::register`/`get`/`remove`
+//! を `pub(crate)` にして本モジュールから再利用している)。
 //!
 //! ## renderer 向け API
 //!
@@ -34,27 +35,29 @@
 //!   speed: number;
 //! };
 //!
-//! // 1. ジョブを開始する。戻り値の jobId は reframe_start と同じ ID 空間を使う。
-//! const jobId = await invoke<string>("preview_start", {
-//!   input: "/path/to/input.mp4",
-//!   spec, // EditSpec
-//! });
+//! // 1. jobId は renderer 側で採番する(reframe_start と同じ ID 空間を使う)。
+//! const jobId = crypto.randomUUID();
 //!
-//! // 2. 進捗イベントを購読する(既定 200ms 間隔でスロットリング。progress.rs 参照。
+//! // 2. invoke() より先に listen() を完了させる(取りこぼし防止。reframe.rs 冒頭参照)。
 //! //    キャッシュヒット時は render_preview が pipeline::reframe を呼ばないため
-//! //    一度も発火しないまま done が来ることがある — これは正常系)。
+//! //    progress が一度も発火しないまま done が来ることがある — これは正常系。
 //! const unlistenProgress = await listen<Progress>(`preview://progress/${jobId}`, (event) => {
 //!   console.log(event.payload.percent);
 //! });
-//!
-//! // 3. 完了 / 失敗イベント(いずれか一方が必ず一度だけ発火する)。done の payload は
-//! //    生成(またはキャッシュヒットした)プレビューファイルの絶対パス。
-//! //    renderer は <video>/<img> の src にそのまま使えないので convertFileSrc を通す。
 //! const unlistenDone = await listen<{ path: string }>(`preview://done/${jobId}`, (event) => {
 //!   videoEl.src = convertFileSrc(event.payload.path);
 //! });
 //! const unlistenError = await listen<{ message: string }>(`preview://error/${jobId}`, (event) => {
 //!   console.error(event.payload.message);
+//! });
+//!
+//! // 3. 購読が揃ってからジョブを開始する。done の payload は生成(またはキャッシュヒットした)
+//! //    プレビューファイルの絶対パス。renderer は <video>/<img> の src にそのまま使えないので
+//! //    convertFileSrc を通す。
+//! await invoke("preview_start", {
+//!   jobId,
+//!   input: "/path/to/input.mp4",
+//!   spec, // EditSpec
 //! });
 //!
 //! // 4. 中断したい場合は reframe_cancel を使う(専用コマンドはない。モジュール冒頭参照)。
@@ -117,25 +120,28 @@ fn resolve_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// `input` を `spec` の指定形状へ低ビットレートでプレビュー用に再フレーミングする
-/// ジョブを開始し、`JobId` を返す(`reframe_start` と同じ [`JobsState`] を共有する)。
+/// ジョブを開始する(`reframe_start` と同じ [`JobsState`] を共有する)。
 ///
-/// ジョブ本体はバックグラウンドスレッドで実行され、この関数はジョブ登録後すぐに
-/// 返る(完了を待たない)。進捗・完了は上記モジュール doc の Tauri イベントで通知する。
-/// キャッシュヒット時は再エンコードせず、ほぼ即座に `done` イベントが発火する。
+/// `job_id` は renderer 側が採番して渡す(`reframe.rs` 冒頭コメント「jobId 採番を
+/// フロントエンドへ移した理由」参照)。ジョブ本体はバックグラウンドスレッドで実行され、
+/// この関数はジョブ登録後すぐに返る(完了を待たない)。進捗・完了は上記モジュール doc の
+/// Tauri イベントで通知する。キャッシュヒット時は再エンコードせず、ほぼ即座に `done`
+/// イベントが発火する。
 #[tauri::command]
 pub async fn preview_start(
 	app: AppHandle,
 	jobs: State<'_, JobsState>,
+	job_id: JobId,
 	input: String,
 	spec: EditSpec,
-) -> Result<JobId, String> {
+) -> Result<(), String> {
 	let cache_dir = resolve_cache_dir(&app)?;
 
 	let token = CancelToken::new();
-	let job_id = jobs.register(token);
+	jobs.register(job_id.clone(), token);
 
 	let app_for_task = app.clone();
-	let job_id_for_task = job_id.clone();
+	let job_id_for_task = job_id;
 	let input_path = PathBuf::from(input);
 
 	tauri::async_runtime::spawn_blocking(move || {
@@ -148,7 +154,7 @@ pub async fn preview_start(
 		);
 	});
 
-	Ok(job_id)
+	Ok(())
 }
 
 /// ジョブ本体(ブロッキングスレッド上で実行)。`media_core::render_preview` を呼び、
@@ -205,7 +211,8 @@ mod tests {
 	fn preview_and_reframe_share_job_id_space() {
 		let jobs = JobsState::default();
 		let token = CancelToken::new();
-		let job_id = jobs.register(token.clone());
+		let job_id = "job-a".to_string();
+		jobs.register(job_id.clone(), token.clone());
 
 		// reframe_cancel が使う cancel() を preview 側で登録したジョブに対して呼べる。
 		jobs.cancel(&job_id)
