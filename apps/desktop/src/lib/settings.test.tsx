@@ -156,6 +156,7 @@ describe("SettingsProvider", () => {
 			theme: "light",
 			// 未保存のフィールドは既定値
 			defaultExportDir: null,
+			lastExportDir: null,
 			// 型が不正なフィールドも既定値へフォールバック
 			openFolderAfterExport: false,
 			notifyOnExportComplete: false,

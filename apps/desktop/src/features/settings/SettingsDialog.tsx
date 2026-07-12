@@ -43,7 +43,12 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
 	const handlePickDir = async () => {
 		setPickingDir(true);
 		try {
-			const dir = await pickExportDirectory("既定の書き出し先フォルダを選択");
+			// 初期表示先: 既に既定の書き出し先が設定されていればそこへ、無ければ
+			// 直近の書き出し先選択(lastExportDir)へ(ExportScreen/UploadScreen と同じ理由)。
+			const dir = await pickExportDirectory(
+				"既定の書き出し先フォルダを選択",
+				settings.defaultExportDir || settings.lastExportDir,
+			);
 			if (!dir) return;
 			updateSettings({ defaultExportDir: dir });
 		} finally {

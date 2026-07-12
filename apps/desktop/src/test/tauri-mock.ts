@@ -82,6 +82,9 @@ export const mockDialogOpen = vi.fn(async (_opts?: unknown): Promise<string | nu
 
 export const mockJoin = vi.fn(async (...parts: string[]) => parts.join("/"));
 
+/** `documentDir()`(`pickExportDirectory` の defaultPath 解決用)のダミー実装。 */
+export const mockDocumentDir = vi.fn(async () => "/mock/Documents");
+
 export const mockOpenPath = vi.fn(async (_path: string) => undefined);
 
 // 通知権限は既定で許可済み扱い(多くのテストは通知フローそのものを検証しないため)。
@@ -110,6 +113,9 @@ export function resetTauriMocks(): void {
 
 	mockJoin.mockClear();
 	mockJoin.mockImplementation(async (...parts: string[]) => parts.join("/"));
+
+	mockDocumentDir.mockClear();
+	mockDocumentDir.mockImplementation(async () => "/mock/Documents");
 
 	mockOpenPath.mockReset();
 	mockOpenPath.mockImplementation(async () => undefined);

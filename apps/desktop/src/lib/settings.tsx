@@ -23,6 +23,13 @@ export type AppSettings = {
 	theme: ThemePreference;
 	/** null = 書き出しの都度ダイアログで選択(従来動作) */
 	defaultExportDir: string | null;
+	/**
+	 * 書き出し先フォルダ選択ダイアログで前回選んだフォルダ(絶対パス、無加工で保存)。
+	 * 設定画面には出さない内部値 — `defaultExportDir` 未設定時のダイアログの
+	 * 初期表示先(defaultPath)にのみ使う。null = 未選択(初回はダイアログ側で
+	 * 書類フォルダにフォールバックする)。
+	 */
+	lastExportDir: string | null;
 	/** 書き出し完了後に出力フォルダを自動で開く */
 	openFolderAfterExport: boolean;
 	/** 書き出し完了時に OS のデスクトップ通知を送る */
@@ -36,6 +43,7 @@ export type AppSettings = {
 export const DEFAULT_SETTINGS: AppSettings = {
 	theme: "dark", // 既定はダーク(現状の見た目を維持)
 	defaultExportDir: null,
+	lastExportDir: null,
 	openFolderAfterExport: false,
 	notifyOnExportComplete: false,
 	encoder: "auto",
@@ -93,6 +101,10 @@ export function loadSettings(): AppSettings {
 				typeof obj.defaultExportDir === "string"
 					? obj.defaultExportDir
 					: DEFAULT_SETTINGS.defaultExportDir,
+			lastExportDir:
+				typeof obj.lastExportDir === "string"
+					? obj.lastExportDir
+					: DEFAULT_SETTINGS.lastExportDir,
 			openFolderAfterExport:
 				typeof obj.openFolderAfterExport === "boolean"
 					? obj.openFolderAfterExport
