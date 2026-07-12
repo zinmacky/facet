@@ -797,8 +797,8 @@ mod tests {
 
 		let popped = fifo.pop(samples).expect("pop できるはず");
 		let mono_out = popped.plane::<f32>(0);
-		for i in 0..samples {
-			assert_eq!(mono_out[i], 3.0 + i as f32);
+		for (i, sample) in mono_out.iter().enumerate().take(samples) {
+			assert_eq!(*sample, 3.0 + i as f32);
 		}
 	}
 
