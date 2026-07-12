@@ -53,3 +53,9 @@ apps/desktop の Rust を変更した場合は上記 fmt / clippy / テストも
 - `packages/contract/schema/*.json` は zod スキーマから build 時に生成される
   **コミット対象**。contract を変更したら `pnpm build` 後に
   `git diff --exit-code -- packages/contract/schema/` で生成漏れがないか確認する(CI がガード)。
+- `apps/desktop` は macOS / Windows 両対応。OS 依存の API・挙動(パス区切り、
+  ダイアログの `defaultPath`、ファイルロック、HW エンコーダの違い:
+  videotoolbox/amf 等)は両 OS を考慮して実装する。パスは文字列結合せず
+  `@tauri-apps/api/path`(Rust 側は `std::path`)で解決する。開発機は Mac の
+  ため、OS 依存の変更は「Windows 実機では未検証」であることと確認観点を
+  PR に明記する。
