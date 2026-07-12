@@ -147,14 +147,6 @@ struct ReframeDone {
 	encoder: String,
 }
 
-/// `reframe://error/{jobId}` イベントのペイロード(キャンセルも含む。`MediaError` の
-/// `Display` をそのまま文字列化する)。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReframeError {
-	message: String,
-}
-
 fn progress_event_name(job_id: &str) -> String {
 	format!("reframe://progress/{job_id}")
 }
@@ -209,14 +201,96 @@ pub async fn reframe_start(
 /// (実際の単体テストは `JobsState` の登録/キャンセル、`media_core::reframe` の呼び出しは
 /// media-core 側で検証済みのため本ファイルでは重複させない — 下記 `tests` モジュール参照)。
 ///
-/// **P1-5: パニック時の State リーク対策**。`media_core::reframe` の呼び出しは
-/// [`std::panic::catch_unwind`] で包み、パニックしても `jobs.remove(job_id)` に必ず
-/// 到達させる(`JobGuard` の `Drop` で保証。`spawn_blocking` はパニックを内部で
-/// 捕捉して `JoinError` に変換するが、その `JoinHandle` を `reframe_start` 側で
-/// 待たないため、ここで捕捉しないと `JobsState` からエントリが永遠に消えず、
-/// renderer 側は完了/失敗イベントを一度も受け取れないまま「実行中」に見え続ける)。
-/// パニック時も renderer が待ち続けないよう、`reframe://error/{jobId}` を明示的に emit する。
+/// **P1-5: パニック時の State リーク対策**。共通の骨格(トークン取得・`JobGuard`・
+/// 進捗 emit・`catch_unwind`・done/error emit)は [`run_media_job`] に集約している
+/// (P2: `commands::preview::run_job` との重複解消。詳細は `run_media_job` 冒頭コメント参照)。
+/// ここでは `media_core::reframe` 固有の [`ReframeOptions`] 組み立てと、成功時の
+/// done ペイロード([`ReframeDone`])への変換のみを行う。
 fn run_job(app: &AppHandle, job_id: &str, input: &Path, output: &Path, spec: EditSpec) {
+	run_media_job(
+		app,
+		job_id,
+		progress_event_name(job_id),
+		done_event_name(job_id),
+		error_event_name(job_id),
+		move |token, on_progress| {
+			let options = ReframeOptions {
+				preset: &spec.preset,
+				sigma: fit::DEFAULT_SIGMA,
+				crop: spec.crop,
+				source: spec.source,
+				trim: spec.trim,
+				encoder: EncoderSelection::Auto,
+				bit_rate: encode::DEFAULT_BITRATE,
+				cancel: token,
+				on_progress,
+			};
+			media_core::reframe(input, output, options)
+		},
+		|encoder_name| ReframeDone {
+			encoder: encoder_name,
+		},
+	);
+}
+
+/// [`run_job`] 終了時に必ず `jobs.remove(job_id)` を呼ぶ RAII ガード(P1-5)。
+///
+/// `pub(crate)`: [`run_media_job`] が保持し、`commands::preview` からも
+/// (`run_media_job` 経由で間接的に)使われる。`JobsState` 自体を共有しているのと
+/// 同じ理由で、ガードもここで一元定義する。
+pub(crate) struct JobGuard<'a> {
+	pub(crate) jobs: &'a JobsState,
+	pub(crate) job_id: &'a str,
+}
+
+impl Drop for JobGuard<'_> {
+	fn drop(&mut self) {
+		self.jobs.remove(self.job_id);
+	}
+}
+
+/// `reframe://error/{jobId}` / `preview://error/{jobId}` イベント共通のペイロード
+/// (キャンセルも含む。`MediaError` の `Display` をそのまま文字列化する。P2)。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JobErrorPayload {
+	pub(crate) message: String,
+}
+
+/// [`reframe::run_job`] と [`crate::commands::preview::run_job`] に共通する
+/// ジョブ実行の骨格を集約する(P2: Wave A で共有した [`JobGuard`] の続き)。
+///
+/// 両モジュールの `run_job` は「State からトークンを取得 → [`JobGuard`] で RAII 解放を
+/// 予約 → 進捗 emit クロージャを組み立て → 本体処理を `catch_unwind` で包んで実行 →
+/// 成功/失敗/パニックのいずれかで done または error イベントを emit」という同じ構造を
+/// 持つ。異なるのは (a) 本体処理そのもの(`media_core::reframe` vs
+/// `media_core::preview::render_preview` — 引数の組み立ても含む)と (b) 成功時の戻り値の
+/// 型・done イベントのペイロード形(`{encoder}` vs `{path}`)の 2 点のみのため、この 2 つを
+/// クロージャ(`operation`)と変換関数(`to_done_payload`)として呼び出し側から注入する形で
+/// 共通化する。挙動は集約前(各モジュールに個別実装されていた `run_job`)と変えない。
+///
+/// - `progress_event`/`done_event`/`error_event`: 呼び出し側(各モジュールの
+///   `progress_event_name`/`done_event_name`/`error_event_name`、集約前から変えていない)
+///   が組み立てた完全なイベント名。`"reframe://"`/`"preview://"` の接頭辞違いをここで
+///   吸収するのではなく、呼び出し側の既存ヘルパをそのまま使う(イベント名の単体テストを
+///   モジュールごとに残せるようにするため)。
+/// - `operation`: 実際の重い処理。`&CancelToken`/`&dyn Fn(Progress)` を受け取り
+///   `media_core::Result<T>` を返す(`ReframeOptions`/`render_preview` の引数組み立ては
+///   呼び出し側のクロージャ内で行う — トークン/進捗クロージャの寿命がこの関数呼び出し
+///   の中に閉じているため)。
+/// - `to_done_payload`: 成功値 `T` を done イベントのペイロード(`Serialize`)へ変換する。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_media_job<T, D>(
+	app: &AppHandle,
+	job_id: &str,
+	progress_event: String,
+	done_event: String,
+	error_event: String,
+	operation: impl FnOnce(&CancelToken, &dyn Fn(Progress)) -> media_core::Result<T>,
+	to_done_payload: impl FnOnce(T) -> D,
+) where
+	D: Serialize + Clone,
+{
 	let jobs = app.state::<JobsState>();
 	let Some(token) = jobs.get(job_id) else {
 		// register 直後に必ず存在するはずだが、万一取得できなくても panic はしない。
@@ -231,51 +305,33 @@ fn run_job(app: &AppHandle, job_id: &str, input: &Path, output: &Path, spec: Edi
 	};
 
 	let app_for_progress = app.clone();
-	let job_id_for_progress = job_id.to_string();
 	let on_progress = move |progress: Progress| {
-		let _ = app_for_progress.emit(&progress_event_name(&job_id_for_progress), progress);
+		let _ = app_for_progress.emit(&progress_event, progress);
 	};
 
-	let options = ReframeOptions {
-		preset: &spec.preset,
-		sigma: fit::DEFAULT_SIGMA,
-		crop: spec.crop,
-		source: spec.source,
-		trim: spec.trim,
-		encoder: EncoderSelection::Auto,
-		bit_rate: encode::DEFAULT_BITRATE,
-		cancel: &token,
-		on_progress: &on_progress,
-	};
-
-	// `ReframeOptions` はクロージャ・参照を含み厳密には UnwindSafe ではないが、
+	// `operation` はクロージャ・参照を含み厳密には UnwindSafe ではないが、
 	// パニック発生時点でそのまま破棄するだけ(catch_unwind 後に再利用しない)なので
-	// `AssertUnwindSafe` で問題ない。
+	// `AssertUnwindSafe` で問題ない(集約前の各 `run_job` と同じ判断)。
 	let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-		media_core::reframe(input, output, options)
+		operation(&token, &on_progress)
 	}));
 
 	match result {
-		Ok(Ok(encoder_name)) => {
-			let _ = app.emit(
-				&done_event_name(job_id),
-				ReframeDone {
-					encoder: encoder_name,
-				},
-			);
+		Ok(Ok(value)) => {
+			let _ = app.emit(&done_event, to_done_payload(value));
 		}
 		Ok(Err(err)) => {
 			let _ = app.emit(
-				&error_event_name(job_id),
-				ReframeError {
+				&error_event,
+				JobErrorPayload {
 					message: err.to_string(),
 				},
 			);
 		}
 		Err(_panic) => {
 			let _ = app.emit(
-				&error_event_name(job_id),
-				ReframeError {
+				&error_event,
+				JobErrorPayload {
 					message: "内部エラーが発生しました(パニック)".to_string(),
 				},
 			);
@@ -283,22 +339,6 @@ fn run_job(app: &AppHandle, job_id: &str, input: &Path, output: &Path, spec: Edi
 	}
 
 	// `jobs.remove(job_id)` は `_remove_on_exit` の Drop で行われる(ここでは何もしない)。
-}
-
-/// [`run_job`] 終了時に必ず `jobs.remove(job_id)` を呼ぶ RAII ガード(P1-5)。
-///
-/// `pub(crate)`: `commands::preview` の `run_job` も同じ形のリーク対策が必要なため、
-/// ここで定義したものをそのまま再利用する(`reframe.rs`/`preview.rs` の対応構造に
-/// 合わせて `JobsState` 自体を共有しているのと同じ理由)。
-pub(crate) struct JobGuard<'a> {
-	pub(crate) jobs: &'a JobsState,
-	pub(crate) job_id: &'a str,
-}
-
-impl Drop for JobGuard<'_> {
-	fn drop(&mut self) {
-		self.jobs.remove(self.job_id);
-	}
 }
 
 /// `job_id` のジョブをキャンセルする。次のループ境界チェック(パケット単位)で

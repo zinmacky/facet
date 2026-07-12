@@ -40,7 +40,7 @@ use ffmpeg_next::{
 	Dictionary, Packet, Rational,
 };
 
-use crate::error::{MediaError, Result};
+use crate::error::{is_again_or_eof, MediaError, Result};
 use crate::spec::Trim;
 use crate::trim::{TrimDecision, TrimWindow};
 
@@ -159,9 +159,11 @@ struct OpenedAudioEncoder {
 	stream_index: usize,
 }
 
-/// AAC エンコーダを構築し、出力コンテキストへストリームとして追加した上で open する。
-/// 映像の `encode::open_encoder` と同じく「ストリーム追加とエンコーダ open は不可分」
-/// という制約に従う(`ost.set_parameters()` は open 後の値を要求するため)。
+/// AAC エンコーダを構築して open し、成功した場合のみ出力コンテキストへストリームと
+/// して追加する。映像の `encode::open_encoder` と同じ「open 成功後に add_stream」
+/// 設計に従う(P2: `encode.rs` `open_encoder` 冒頭コメント参照 — `octx.add_stream()`
+/// は取り消せないため、open 前に追加すると open 失敗時に不正なストリームが
+/// 出力コンテキストに残り続ける)。
 ///
 /// 呼び出し側(pipeline.rs)は映像の `open_selected_encoder` の**後**にこれを呼ぶこと
 /// (出力コンテナのストリーム順を「映像 0・音声 1」に保つため)。
@@ -179,14 +181,6 @@ fn open_audio_encoder(
 	let sample_format = pick_sample_format(codec);
 	let channel_layout = pick_channel_layout(codec, source.decoder.channel_layout());
 	let rate = decide_sample_rate(source.decoder.rate());
-
-	let mut ost = octx
-		.add_stream(codec)
-		.map_err(|source| MediaError::EncoderOpen {
-			name: AAC_ENCODER_NAME.to_string(),
-			source,
-		})?;
-	let stream_index = ost.index();
 
 	let mut encoder_ctx = codec::context::Context::new_with_codec(codec)
 		.encoder()
@@ -212,6 +206,16 @@ fn open_audio_encoder(
 				name: AAC_ENCODER_NAME.to_string(),
 				source,
 			})?;
+
+	// ここまで到達したら open は成功している。ここで初めてストリームを追加する
+	// (`MediaError::OutputStreamCreate`: add_stream 失敗は EncoderOpen とは区別する、P2)。
+	let mut ost = octx
+		.add_stream(codec)
+		.map_err(|source| MediaError::OutputStreamCreate {
+			name: AAC_ENCODER_NAME.to_string(),
+			source,
+		})?;
+	let stream_index = ost.index();
 	ost.set_parameters(&opened);
 
 	let frame_size = opened.frame_size() as usize;
@@ -507,7 +511,12 @@ impl AudioPipeline {
 			.send_packet(packet)
 			.map_err(|source| MediaError::Decode { source })?;
 		let mut decoded = frame::Audio::empty();
-		while self.decoder.receive_frame(&mut decoded).is_ok() {
+		loop {
+			match self.decoder.receive_frame(&mut decoded) {
+				Ok(()) => {}
+				Err(err) if is_again_or_eof(&err) => break,
+				Err(source) => return Err(MediaError::Decode { source }),
+			}
 			match classify(&decoded, &self.frame_window) {
 				TrimDecision::Skip => continue,
 				TrimDecision::Stop => {
@@ -532,7 +541,12 @@ impl AudioPipeline {
 				.send_eof()
 				.map_err(|source| MediaError::Decode { source })?;
 			let mut decoded = frame::Audio::empty();
-			while self.decoder.receive_frame(&mut decoded).is_ok() {
+			loop {
+				match self.decoder.receive_frame(&mut decoded) {
+					Ok(()) => {}
+					Err(err) if is_again_or_eof(&err) => break,
+					Err(source) => return Err(MediaError::Decode { source }),
+				}
 				match classify(&decoded, &self.frame_window) {
 					TrimDecision::Skip => continue,
 					TrimDecision::Stop => break,
@@ -633,7 +647,12 @@ impl AudioPipeline {
 	}
 
 	fn drain_encoder(&mut self, octx: &mut format::context::Output) -> Result<()> {
-		while self.encoder.receive_packet(&mut self.encoded).is_ok() {
+		loop {
+			match self.encoder.receive_packet(&mut self.encoded) {
+				Ok(()) => {}
+				Err(err) if is_again_or_eof(&err) => break,
+				Err(source) => return Err(MediaError::Encode { source }),
+			}
 			self.encoded.set_stream(self.ost_index);
 			self.encoded
 				.rescale_ts(self.encoder_time_base, self.ost_time_base);

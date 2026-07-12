@@ -74,11 +74,11 @@
 use std::path::{Path, PathBuf};
 
 use media_core::spec::EditSpec;
-use media_core::{preview, CancelToken, Progress};
+use media_core::{preview, CancelToken};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
-use super::reframe::{JobGuard, JobId, JobsState};
+use super::reframe::{run_media_job, JobId, JobsState};
 
 /// キャッシュディレクトリ名(`app_data_dir()` からの相対)。
 const CACHE_DIR_NAME: &str = "preview-cache";
@@ -91,14 +91,6 @@ struct PreviewDone {
 	/// renderer は `convertFileSrc` を通してから `<video>`/`<img>` の `src` に使う
 	/// (モジュール冒頭の renderer 向け API 参照)。
 	path: String,
-}
-
-/// `preview://error/{jobId}` イベントのペイロード(キャンセルも含む。`MediaError` の
-/// `Display` をそのまま文字列化する)。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PreviewError {
-	message: String,
 }
 
 fn progress_event_name(job_id: &str) -> String {
@@ -159,65 +151,29 @@ pub async fn preview_start(
 	Ok(job_id)
 }
 
-/// ジョブ本体(ブロッキングスレッド上で実行)。State からトークンを取り出し、
-/// `media_core::render_preview` を呼び、完了イベントを emit してからジョブを
-/// State から削除する(`reframe.rs` の `run_job` と対応する構造)。
+/// ジョブ本体(ブロッキングスレッド上で実行)。`media_core::render_preview` を呼び、
+/// 完了イベントを emit してからジョブを State から削除する
+/// (`reframe.rs` の `run_job` と対応する構造)。
 ///
-/// **P1-5: パニック時の State リーク対策**(`reframe.rs` の `run_job` と同型。
-/// 詳細な理由は同ファイルの `run_job` 冒頭コメント参照)。`render_preview` の呼び出しを
-/// `catch_unwind` で包み、`jobs.remove(job_id)` は `JobGuard` の `Drop` で保証する。
+/// **P1-5: パニック時の State リーク対策**(`reframe.rs` の `run_job` と同型)。
+/// 共通の骨格(トークン取得・`JobGuard`・進捗 emit・`catch_unwind`・done/error emit)は
+/// [`run_media_job`] に集約している(P2: `reframe.rs::run_job` との重複解消。詳細は
+/// `run_media_job` 冒頭コメント参照)。ここでは `render_preview` 固有の引数組み立てと、
+/// 成功時の done ペイロード([`PreviewDone`])への変換のみを行う。
 fn run_job(app: &AppHandle, job_id: &str, input: &Path, cache_dir: &Path, spec: EditSpec) {
-	let jobs = app.state::<JobsState>();
-	let Some(token) = jobs.get(job_id) else {
-		// register 直後に必ず存在するはずだが、万一取得できなくても panic はしない。
-		return;
-	};
-
-	let _remove_on_exit = JobGuard {
-		jobs: &jobs,
+	run_media_job(
+		app,
 		job_id,
-	};
-
-	let app_for_progress = app.clone();
-	let job_id_for_progress = job_id.to_string();
-	let on_progress = move |progress: Progress| {
-		let _ = app_for_progress.emit(&progress_event_name(&job_id_for_progress), progress);
-	};
-
-	// `AssertUnwindSafe` の妥当性は `reframe.rs::run_job` と同じ理由
-	// (パニック後は結果を再利用せず即座に破棄するのみ)。
-	let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-		preview::render_preview(input, &spec, cache_dir, &token, &on_progress)
-	}));
-
-	match result {
-		Ok(Ok(path)) => {
-			let _ = app.emit(
-				&done_event_name(job_id),
-				PreviewDone {
-					path: path.to_string_lossy().into_owned(),
-				},
-			);
-		}
-		Ok(Err(err)) => {
-			let _ = app.emit(
-				&error_event_name(job_id),
-				PreviewError {
-					message: err.to_string(),
-				},
-			);
-		}
-		Err(_panic) => {
-			let _ = app.emit(
-				&error_event_name(job_id),
-				PreviewError {
-					message: "内部エラーが発生しました(パニック)".to_string(),
-				},
-			);
-		}
-	}
-
-	// `jobs.remove(job_id)` は `_remove_on_exit` の Drop で行われる(ここでは何もしない)。
+		progress_event_name(job_id),
+		done_event_name(job_id),
+		error_event_name(job_id),
+		move |token, on_progress| {
+			preview::render_preview(input, &spec, cache_dir, token, on_progress)
+		},
+		|path| PreviewDone {
+			path: path.to_string_lossy().into_owned(),
+		},
+	);
 }
 
 #[cfg(test)]
