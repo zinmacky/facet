@@ -12,6 +12,21 @@
 			"runtimeExecutable": "pnpm",
 			"runtimeArgs": ["--filter", "@facet/studio-web", "dev"],
 			"port": 5179
+		},
+		{
+			"name": "desktop-mock",
+			"runtimeExecutable": "pnpm",
+			"runtimeArgs": [
+				"--filter",
+				"@facet/desktop",
+				"exec",
+				"vite",
+				"--mode",
+				"mock",
+				"--port",
+				"5217"
+			],
+			"port": 5217
 		}
 	]
 }
