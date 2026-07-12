@@ -35,6 +35,18 @@
 			"icons/128x128@2x.png",
 			"icons/icon.icns",
 			"icons/icon.ico"
-		]
+		],
+		"createUpdaterArtifacts": true
+	},
+	"plugins": {
+		"updater": {
+			"pubkey": "TODO_REPLACE_WITH_UPDATER_PUBKEY",
+			"endpoints": [
+				"https://github.com/zinmacky/facet/releases/latest/download/latest.json"
+			],
+			"windows": {
+				"installMode": "passive"
+			}
+		}
 	}
 }
