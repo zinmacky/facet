@@ -114,10 +114,14 @@ Windows 検証(docs/phase2-0-windows-setup.md §4 と同じ観点)の Mac 版:
   変更時は両方同時に)。license-gate が構造ガード
 - **Windows 固有**: `pnpm build` 後に packages/contract/schema/*.json へ CRLF 見かけ差分が出る
   (コミットに含めない)。Mac では発生しないはず
-- **既知の残課題**: 音声と映像の trim 終端に数十 ms 差(インターリーブ順序依存)/
-  facet-desktop の Linux CI 未整備(GTK 依存で clippy/test から exclude 中)/
-  EditSpec は暫定手書き型(contract-rs 生成型への差し替えは将来)/
+- **既知の残課題**: EditSpec は暫定手書き型(contract-rs 生成型への差し替えは将来)/
   Dependabot #26(glib、Linux 専用チェーン、上流待ち、実害なし)
+- **解決済みの旧残課題**(2026-07-13 調査で確認):
+  - trim 終端の音声/映像差: 破局的な音声取りこぼしは PR #54(8583bf9)で修正済み。現在残るのは
+    映像フレーム格子(1/30s)と AAC 格子(1024/48000s≒21.3ms)の量子化による原理的残差
+    (実測 8〜29ms、リップシンク知覚閾値未満)。回帰テストが 100ms 上限を保証しており対応不要
+  - facet-desktop の Linux CI: 08783e0(icon.ico 生成+exclude 解除)で解消済み。
+    ubuntu ジョブは Tauri v2 の GTK 系依存を導入済みで、clippy/test は --workspace 全体で稼働中
 - スクリプト類(scripts/*.ps1)は PowerShell。Mac から使う場合は `brew install powershell` か、
   必要になった時点で sh 版を追加
 
