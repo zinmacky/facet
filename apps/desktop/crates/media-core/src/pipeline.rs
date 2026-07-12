@@ -639,9 +639,10 @@ fn open_selected_encoder(
 					// いずれも「この候補は使えない、次候補へ」という扱いは変えない
 					// (add_stream 失敗を専用 variant に分けたのは診断精度のためであり、
 					// Auto 選択のフォールバック挙動自体は分離前と同じに保つ)。
-					Err(err @ (MediaError::EncoderOpen { .. } | MediaError::OutputStreamCreate { .. })) => {
-						last_err = Some(err)
-					}
+					Err(
+						err @ (MediaError::EncoderOpen { .. }
+						| MediaError::OutputStreamCreate { .. }),
+					) => last_err = Some(err),
 					Err(err) => return Err(err),
 				}
 			}
