@@ -5,6 +5,26 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/facet.svg" />
     <title>Facet desktop</title>
+    <script>
+      // React マウント前にテーマを確定させ、起動時のちらつき(FOUC)を防ぐ。
+      // 解決ロジックは src/lib/settings.tsx(resolveTheme / SettingsProvider)と
+      // 対で保守する。失敗時は従来どおりダーク(html の class="dark" を維持)。
+      (() => {
+        try {
+          const raw = window.localStorage.getItem("facet.desktop.settings");
+          const theme = raw ? JSON.parse(raw).theme : null;
+          const dark =
+            theme === "light"
+              ? false
+              : theme === "system"
+                ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                : true; // "dark"・未設定・不正値は既定のダーク
+          document.documentElement.classList.toggle("dark", dark);
+        } catch {
+          document.documentElement.classList.add("dark");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

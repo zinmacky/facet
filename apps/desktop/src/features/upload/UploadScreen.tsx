@@ -655,7 +655,7 @@ export function UploadScreen({
 				</h2>
 				<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-4">
 					{!PUBLISH_SUPPORTED && (
-						<div className="shrink-0 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-300">
+						<div className="shrink-0 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-300">
 							投稿(YouTube / Instagram)はデスクトップ版では未対応です(Phase 3
 							で対応予定)。書き出し済みファイルは右の「フォルダへ一括書き出し」で取得してください。
 						</div>

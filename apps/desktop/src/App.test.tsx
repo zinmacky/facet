@@ -133,3 +133,21 @@ describe("App: ステップ遷移時のフォーカス移動(a11y)", () => {
 		expect(screen.getByRole("heading", { name: "編集" })).toHaveFocus();
 	});
 });
+
+describe("App: 設定ダイアログ", () => {
+	it("ヘッダの歯車ボタンから設定ダイアログを開閉できる", async () => {
+		const user = userEvent.setup();
+		renderWithProviders(<App />);
+
+		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+		await user.click(screen.getByRole("button", { name: "設定" }));
+		expect(screen.getByRole("dialog")).toBeInTheDocument();
+		expect(screen.getByRole("heading", { name: "設定" })).toBeInTheDocument();
+
+		// Modal のヘッダ✕ボタン・オーバーレイの双方が aria-label="閉じる" を持つため、
+		// 曖昧さを避けて Esc(Modal 共通のクローズ手段)で閉じる。
+		await user.keyboard("{Escape}");
+		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+	});
+});
