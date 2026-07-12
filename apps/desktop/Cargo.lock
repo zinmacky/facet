@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "contract-rs"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
 ]
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "facet-desktop"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "media-core",
  "serde",
@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "license-gate"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
  "windows-sys 0.61.2",
@@ -2150,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "media-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
  "serde",

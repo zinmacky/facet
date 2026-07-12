@@ -3,7 +3,7 @@ resolver = "2"
 members = ["src-tauri", "crates/*"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 # crates.io には公開しない社内向けクレート群。cargo-deny の licenses チェックで
 # 未公開ワークスペースクレートとして license 判定をスキップさせるために使う
