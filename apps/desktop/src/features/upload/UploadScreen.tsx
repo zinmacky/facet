@@ -828,9 +828,9 @@ export function UploadScreen({
 							で対応予定)。書き出し済みファイルは右の「フォルダへ一括書き出し」で取得してください。
 						</div>
 					)}
-					<div className="flex min-h-0 flex-1 gap-3">
+					<div className="flex min-h-0 flex-1 items-start gap-3">
 						{/* 中央: 選択中 Post の詳細 */}
-						<div className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
+						<div className="max-h-full min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
 							{selectedPost ? (
 								<PostDetail
 									key={selectedPost.id}
@@ -865,7 +865,7 @@ export function UploadScreen({
 						</div>
 
 						{/* 右: 投稿(Post)一覧 */}
-						<div className="min-h-0 w-72 shrink-0 overflow-y-auto border-l border-line pl-3">
+						<div className="max-h-full min-h-0 w-72 shrink-0 overflow-y-auto border-l border-line pl-3">
 							<div className="flex flex-col gap-2">
 								<Button
 									variant="secondary"
