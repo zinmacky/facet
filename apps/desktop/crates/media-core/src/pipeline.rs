@@ -49,8 +49,10 @@
 //!   [`crate::concurrency::retry_on_encoder_open`] でラップし、`EncoderOpen`(HW
 //!   セッション枯渇等)はリトライ後も次候補へ進む(`concurrency.rs` 冒頭コメント参照)。
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use ffmpeg_next::{self as ffmpeg, filter, format, frame, Dictionary, Packet, Rational};
@@ -109,6 +111,66 @@ pub struct ReframeOptions<'a> {
 	pub on_progress: &'a dyn Fn(Progress),
 }
 
+/// 実行中の出力先パス(`output_path`)をプロセス全体で追跡するグローバルレジストリ
+/// (P1-2: 同一 output_path への同時実行競合の検知)。
+///
+/// `reframe()` は冒頭でここに `output_path` を登録し、既に別のジョブが同じパスへ
+/// 書き出し中であれば [`MediaError::OutputBusy`] を返して即座に失敗する
+/// (デコーダ/エンコーダ open 等、実際の書き出し処理には一切入らない)。
+/// 登録は [`OutputPathGuard`] の RAII で `reframe()` 終了時(成功・失敗・キャンセル
+/// いずれも)に自動的に解放されるため、1 本目が完了すれば同じパスへ再度書き出せる。
+struct OutputPathRegistry {
+	active: Mutex<HashSet<PathBuf>>,
+}
+
+impl OutputPathRegistry {
+	/// プロセス全体で共有するインスタンス(`OnceLock`。`concurrency::EncodeSlots::global`
+	/// と同じパターン)。
+	fn global() -> &'static OutputPathRegistry {
+		static INSTANCE: OnceLock<OutputPathRegistry> = OnceLock::new();
+		INSTANCE.get_or_init(|| OutputPathRegistry {
+			active: Mutex::new(HashSet::new()),
+		})
+	}
+
+	/// `path` を実行中として登録する。既に登録済み(=別のジョブが同じパスへ実行中)
+	/// なら `None` を返す(呼び出し側はこれを [`MediaError::OutputBusy`] に変換する)。
+	fn register(&self, path: &Path) -> Option<OutputPathGuard<'_>> {
+		let mut active = lock_or_recover(&self.active);
+		if !active.insert(path.to_path_buf()) {
+			return None;
+		}
+		Some(OutputPathGuard {
+			registry: self,
+			path: path.to_path_buf(),
+		})
+	}
+
+	fn release(&self, path: &Path) {
+		let mut active = lock_or_recover(&self.active);
+		active.remove(path);
+	}
+}
+
+/// [`OutputPathRegistry::register`] が返す RAII ガード。drop 時に登録を解除する。
+struct OutputPathGuard<'a> {
+	registry: &'a OutputPathRegistry,
+	path: PathBuf,
+}
+
+impl Drop for OutputPathGuard<'_> {
+	fn drop(&mut self) {
+		self.registry.release(&self.path);
+	}
+}
+
+/// `Mutex` の poisoning を復旧して中身を取り出す(`concurrency::lock_or_recover` と同じ
+/// 設計判断: ロック保持中の処理は `HashSet` の insert/remove のみでパニックしうる操作を
+/// 含まないため、poisoning が起きても中身の不変条件は壊れていない)。
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+	mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// `EditSpec` 1 つを libav パイプラインで実行し、`input_path` を `preset` 形状へ
 /// 再フレーミングして `output_path` に書き出す(音声ストリームがあれば AAC ≤48kHz へ
 /// 再エンコードして通す。`audio.rs` / `lib.rs` 冒頭コメント参照)。
@@ -131,6 +193,17 @@ pub fn reframe(
 	if options.cancel.is_cancelled() {
 		return Err(MediaError::Cancelled);
 	}
+
+	// 同一 output_path への同時実行を検知して即座に拒否する(P1-2)。スロット待機
+	// (他ジョブと共有される有限リソース)より先に行うことで、既に同じ出力先へ
+	// 書き出し中の 2 本目がスロット空きを無駄に待つことも防げる。
+	// `_output_guard` は関数末尾までスコープに保持し、drop 時に RAII で解放される。
+	let _output_guard =
+		OutputPathRegistry::global()
+			.register(output_path)
+			.ok_or_else(|| MediaError::OutputBusy {
+				path: output_path.to_path_buf(),
+			})?;
 
 	// 同時エンコード数を制限するスロットを取得する(関数末尾までスコープに保持し、
 	// drop 時に RAII で解放される。`concurrency` モジュール冒頭コメント参照)。
@@ -739,6 +812,88 @@ mod tests {
 	fn temp_output_path_without_extension_appends_tmp_suffix() {
 		let tmp = temp_output_path(Path::new("/out/video"));
 		assert_eq!(tmp, PathBuf::from("/out/video.tmp"));
+	}
+
+	// --- OutputPathRegistry(P1-2) ----------------------------------------------------
+	//
+	// `OutputPathRegistry::global()` はプロセス全体で共有される `OnceLock` のため、
+	// 各テストが異なる(テスト名を含む)ダミーパスを使うことで、並行実行される他の
+	// テストとの干渉を避ける(`concurrency.rs` の `MAX_CONCURRENT_ENCODES_ENV` テストが
+	// 専用ロックで直列化しているのとは異なるアプローチだが、パスが重複しない限り
+	// 状態は独立している)。
+
+	#[test]
+	fn second_register_for_same_path_returns_none_until_first_guard_drops() {
+		let path = Path::new("/tmp/facet-desktop-test-output-busy-basic.mp4");
+		let registry = OutputPathRegistry::global();
+
+		let first_guard = registry.register(path).expect("first register should succeed");
+		assert!(
+			registry.register(path).is_none(),
+			"second register for the same path should be rejected while the first is active"
+		);
+
+		drop(first_guard);
+
+		assert!(
+			registry.register(path).is_some(),
+			"after the first guard is dropped, the path should be registrable again"
+		);
+	}
+
+	#[test]
+	fn register_for_different_paths_does_not_conflict() {
+		let registry = OutputPathRegistry::global();
+		let path_a = Path::new("/tmp/facet-desktop-test-output-busy-a.mp4");
+		let path_b = Path::new("/tmp/facet-desktop-test-output-busy-b.mp4");
+
+		let _guard_a = registry.register(path_a).expect("path_a should register");
+		let _guard_b = registry.register(path_b).expect("path_b should register");
+	}
+
+	#[test]
+	fn reframe_returns_output_busy_error_for_a_path_registered_by_another_guard() {
+		// `reframe()` 自身は実 ffmpeg 依存だが、`reframe()` 冒頭のチェックが
+		// `OutputPathRegistry` 経由で `MediaError::OutputBusy` を返すこと自体は、
+		// レジストリへ事前登録してから `reframe()` を呼ぶことで実ファイル・実 ffmpeg
+		// 抜きで検証できる(`register` に失敗した時点でデコーダ/エンコーダ open 等の
+		// 実処理には一切入らないため)。
+		let path = Path::new("/tmp/facet-desktop-test-output-busy-via-reframe.mp4");
+		let _held = OutputPathRegistry::global()
+			.register(path)
+			.expect("first registration should succeed");
+
+		let preset = Preset {
+			name: "output-busy-test".to_string(),
+			width: 1080,
+			height: 1920,
+			fit: crate::spec::FitMode::BlurPad,
+		};
+		let cancel = CancelToken::new();
+		let on_progress = |_p: Progress| {};
+		let options = ReframeOptions {
+			preset: &preset,
+			sigma: fit::DEFAULT_SIGMA,
+			crop: None,
+			source: SourceDimensions {
+				width: 0,
+				height: 0,
+			},
+			trim: None,
+			encoder: EncoderSelection::Explicit {
+				name: "does-not-matter",
+				options: Dictionary::new(),
+			},
+			bit_rate: 0,
+			cancel: &cancel,
+			on_progress: &on_progress,
+		};
+
+		let result = reframe(Path::new("/tmp/facet-desktop-test-output-busy-input.mp4"), path, options);
+		assert!(
+			matches!(result, Err(MediaError::OutputBusy { .. })),
+			"expected OutputBusy, got: {result:?}"
+		);
 	}
 
 	// --- open_selected_encoder: Auto の全滅時に Explicit ではなく候補ループを
