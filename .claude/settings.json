@@ -1,6 +1,7 @@
 {
 	"enabledPlugins": {
-		"typescript-lsp@claude-plugins-official": true
+		"typescript-lsp@claude-plugins-official": true,
+		"rust-analyzer-lsp@claude-plugins-official": true
 	},
 	"hooks": {
 		"PostToolUse": [
@@ -24,7 +25,13 @@
 			"Bash(pnpm -r test)",
 			"Bash(pnpm build)",
 			"Bash(pnpm lint)",
-			"Bash(pnpm format)"
+			"Bash(pnpm format)",
+			"Bash(cargo fmt --check)",
+			"Bash(cargo clippy --workspace -- -D warnings)",
+			"Bash(cargo test --workspace)",
+			"Bash(cd apps/desktop && cargo fmt --check)",
+			"Bash(cd apps/desktop && cargo clippy --workspace -- -D warnings)",
+			"Bash(cd apps/desktop && cargo test --workspace)"
 		]
 	}
 }
