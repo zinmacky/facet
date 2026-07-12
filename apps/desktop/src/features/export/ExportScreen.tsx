@@ -410,25 +410,51 @@ export function ExportScreen({
 				書き出し
 			</h2>
 			<div className="min-h-0 flex-1 overflow-y-auto p-4">
-				{!started ? (
-					<div className="flex h-full min-h-0 gap-4">
-						{/* 中央: 選択中 clip のクロップ内容プレビュー */}
-						<div className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2">
-							{selectedClip ? (
+				<div className="flex h-full min-h-0 gap-4">
+					{/*
+					 * 中央: 選択中 clip のクロップ内容プレビュー(常時表示) + 書き出し状態カード。
+					 * UX変更: 以前は started フラグでプレビュー(ExportPreviewDetail)と書き出し
+					 * 詳細(ExportDetail)を排他切り替えしており、「書き出しを開始」した後は
+					 * クロップ内容を確認する導線が消えていた。「内容確認はプレビュー(キャッシュ)」
+					 * 「ファイル出力は書き出し(明示ボタン)」を UI 上で完全に分離するため、
+					 * プレビューは started に関係なく常に表示し、書き出しの進捗/完了/エラーは
+					 * その下に compact な状態カードとして分離表示する(started 前は表示するものが
+					 * 無いため ExportDetail 自体をマウントしない)。
+					 */}
+					<div className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2">
+						{selectedClip ? (
+							<>
 								<ExportPreviewDetail
 									clip={selectedClip}
 									state={preview.states.get(selectedClip.id)}
 									onGenerate={() => handlePreviewClip(selectedClip)}
 									onCancel={() => preview.cancel(selectedClip.id)}
 								/>
-							) : (
-								<p className="text-sm text-neutral-400">
-									プレビューする切り抜きがありません。
-								</p>
-							)}
-						</div>
+								{started && (
+									// key=clip.id: 選択 clip の切替でコンポーネントを作り直し、
+									// 前clip の再生/フォルダ表示 mutation の pending/error 状態が
+									// 別 clip のカードへ持ち越されないようにする。
+									<ExportDetail
+										key={selectedClip.id}
+										task={queue.tasks.get(selectedClip.id)}
+										dirty={dirtyClipIds.has(selectedClip.id)}
+									/>
+								)}
+							</>
+						) : (
+							<p className="text-sm text-neutral-400">
+								プレビューする切り抜きがありません。
+							</p>
+						)}
+					</div>
 
-						{/* 右: clip 一覧(プレビュー状態) */}
+					{/*
+					 * 右: clip 一覧。書き出し開始前は「プレビュー状態」の一覧
+					 * (ExportPreviewListItem)、開始後は「書き出し状態 + (再)実行ボタン」の
+					 * 一覧(ExportListItem)を表示する — この出し分け自体は PR #64 のまま変更しない
+					 * (中央パネルの排他表示を廃止しても、書き出し操作の導線はここに集約したまま)。
+					 */}
+					{!started ? (
 						<div className="flex min-h-0 w-60 shrink-0 flex-col gap-1 overflow-y-auto border-l border-line pl-4">
 							{clips.map((clip) => (
 								<ExportPreviewListItem
@@ -440,25 +466,7 @@ export function ExportScreen({
 								/>
 							))}
 						</div>
-					</div>
-				) : (
-					<div className="flex h-full min-h-0 gap-4">
-						{/* 中央: 選択中 clip の詳細 */}
-						<div className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2">
-							{selectedClip ? (
-								<ExportDetail
-									clip={selectedClip}
-									task={queue.tasks.get(selectedClip.id)}
-									dirty={dirtyClipIds.has(selectedClip.id)}
-								/>
-							) : (
-								<p className="text-sm text-neutral-400">
-									書き出す切り抜きがありません。
-								</p>
-							)}
-						</div>
-
-						{/* 右: 一括DL + clip 一覧 */}
+					) : (
 						<div className="flex min-h-0 w-60 shrink-0 flex-col gap-3 border-l border-line pl-4">
 							<div className="flex flex-col gap-1.5">
 								{/* 既定の書き出し先が設定されている場合、ダイアログをスキップして
@@ -505,8 +513,8 @@ export function ExportScreen({
 								))}
 							</div>
 						</div>
-					</div>
-				)}
+					)}
+				</div>
 			</div>
 
 			<footer className="flex shrink-0 items-center justify-end gap-2 border-t border-line px-4 py-3">

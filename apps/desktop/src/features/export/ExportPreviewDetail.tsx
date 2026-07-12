@@ -6,9 +6,14 @@ import { clipPreviewSig } from "../../lib/clipSig";
 import { Button } from "../../components/ui/Button";
 
 /**
- * 中央: 選択中 clip 1 本ぶんのクロップ内容プレビュー。「書き出しを開始」前の画面用。
- * `preview_start`(低ビットレート・app キャッシュ)を使い、ユーザー向けの
- * ファイルダウンロード/保存は行わない(結果は画面内の <video> 表示のみ)。
+ * 中央: 選択中 clip 1 本ぶんのクロップ内容プレビュー。`preview_start`(低ビットレート・
+ * app キャッシュ)を使い、ユーザー向けのファイルダウンロード/保存は行わない
+ * (結果は画面内の <video> 表示のみ)。
+ *
+ * 「書き出しを開始」の前後を問わず常時表示する(UX変更: 以前は started フラグで
+ * ExportDetail(書き出し状態)と排他表示していたが、書き出し開始後にクロップ内容を
+ * 確認する導線が消えてしまっていたため廃止した。書き出しの進捗/完了/エラーは
+ * ExportScreen 側で下に並べる ExportDetail(コンパクトな状態カード)が担う)。
  *
  * ウィザードは3画面(編集/書き出し/アップロード)を常時マウントするため、プレビュー
  * 生成後に別画面でクロップ内容(トリム/クロップ/アスペクト)を編集して戻ってきても
@@ -35,7 +40,7 @@ export function ExportPreviewDetail({
 	const boxRatio = aspectRatio(clip.aspect) ?? 16 / 9;
 
 	return (
-		<div className="flex h-full min-h-0 w-full flex-col items-center justify-center rounded-lg bg-panel/40 p-4">
+		<div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center rounded-lg bg-panel/40 p-4">
 			{/*
 			 * ファイル名 + プレビュー枠 + 生成ボタンを 1 つの縦スタックにまとめ、
 			 * スタックごと縦センターに置く(枠を flex-1 で伸ばすと、横長アスペクトでは
