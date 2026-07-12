@@ -52,15 +52,17 @@ mod tests {
 	/// 実ファイルで probe が MediaInfo を返すことを確認する
 	/// (§検証: 実機/実ファイルでの結合確認の一部をユニットテストとして固定)。
 	///
-	/// `FACET_DESKTOP_TEST_FIXTURE_MP4` 環境変数でパスを上書きできる(CI 等、開発中の
-	/// scratchpad が存在しない環境向け)。未設定時はこの Wave 5 実装時の scratchpad
-	/// にあった検証用ファイルにフォールバックする。いずれのパスも存在しない実行環境
-	/// (このリポジトリの通常の CI 等、facet-desktop は除外されている)ではスキップする。
+	/// リポジトリにコミットされた fixture(`tests/fixtures/input_test.mp4`、
+	/// `CARGO_MANIFEST_DIR` 相対。生成コマンドは fixture 隣の README 参照)を使う
+	/// (小物2: 以前は開発機固有の scratchpad パスへフォールバックしており、
+	/// 他の開発機・CI では常に skip されていた)。`FACET_DESKTOP_TEST_FIXTURE_MP4`
+	/// 環境変数で別ファイルに差し替えることもできる(より実映像に近いファイルで
+	/// 手動検証したい場合等)。いずれのパスも存在しない実行環境ではスキップする。
 	#[test]
 	fn probe_blocking_reads_real_file() {
-		let fallback = r"C:\Users\zinzo\AppData\Local\Temp\claude\C--Users-zinzo-workspace-facet\dcb872a5-bd39-4a4b-a986-250c389ab11e\scratchpad\input_test_5s.mp4";
-		let owned = std::env::var("FACET_DESKTOP_TEST_FIXTURE_MP4")
-			.unwrap_or_else(|_| fallback.to_string());
+		let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/input_test.mp4");
+		let owned =
+			std::env::var("FACET_DESKTOP_TEST_FIXTURE_MP4").unwrap_or_else(|_| fixture.to_string());
 		let path = Path::new(&owned);
 		if !path.exists() {
 			eprintln!("skip: test fixture not found at {}", path.display());

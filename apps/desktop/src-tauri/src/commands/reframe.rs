@@ -208,11 +208,26 @@ pub async fn reframe_start(
 /// [`ReframeOptions`] の組み立て部分だけを切り出して検証できる
 /// (実際の単体テストは `JobsState` の登録/キャンセル、`media_core::reframe` の呼び出しは
 /// media-core 側で検証済みのため本ファイルでは重複させない — 下記 `tests` モジュール参照)。
+///
+/// **P1-5: パニック時の State リーク対策**。`media_core::reframe` の呼び出しは
+/// [`std::panic::catch_unwind`] で包み、パニックしても `jobs.remove(job_id)` に必ず
+/// 到達させる(`JobGuard` の `Drop` で保証。`spawn_blocking` はパニックを内部で
+/// 捕捉して `JoinError` に変換するが、その `JoinHandle` を `reframe_start` 側で
+/// 待たないため、ここで捕捉しないと `JobsState` からエントリが永遠に消えず、
+/// renderer 側は完了/失敗イベントを一度も受け取れないまま「実行中」に見え続ける)。
+/// パニック時も renderer が待ち続けないよう、`reframe://error/{jobId}` を明示的に emit する。
 fn run_job(app: &AppHandle, job_id: &str, input: &Path, output: &Path, spec: EditSpec) {
 	let jobs = app.state::<JobsState>();
 	let Some(token) = jobs.get(job_id) else {
 		// register 直後に必ず存在するはずだが、万一取得できなくても panic はしない。
 		return;
+	};
+
+	// `jobs.remove(job_id)` を関数を抜けるあらゆる経路(正常終了・catch_unwind 後の
+	// 通常 return・将来の早期 return 追加)で保証する RAII ガード。
+	let _remove_on_exit = JobGuard {
+		jobs: &jobs,
+		job_id,
 	};
 
 	let app_for_progress = app.clone();
@@ -233,8 +248,15 @@ fn run_job(app: &AppHandle, job_id: &str, input: &Path, output: &Path, spec: Edi
 		on_progress: &on_progress,
 	};
 
-	match media_core::reframe(input, output, options) {
-		Ok(encoder_name) => {
+	// `ReframeOptions` はクロージャ・参照を含み厳密には UnwindSafe ではないが、
+	// パニック発生時点でそのまま破棄するだけ(catch_unwind 後に再利用しない)なので
+	// `AssertUnwindSafe` で問題ない。
+	let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+		media_core::reframe(input, output, options)
+	}));
+
+	match result {
+		Ok(Ok(encoder_name)) => {
 			let _ = app.emit(
 				&done_event_name(job_id),
 				ReframeDone {
@@ -242,7 +264,7 @@ fn run_job(app: &AppHandle, job_id: &str, input: &Path, output: &Path, spec: Edi
 				},
 			);
 		}
-		Err(err) => {
+		Ok(Err(err)) => {
 			let _ = app.emit(
 				&error_event_name(job_id),
 				ReframeError {
@@ -250,9 +272,33 @@ fn run_job(app: &AppHandle, job_id: &str, input: &Path, output: &Path, spec: Edi
 				},
 			);
 		}
+		Err(_panic) => {
+			let _ = app.emit(
+				&error_event_name(job_id),
+				ReframeError {
+					message: "内部エラーが発生しました(パニック)".to_string(),
+				},
+			);
+		}
 	}
 
-	jobs.remove(job_id);
+	// `jobs.remove(job_id)` は `_remove_on_exit` の Drop で行われる(ここでは何もしない)。
+}
+
+/// [`run_job`] 終了時に必ず `jobs.remove(job_id)` を呼ぶ RAII ガード(P1-5)。
+///
+/// `pub(crate)`: `commands::preview` の `run_job` も同じ形のリーク対策が必要なため、
+/// ここで定義したものをそのまま再利用する(`reframe.rs`/`preview.rs` の対応構造に
+/// 合わせて `JobsState` 自体を共有しているのと同じ理由)。
+pub(crate) struct JobGuard<'a> {
+	pub(crate) jobs: &'a JobsState,
+	pub(crate) job_id: &'a str,
+}
+
+impl Drop for JobGuard<'_> {
+	fn drop(&mut self) {
+		self.jobs.remove(self.job_id);
+	}
 }
 
 /// `job_id` のジョブをキャンセルする。次のループ境界チェック(パケット単位)で
