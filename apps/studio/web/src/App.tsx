@@ -105,7 +105,7 @@ export function App() {
 			{/* トップバー */}
 			<header className="flex h-12 shrink-0 items-center gap-3 border-b border-line px-4">
 				<div className="flex items-center gap-2">
-					<div className="h-4 w-4 rounded-sm bg-accent" />
+					<img src="/facet.svg" alt="" className="h-4 w-4" />
 					<span className="text-sm font-semibold tracking-tight text-neutral-100">
 						Facet <span className="text-neutral-500">studio</span>
 					</span>
