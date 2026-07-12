@@ -12,6 +12,7 @@ import {
 	mockNewJobId,
 	mockOpenPath,
 	mockRequestPermission,
+	mockRevealItemInDir,
 	mockSendNotification,
 	resetTauriMocks,
 } from "./tauri-mock";
@@ -55,6 +56,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
 	openPath: (...args: Parameters<typeof mockOpenPath>) => mockOpenPath(...args),
+	revealItemInDir: (...args: Parameters<typeof mockRevealItemInDir>) =>
+		mockRevealItemInDir(...args),
 }));
 
 vi.mock("@tauri-apps/plugin-notification", () => ({

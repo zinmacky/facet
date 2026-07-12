@@ -1,12 +1,13 @@
 {
 	"$schema": "../gen/schemas/desktop-schema.json",
 	"identifier": "default",
-	"description": "メインウィンドウの権限。Phase 1 の疎通確認用最小権限(core:default)に加え、renderer 配線(Phase 2 最終接続)で元動画/書き出し先フォルダのネイティブ選択に使う dialog プラグインの既定権限、bulk-download バグ修正で書き出し先フォルダをエクスプローラ等で開くために使う opener プラグインの既定権限(open-path のみ)、書き出し完了時のデスクトップ通知に使う notification プラグインの既定権限、Phase 4 Wave C(自動更新)で起動時チェック・ダウンロード・インストールに使う updater プラグインの既定権限一式(check/download/install/downloadAndInstall)と、更新適用後の再起動に使う process プラグインの restart 権限のみを追加する。",
+	"description": "メインウィンドウの権限。Phase 1 の疎通確認用最小権限(core:default)に加え、renderer 配線(Phase 2 最終接続)で元動画/書き出し先フォルダのネイティブ選択に使う dialog プラグインの既定権限、bulk-download バグ修正で書き出し先フォルダをエクスプローラ等で開くために使う opener プラグインの open-path 権限、書き出し結果画面(ExportDetail)の「再生」/「フォルダで表示」で使う opener プラグインの open-path(共用)/reveal-item-in-dir 権限、書き出し完了時のデスクトップ通知に使う notification プラグインの既定権限、Phase 4 Wave C(自動更新)で起動時チェック・ダウンロード・インストールに使う updater プラグインの既定権限一式(check/download/install/downloadAndInstall)と、更新適用後の再起動に使う process プラグインの restart 権限のみを追加する。",
 	"windows": ["main"],
 	"permissions": [
 		"core:default",
 		"dialog:default",
 		"opener:allow-open-path",
+		"opener:allow-reveal-item-in-dir",
 		"notification:default",
 		"updater:default",
 		"process:allow-restart"

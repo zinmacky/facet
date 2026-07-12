@@ -12,3 +12,13 @@ export function formatTime(seconds: number): string {
 export function clamp(value: number, min: number, max: number): number {
 	return Math.min(max, Math.max(min, value));
 }
+
+/**
+ * パス文字列の最後の要素(ファイル名)だけを取り出す。mac/Linux(`/`)・Windows(`\`)
+ * どちらの区切りにも対応する(desktop は両 OS 対応、`outputPath` は OS ネイティブの
+ * 区切りで返るため)。区切りが無ければそのまま返す。
+ */
+export function basename(path: string): string {
+	const idx = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+	return idx === -1 ? path : path.slice(idx + 1);
+}
