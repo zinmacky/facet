@@ -22,9 +22,9 @@ Facet desktop(`apps/desktop`)は `media-core` crate(`ffmpeg-next`)経由で FFmp
 リンクした exe に LGPL の DLL だけ差し替えて配布することは禁止(ライセンス上・
 動作上どちらの理由でも不可)。
 
-Wave B(`apps/desktop/crates/license-gate`)で、配布ビルドが実際に LGPL DLL に
-リンクされ GPL/nonfree コンポーネント(libx264 等)を含まないことを機械検証する
-ゲートを追加する予定。
+`apps/desktop/crates/license-gate`(Wave B)が、配布ビルドが実際に LGPL DLL に
+リンクされ GPL/nonfree コンポーネント(libx264 等)を含まないことを機械検証する。
+`scripts/run-license-gate.ps1` で PATH を `ffmpeg-dist/` に絞って実行する。
 
 ## リリースビルド手順(骨子)
 
@@ -36,8 +36,8 @@ Wave B(`apps/desktop/crates/license-gate`)で、配布ビルドが実際に LGPL
 3. `pnpm --filter @facet/desktop build:release` を実行する
    (`tauri build --config src-tauri/tauri.release.conf.json`)。
    - `tauri.release.conf.json` は `bundle.resources` で
-     `ffmpeg-dist/*.dll` を exe 隣接(`"./"`)に配置する設定のみを持つ
-     オーバーレイ(`tauri dev` には影響しない)。
+     `ffmpeg-dist/*.dll` と `LICENSES/COPYING.LGPLv3`(リポジトリ直下)を exe 隣接
+     (`"./"`)に配置する設定のみを持つオーバーレイ(`tauri dev` には影響しない)。
 4. 生成された NSIS インストーラ
    (`apps/desktop/src-tauri/target/release/bundle/nsis/*.exe`)を検証機に
    インストールし、**PATH から FFmpeg の bin ディレクトリを除外した状態**で
