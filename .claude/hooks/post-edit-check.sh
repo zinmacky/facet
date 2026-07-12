@@ -9,8 +9,10 @@
 #       「コミット前に実行」に書くこと(このリポジトリでは pnpm -r typecheck)
 #
 # グローバルフック(~/.claude/hooks/post-edit-check.sh)は .js/.mjs/.cjs/.json/
-# .sh/.py/.rb の構文チェックを担うが .ts/.tsx は検査しない。ここでは Biome lint で
-# TS/JS を lint する(構文エラー + lint エラーを含む上位検査)。
+# .sh/.py/.rb の構文チェックを担うが .ts/.tsx/.rs は検査しない。ここでは
+# TS/JS を Biome lint、.rs を rustfmt --check(構文エラーも検出)で検査する。
+# clippy はクレート全体コンパイルで per-file にできないためフック対象外
+# (CLAUDE.md のコミット前チェック側に記載)。
 set -euo pipefail
 
 input="$(cat)"
@@ -28,6 +30,7 @@ fi
 
 check_output=""
 status=0
+checker=""
 
 case "$file" in
   *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs)
@@ -42,7 +45,26 @@ case "$file" in
     [ -n "$project_dir" ] && [ -x "$biome_bin" ] || exit 0
     # lint のみ(整形差分は出さない)。Biome は biome.json を上位ディレクトリへ
     # 自動探索するため cwd に依存しない。警告は exit 0、エラーのみ非ゼロ。
+    checker="Biome lint"
     check_output="$("$biome_bin" lint "$file" 2>&1)" || status=$?
+    ;;
+  *.rs)
+    # rustfmt を解決する。Claude Code のフックは非ログインシェルで動くため
+    # ~/.cargo/bin が PATH に無いことがある(このマシンで実測)。フォールバックで拾う
+    rustfmt_bin="$(command -v rustfmt 2>/dev/null || true)"
+    if [ -z "$rustfmt_bin" ] && [ -x "$HOME/.cargo/bin/rustfmt" ]; then
+      rustfmt_bin="$HOME/.cargo/bin/rustfmt"
+    fi
+    [ -n "$rustfmt_bin" ] || exit 0
+    # rustfmt 単体は Cargo.toml の edition を読まないため明示する
+    # (apps/desktop/Cargo.toml の workspace edition = "2021" に合わせる。
+    # edition を上げたらここも更新)。rustfmt.toml(hard_tabs 等)は
+    # ファイルのディレクトリから上方探索されるよう cwd を合わせて実行する
+    checker="rustfmt --check"
+    # 注意: rustfmt は mod 宣言を辿って子モジュール(別ファイル)も検査するため、
+    # 編集ファイル以外の未整形が報告されることがある(--skip-children は
+    # nightly 限定のため使えない — stable では "Unrecognized option" になる)
+    check_output="$( (cd "$(dirname "$file")" && "$rustfmt_bin" --check --edition 2021 "$file") 2>&1)" || status=$?
     ;;
   *)
     # 対象外の拡張子はスキップ
@@ -61,7 +83,7 @@ if [ "$status" -ne 0 ]; then
 
   # エラー内容を Claude に渡す。truncate は ${var:0:N}(文字単位)で行う。
   # パイプ + head だと SIGPIPE × set -euo pipefail でフックごと死ぬため使わない
-  ctx="post-edit-check: ${file} の Biome lint に失敗しました。以下のエラーを確認して修正してください。
+  ctx="post-edit-check: ${file} の ${checker} に失敗しました。以下のエラーを確認して修正してください。
 ${check_output:0:2000}"
   jq -n --arg ctx "$ctx" \
     '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $ctx}}'
