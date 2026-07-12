@@ -61,7 +61,7 @@ export function OutputCard(props: OutputCardProps) {
 					<div className="flex items-center justify-between">
 						<span className="text-[11px] text-neutral-400">
 							最終プレビュー
-							{stale && <span className="ml-1 text-amber-400">(要更新)</span>}
+							{stale && <span className="ml-1 text-amber-700 dark:text-amber-400">(要更新)</span>}
 						</span>
 						{fresh && outputPath && (
 							<a
@@ -77,7 +77,7 @@ export function OutputCard(props: OutputCardProps) {
 					<div className="flex h-[32vh] w-full items-center justify-center rounded-lg bg-elevated/40">
 						<div
 							style={{ aspectRatio: boxRatio }}
-							className="flex h-full max-w-full items-center justify-center overflow-hidden rounded-md border border-line bg-black/40"
+							className="flex h-full max-w-full items-center justify-center overflow-hidden rounded-md border border-line bg-black/5 dark:bg-black/40"
 						>
 							{outputPath ? (
 								/* biome-ignore lint/a11y/useMediaCaption: 投稿確認用のプレビューで字幕データが存在しない */

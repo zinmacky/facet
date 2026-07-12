@@ -1,12 +1,65 @@
 @import "tailwindcss";
 @config "../tailwind.config.js";
 
-/* 最低限のベーススタイル。ダークな編集ツール調に固定する。 */
-@layer base {
-	:root {
-		color-scheme: dark;
-	}
+/*
+ * テーマ変数。html 要素の `.dark` クラス(lib/settings.tsx の SettingsProvider と
+ * index.html の FOUC 防止スクリプトが付け外しする)でライト/ダークを切り替える。
+ * tailwind.config.js の colors はこの変数を参照するだけなので、既存コンポーネントの
+ * クラス名(bg-panel / text-neutral-400 等)を変えずに全画面が追従する。
+ *
+ * neutral はダークのスケールを反転(50↔950, 100↔900, …)して定義する。
+ * 「text-neutral-100 = 濃い文字」「text-neutral-500 = 中間」という役割が
+ * 両テーマで同じになるようにするため。
+ */
+:root {
+	color-scheme: light;
+	--color-panel: #f4f5f7;
+	--color-surface: #ffffff;
+	--color-elevated: #e9ebf0;
+	--color-line: #d6dae1;
+	--color-accent: #3b6fe0;
+	--color-accent-hover: #2f5fc7;
+	--color-danger: #d43d4b;
+	--color-ok: #1e9e69;
+	--color-neutral-50: #0a0a0a;
+	--color-neutral-100: #171717;
+	--color-neutral-200: #262626;
+	--color-neutral-300: #404040;
+	--color-neutral-400: #525252;
+	/* 反転スケールそのまま(#737373)だと薄背景上のヒント文が AA(4.5:1)を割るため少し濃くする */
+	--color-neutral-500: #5d5d5d;
+	--color-neutral-600: #a3a3a3;
+	--color-neutral-700: #d4d4d4;
+	--color-neutral-800: #e5e5e5;
+	--color-neutral-900: #f5f5f5;
+	--color-neutral-950: #fafafa;
+}
 
+.dark {
+	color-scheme: dark;
+	--color-panel: #131417;
+	--color-surface: #1a1c21;
+	--color-elevated: #22252c;
+	--color-line: #2c3038;
+	--color-accent: #5b8cff;
+	--color-accent-hover: #77a0ff;
+	--color-danger: #f0616d;
+	--color-ok: #3ec38a;
+	--color-neutral-50: #fafafa;
+	--color-neutral-100: #f5f5f5;
+	--color-neutral-200: #e5e5e5;
+	--color-neutral-300: #d4d4d4;
+	--color-neutral-400: #a3a3a3;
+	--color-neutral-500: #737373;
+	--color-neutral-600: #525252;
+	--color-neutral-700: #404040;
+	--color-neutral-800: #262626;
+	--color-neutral-900: #171717;
+	--color-neutral-950: #0a0a0a;
+}
+
+/* 最低限のベーススタイル。配色は上のテーマ変数経由で切り替わる。 */
+@layer base {
 	html,
 	body,
 	#root {

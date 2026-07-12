@@ -53,7 +53,7 @@ export function ExportPreviewDetail({
 
 				<div
 					style={{ aspectRatio: boxRatio }}
-					className="flex w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/40"
+					className="flex w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/5 dark:bg-black/40"
 				>
 					{outputPath ? (
 						/* biome-ignore lint/a11y/useMediaCaption: 書き出し内容確認用のプレビューで字幕データが存在しない */

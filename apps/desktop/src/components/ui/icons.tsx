@@ -191,6 +191,27 @@ export function SpeakerMuteIcon({ size = 12, ...rest }: IconProps) {
 	);
 }
 
+/** 歯車(設定)。ヘッダの設定ボタンで使う。 */
+export function SettingsIcon({ size = 12, ...rest }: IconProps) {
+	return (
+		<svg
+			width={size}
+			height={size}
+			viewBox="0 0 12 12"
+			aria-hidden="true"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="1.2"
+			strokeLinecap="round"
+			strokeLinejoin="round"
+			{...rest}
+		>
+			<circle cx="6" cy="6" r="1.6" />
+			<path d="M6 1.2v1.3M6 9.5v1.3M10.8 6h-1.3M2.5 6H1.2M9.1 2.9l-.9.9M3.8 8.3l-.9.9M9.1 9.1l-.9-.9M3.8 3.7l-.9-.9" />
+		</svg>
+	);
+}
+
 /** 回転スピナー(ローディング)。 */
 export function SpinnerIcon({ size = 16, ...rest }: IconProps) {
 	return (

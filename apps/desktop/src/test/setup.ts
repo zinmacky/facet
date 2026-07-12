@@ -65,6 +65,24 @@ if (!Element.prototype.hasPointerCapture) {
 	Element.prototype.hasPointerCapture = () => false;
 }
 
+// jsdom は matchMedia を実装していない。SettingsProvider が "system" テーマの
+// 解決(prefers-color-scheme 判定)に使うため、最小スタブで補う。
+// matches: false 固定(= ライト相当)だが、既定テーマは "dark" なので既存テストの
+// 見た目には影響しない。値や change を制御したいテストは vi.stubGlobal で上書きする。
+if (typeof window.matchMedia !== "function") {
+	window.matchMedia = (query: string): MediaQueryList =>
+		({
+			matches: false,
+			media: query,
+			onchange: null,
+			addEventListener: () => {},
+			removeEventListener: () => {},
+			addListener: () => {},
+			removeListener: () => {},
+			dispatchEvent: () => false,
+		}) as MediaQueryList;
+}
+
 // jsdom は <video>/<audio> の再生を実装していない(play/pause/load は
 // "Not implemented" 警告を吐く)。ClipEditor・usePauseVideosOnHide が
 // 呼ぶため、テスト出力を汚さないよう no-op へ差し替える。

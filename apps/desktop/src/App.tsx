@@ -16,10 +16,11 @@ import { ExportScreen } from "./features/export/ExportScreen";
 import { UploadScreen } from "./features/upload/UploadScreen";
 import { WizardShell } from "./features/wizard/WizardShell";
 import { type ExportSummary, StepIndicator } from "./features/wizard/StepIndicator";
+import { SettingsDialog } from "./features/settings/SettingsDialog";
 import { Card } from "./components/ui/Card";
 import { Button } from "./components/ui/Button";
 import { IconButton } from "./components/ui/IconButton";
-import { PlusIcon } from "./components/ui/icons";
+import { PlusIcon, SettingsIcon } from "./components/ui/icons";
 import { useConfirm } from "./components/ui/confirm";
 
 /** 選択済みソース(実パス + probe 結果)。 */
@@ -63,6 +64,8 @@ export function App() {
 	const [resetToken, setResetToken] = useState(0);
 	// 連番カウンタ。削除後の再採番でも名前が衝突しないよう、単調増加させる。
 	const clipSeqRef = useRef(1);
+	// 設定ダイアログの開閉状態(ヘッダの歯車ボタンから開く)。
+	const [settingsOpen, setSettingsOpen] = useState(false);
 	const confirm = useConfirm();
 	// 元動画プレーヤー(ClipEditor)を命令的に操作するための参照。
 	// 編集画面から離れるときに再生を止めるために使う。
@@ -205,7 +208,7 @@ export function App() {
 					/>
 				</div>
 
-				<div className="flex justify-end">
+				<div className="flex items-center justify-end gap-3">
 					{source && (
 						<span className="font-mono text-[11px] text-neutral-500">
 							{source.probe.width}×{source.probe.height} ·{" "}
@@ -213,6 +216,13 @@ export function App() {
 							{source.probe.codec ? ` · ${source.probe.codec}` : ""}
 						</span>
 					)}
+					<IconButton
+						aria-label="設定"
+						title="設定"
+						onClick={() => setSettingsOpen(true)}
+					>
+						<SettingsIcon />
+					</IconButton>
 				</div>
 			</header>
 
@@ -311,6 +321,8 @@ export function App() {
 					),
 				}}
 			/>
+
+			<SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 		</div>
 	);
 }
