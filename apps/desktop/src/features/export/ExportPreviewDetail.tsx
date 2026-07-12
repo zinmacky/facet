@@ -2,12 +2,19 @@ import type { Clip } from "../../types";
 import { aspectRatio } from "../../types";
 import { convertFileSrc } from "../../lib/tauri";
 import type { PreviewState } from "../../lib/usePreview";
+import { clipPreviewSig } from "../../lib/clipSig";
 import { Button } from "../../components/ui/Button";
 
 /**
  * 中央: 選択中 clip 1 本ぶんのクロップ内容プレビュー。「書き出しを開始」前の画面用。
  * `preview_start`(低ビットレート・app キャッシュ)を使い、ユーザー向けの
  * ファイルダウンロード/保存は行わない(結果は画面内の <video> 表示のみ)。
+ *
+ * ウィザードは3画面(編集/書き出し/アップロード)を常時マウントするため、プレビュー
+ * 生成後に別画面でクロップ内容(トリム/クロップ/アスペクト)を編集して戻ってきても
+ * state はそのまま残る。表示のたびに生成時の sig(state.sig)と現在の clip の sig を
+ * 照合し、不一致なら古い video を表示せず「要更新」を案内する
+ * (UploadScreen の OutputCard にある stale バッジと同じ考え方)。
  */
 export function ExportPreviewDetail({
 	clip,
@@ -22,6 +29,9 @@ export function ExportPreviewDetail({
 }) {
 	const rendering = state?.rendering ?? false;
 	const outputPath = state?.outputPath;
+	const sig = clipPreviewSig(clip);
+	const fresh = outputPath !== undefined && state?.sig === sig;
+	const stale = outputPath !== undefined && !fresh;
 	const boxRatio = aspectRatio(clip.aspect) ?? 16 / 9;
 
 	return (
@@ -48,6 +58,11 @@ export function ExportPreviewDetail({
 					</h3>
 					<span className="shrink-0 text-[11px] text-neutral-400">
 						クロップ内容プレビュー
+						{stale && (
+							<span className="ml-1 text-amber-700 dark:text-amber-400">
+								(要更新)
+							</span>
+						)}
 					</span>
 				</div>
 
@@ -55,13 +70,18 @@ export function ExportPreviewDetail({
 					style={{ aspectRatio: boxRatio }}
 					className="flex w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/5 dark:bg-black/40"
 				>
-					{outputPath ? (
+					{fresh && outputPath ? (
 						/* biome-ignore lint/a11y/useMediaCaption: 書き出し内容確認用のプレビューで字幕データが存在しない */
 						<video
 							controls
 							src={convertFileSrc(outputPath)}
 							className="h-full w-full object-contain"
 						/>
+					) : stale ? (
+						<p className="max-w-[75%] text-center text-xs text-neutral-500">
+							編集内容が変わりました。「プレビュー更新」で最新のクロップ内容を
+							確認できます。
+						</p>
 					) : (
 						<p className="max-w-[75%] text-center text-xs text-neutral-500">
 							「プレビュー生成」でクロップ内容を確認できます(ファイルはアプリの
