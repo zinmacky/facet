@@ -198,12 +198,11 @@ pub fn reframe(
 	// (他ジョブと共有される有限リソース)より先に行うことで、既に同じ出力先へ
 	// 書き出し中の 2 本目がスロット空きを無駄に待つことも防げる。
 	// `_output_guard` は関数末尾までスコープに保持し、drop 時に RAII で解放される。
-	let _output_guard =
-		OutputPathRegistry::global()
-			.register(output_path)
-			.ok_or_else(|| MediaError::OutputBusy {
-				path: output_path.to_path_buf(),
-			})?;
+	let _output_guard = OutputPathRegistry::global()
+		.register(output_path)
+		.ok_or_else(|| MediaError::OutputBusy {
+			path: output_path.to_path_buf(),
+		})?;
 
 	// 同時エンコード数を制限するスロットを取得する(関数末尾までスコープに保持し、
 	// drop 時に RAII で解放される。`concurrency` モジュール冒頭コメント参照)。
@@ -827,7 +826,9 @@ mod tests {
 		let path = Path::new("/tmp/facet-desktop-test-output-busy-basic.mp4");
 		let registry = OutputPathRegistry::global();
 
-		let first_guard = registry.register(path).expect("first register should succeed");
+		let first_guard = registry
+			.register(path)
+			.expect("first register should succeed");
 		assert!(
 			registry.register(path).is_none(),
 			"second register for the same path should be rejected while the first is active"
@@ -889,7 +890,11 @@ mod tests {
 			on_progress: &on_progress,
 		};
 
-		let result = reframe(Path::new("/tmp/facet-desktop-test-output-busy-input.mp4"), path, options);
+		let result = reframe(
+			Path::new("/tmp/facet-desktop-test-output-busy-input.mp4"),
+			path,
+			options,
+		);
 		assert!(
 			matches!(result, Err(MediaError::OutputBusy { .. })),
 			"expected OutputBusy, got: {result:?}"
