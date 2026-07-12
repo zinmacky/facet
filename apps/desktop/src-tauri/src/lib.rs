@@ -16,6 +16,12 @@
 // 保存先フォルダを OS 既定のファイルマネージャで開く形にする
 // (`opener:default` 経由で renderer から直接呼ぶ。`@tauri-apps/plugin-opener`)。
 //
+// 書き出し完了通知: `tauri-plugin-notification` を追加する。書き出し(reframe)が
+// 完了した際にデスクトップ通知でユーザーに知らせるためで、invoke コマンドではなく
+// dialog/opener と同様プラグイン権限(capabilities/default.json の
+// `notification:default`)経由で renderer から直接呼ぶ
+// (`@tauri-apps/plugin-notification` で権限確認と通知発火を行う)。
+//
 // Phase 4 Wave C(自動更新): `tauri-plugin-updater` / `tauri-plugin-process` を追加する。
 // 起動時チェック→アプリ内通知→ダウンロード→再起動は invoke コマンドを介さず、
 // renderer が `@tauri-apps/plugin-updater`(`check`/`Update.download`/`Update.install`)・
@@ -38,6 +44,7 @@ pub fn run() {
 	tauri::Builder::default()
 		.plugin(tauri_plugin_dialog::init())
 		.plugin(tauri_plugin_opener::init())
+		.plugin(tauri_plugin_notification::init())
 		.plugin(tauri_plugin_updater::Builder::new().build())
 		.plugin(tauri_plugin_process::init())
 		.manage(JobsState::default())

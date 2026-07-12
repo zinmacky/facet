@@ -43,6 +43,13 @@
 //!   パイプラインとして動作する(`ReframeOptions` に音声の有効/無効フラグは存在しない
 //!   — `packages/ffmpeg-runner` の `-map 0:a?` と同じ「あれば通す」挙動)。
 //!   詳細な設計(trim/リサンプル/FIFO/pts 再基準化)は `audio.rs` モジュール冒頭コメント参照。
+//!   trim ありの場合、映像・音声はそれぞれ独立したタイムベースで trim の end を
+//!   判定する(`TrimWindow::classify`)ため、パケットループは**映像・音声のどちらも
+//!   trim end に到達するまで**継続する([`run_pipeline`] 内のパケットループ末尾の
+//!   コメント参照)。以前は映像側が先に end に到達した時点でループ全体を打ち切って
+//!   いたため、コンテナのインターリーブ順序次第で未処理の音声パケットが失われ、
+//!   trim 終端付近の音声/映像 duration が数十 ms 単位でズレる不具合があった
+//!   (修正済み)。
 //! - `concurrency`: [`reframe`] 冒頭で [`crate::concurrency::EncodeSlots::global`] から
 //!   スロットを取得し(関数末尾まで保持、RAII で解放)、同時エンコード数を制限する。
 //!   `Auto` 選択時のエンコーダ候補ループは
@@ -392,10 +399,15 @@ fn run_pipeline(
 	let mut filtered = frame::Video::empty();
 	let mut encoded = Packet::empty();
 	let mut frame_count: u64 = 0;
-	// trim の end に到達してループを早期終了したか(統合ガイド 2. `Stop`)。
+	// 映像側が trim の end に到達したか(統合ガイド 2. `Stop`)。true になった後は
+	// 以後の映像パケットのデコードをスキップする(下のパケットループ参照)。
 	// 早期終了時はデコーダ内部にまだ残っているかもしれない未取得フレームも
 	// (pts が単調増加である限り)すべて end 以降のため、デコーダ側の EOF flush は
 	// 行わずフィルタ/エンコーダの flush のみ行う。
+	// 注意: `stopped_early` が true になっても、音声パイプラインが自身の trim
+	// window で `Stop` と判定するまではパケットループ自体は継続する(下の
+	// ループ末尾のコメント参照 — インターリーブ順序依存で音声が早期に打ち切られる
+	// 不具合の修正)。
 	let mut stopped_early = false;
 	// 直近で得られたフレームの pts を秒に変換した値(`Progress.out_time_secs` の元)。
 	// フィルタ出力フレームの pts が稀に不明(`None`)な場合でも 0 に巻き戻らないよう、
@@ -409,37 +421,42 @@ fn run_pipeline(
 		}
 		let packet_stream_index = stream.index();
 		if packet_stream_index == ist_index {
-			decoder
-				.send_packet(&packet)
-				.map_err(|source| MediaError::Decode { source })?;
-			loop {
-				match decoder.receive_frame(&mut decoded) {
-					Ok(()) => {}
-					Err(err) if is_again_or_eof(&err) => break,
-					Err(source) => return Err(MediaError::Decode { source }),
-				}
-				match classify_and_rebase(&mut decoded, &frame_window) {
-					TrimDecision::Skip => continue,
-					TrimDecision::Stop => {
-						stopped_early = true;
-						break 'decode;
+			// 映像が既に trim の end に到達している(`stopped_early`)場合、これ以上
+			// 映像パケットをデコードする意味はない。ただし直後のコメントの通り、
+			// ループ自体(音声側の処理)はまだ打ち切らない。
+			if !stopped_early {
+				decoder
+					.send_packet(&packet)
+					.map_err(|source| MediaError::Decode { source })?;
+				loop {
+					match decoder.receive_frame(&mut decoded) {
+						Ok(()) => {}
+						Err(err) if is_again_or_eof(&err) => break,
+						Err(source) => return Err(MediaError::Decode { source }),
 					}
-					TrimDecision::Keep => {}
+					match classify_and_rebase(&mut decoded, &frame_window) {
+						TrimDecision::Skip => continue,
+						TrimDecision::Stop => {
+							stopped_early = true;
+							break;
+						}
+						TrimDecision::Keep => {}
+					}
+					push_to_filter(&mut graph, &decoded)?;
+					pull_filtered(
+						&mut graph,
+						&mut encoder_ctx,
+						&mut octx,
+						stream_index,
+						ist_time_base,
+						ost_time_base,
+						&mut filtered,
+						&mut encoded,
+						&mut frame_count,
+						&mut last_out_time_secs,
+						&mut progress_tracker,
+					)?;
 				}
-				push_to_filter(&mut graph, &decoded)?;
-				pull_filtered(
-					&mut graph,
-					&mut encoder_ctx,
-					&mut octx,
-					stream_index,
-					ist_time_base,
-					ost_time_base,
-					&mut filtered,
-					&mut encoded,
-					&mut frame_count,
-					&mut last_out_time_secs,
-					&mut progress_tracker,
-				)?;
 			}
 		} else if let Some(pipeline) = audio_pipeline.as_mut() {
 			// 音声ストリームのパケットは映像と同じループ内でインターリーブして
@@ -450,6 +467,25 @@ fn run_pipeline(
 		}
 		if cancel.is_cancelled() {
 			return Err(MediaError::Cancelled);
+		}
+		// 映像・音声の trim end はそれぞれ独立したタイムベースで判定されるため、
+		// コンテナのインターリーブ順序次第で「映像が先に end に到達する」ケースが
+		// ありうる。**旧実装はここで即座に `break 'decode`(パケットループ全体を
+		// 終了)していたため**、その時点でまだ demux されていない音声パケット
+		// (音声自身の trim window ではまだ `Keep` 対象)が一切処理されないまま
+		// 失われ、trim 終端付近の音声/映像 duration がインターリーブ順序に依存して
+		// 数十 ms 単位でズレる既知不具合の直接原因だった(`audio.rs` モジュール冒頭
+		// コメント参照)。修正: 映像側は `stopped_early` 以後デコードをスキップする
+		// だけに留め、音声パイプラインが自身の trim window で独立に `Stop` と
+		// 判定するまで(音声が無い場合は映像の `stopped_early` のみで即座に)
+		// ループを継続する。これにより残る誤差は AAC 1 フレーム(1024 サンプル)
+		// 分の量子化程度に収まる。
+		let audio_done = audio_pipeline
+			.as_ref()
+			.map(|pipeline| pipeline.is_stopped())
+			.unwrap_or(true);
+		if stopped_early && audio_done {
+			break 'decode;
 		}
 	}
 

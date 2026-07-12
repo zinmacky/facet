@@ -5,9 +5,12 @@ import {
 	mockConvertFileSrc,
 	mockDialogOpen,
 	mockInvoke,
+	mockIsPermissionGranted,
 	mockJoin,
 	mockListen,
 	mockOpenPath,
+	mockRequestPermission,
+	mockSendNotification,
 	resetTauriMocks,
 } from "./tauri-mock";
 
@@ -41,6 +44,15 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
 	openPath: (...args: Parameters<typeof mockOpenPath>) => mockOpenPath(...args),
+}));
+
+vi.mock("@tauri-apps/plugin-notification", () => ({
+	isPermissionGranted: (...args: Parameters<typeof mockIsPermissionGranted>) =>
+		mockIsPermissionGranted(...args),
+	requestPermission: (...args: Parameters<typeof mockRequestPermission>) =>
+		mockRequestPermission(...args),
+	sendNotification: (...args: Parameters<typeof mockSendNotification>) =>
+		mockSendNotification(...args),
 }));
 
 // CropOverlay は snap 有効時(固定アスペクト選択時)に ResizeObserver を使う。

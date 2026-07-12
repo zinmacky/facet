@@ -25,6 +25,8 @@ export type AppSettings = {
 	defaultExportDir: string | null;
 	/** 書き出し完了後に出力フォルダを自動で開く */
 	openFolderAfterExport: boolean;
+	/** 書き出し完了時に OS のデスクトップ通知を送る */
+	notifyOnExportComplete: boolean;
 	/** `reframe_start` へ渡すエンコーダ指定。"auto" は自動選択。 */
 	encoder: EncoderPreference;
 	/** `set_max_concurrent_encodes` へ渡す同時エンコード数(1〜4の整数)。 */
@@ -35,6 +37,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	theme: "dark", // 既定はダーク(現状の見た目を維持)
 	defaultExportDir: null,
 	openFolderAfterExport: false,
+	notifyOnExportComplete: false,
 	encoder: "auto",
 	maxConcurrentEncodes: 2,
 };
@@ -94,6 +97,10 @@ export function loadSettings(): AppSettings {
 				typeof obj.openFolderAfterExport === "boolean"
 					? obj.openFolderAfterExport
 					: DEFAULT_SETTINGS.openFolderAfterExport,
+			notifyOnExportComplete:
+				typeof obj.notifyOnExportComplete === "boolean"
+					? obj.notifyOnExportComplete
+					: DEFAULT_SETTINGS.notifyOnExportComplete,
 			encoder: isEncoderPreference(obj.encoder)
 				? obj.encoder
 				: DEFAULT_SETTINGS.encoder,
