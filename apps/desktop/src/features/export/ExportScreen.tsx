@@ -14,6 +14,7 @@ import {
 } from "../../lib/tauri";
 import { type PreviewState, usePreview } from "../../lib/usePreview";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
+import { getErrorMessage } from "../../lib/getErrorMessage";
 import { clipPreviewSig } from "../../lib/clipSig";
 import { uniqueBaseNames } from "../../lib/uniqueBaseName";
 import { formatTime } from "../../lib/format";
@@ -237,7 +238,7 @@ export function ExportScreen({
 					unsubsRef.current.delete(clip.id);
 					update({
 						status: "error",
-						error: err instanceof Error ? err.message : String(err),
+						error: getErrorMessage(err),
 					});
 				}
 			})();
@@ -370,7 +371,7 @@ export function ExportScreen({
 								{openFolderMutation.isError && (
 									<span className="text-xs text-danger">
 										フォルダを開けませんでした:{" "}
-										{(openFolderMutation.error as Error).message}
+										{getErrorMessage(openFolderMutation.error)}
 									</span>
 								)}
 							</div>

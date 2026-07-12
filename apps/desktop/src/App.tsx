@@ -7,6 +7,7 @@ import {
 	probeFile,
 } from "./lib/tauri";
 import { formatTime } from "./lib/format";
+import { getErrorMessage } from "./lib/getErrorMessage";
 import type { Clip } from "./types";
 import { sourceBaseName } from "./types";
 import { ClipList } from "./features/clips/ClipList";
@@ -201,7 +202,7 @@ export function App() {
 
 			{pickMutation.isError && (
 				<div className="border-b border-danger/30 bg-danger/10 px-4 py-2 text-xs text-danger">
-					読み込み失敗: {(pickMutation.error as Error).message}
+					読み込み失敗: {getErrorMessage(pickMutation.error)}
 				</div>
 			)}
 

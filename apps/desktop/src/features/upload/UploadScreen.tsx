@@ -28,6 +28,7 @@ import { type PreviewState, usePreview } from "../../lib/usePreview";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
 import { clipPreviewSig } from "../../lib/clipSig";
 import { uniqueBaseNames } from "../../lib/uniqueBaseName";
+import { getErrorMessage } from "../../lib/getErrorMessage";
 import { Modal } from "../../components/ui/Modal";
 import { Button } from "../../components/ui/Button";
 import { IconButton } from "../../components/ui/IconButton";
@@ -594,7 +595,7 @@ export function UploadScreen({
 		} catch (err) {
 			setPubStatus(output.id, {
 				kind: "error",
-				message: err instanceof Error ? err.message : String(err),
+				message: getErrorMessage(err),
 			});
 			throw err;
 		}
@@ -760,8 +761,7 @@ export function UploadScreen({
 									setBulkTask(t.output.id, { jobId: h.jobId });
 								})
 								.catch((err: unknown) => {
-									const message =
-										err instanceof Error ? err.message : String(err);
+									const message = getErrorMessage(err);
 									setBulkTask(t.output.id, { status: "error", error: message });
 									reject(err instanceof Error ? err : new Error(message));
 								});
@@ -810,7 +810,7 @@ export function UploadScreen({
 		void ensureRendered(post, output).catch((err: unknown) => {
 			setPubStatus(output.id, {
 				kind: "error",
-				message: err instanceof Error ? err.message : String(err),
+				message: getErrorMessage(err),
 			});
 		});
 	};
@@ -912,7 +912,7 @@ export function UploadScreen({
 								)}
 								{bulkExportMutation.isError && (
 									<span className="text-[11px] text-danger">
-										{(bulkExportMutation.error as Error).message}
+										{getErrorMessage(bulkExportMutation.error)}
 									</span>
 								)}
 								<Button
