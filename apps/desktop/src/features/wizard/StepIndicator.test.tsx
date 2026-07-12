@@ -83,4 +83,30 @@ describe("StepIndicator", () => {
 		);
 		expect(screen.getByText("1/3")).toBeInTheDocument();
 	});
+
+	it("書き出しが1件も開始されていない間(done=0 かつ running=0)はバッジを表示しない", () => {
+		render(
+			<StepIndicator
+				step="export"
+				canGoExport={true}
+				canGoUpload={true}
+				exportSummary={{ total: 3, done: 0, running: 0 }}
+				onSelect={vi.fn()}
+			/>,
+		);
+		expect(screen.queryByText("0/3")).not.toBeInTheDocument();
+	});
+
+	it("running > 0(実行中)になった時点でバッジを表示する", () => {
+		render(
+			<StepIndicator
+				step="export"
+				canGoExport={true}
+				canGoUpload={true}
+				exportSummary={{ total: 3, done: 0, running: 1 }}
+				onSelect={vi.fn()}
+			/>,
+		);
+		expect(screen.getByText("0/3")).toBeInTheDocument();
+	});
 });

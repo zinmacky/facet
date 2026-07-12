@@ -82,7 +82,8 @@ export function StepIndicator({
 							{STEP_LABELS[s]}
 							{s === "export" &&
 								exportSummary !== undefined &&
-								exportSummary.total > 0 && (
+								exportSummary.total > 0 &&
+								(exportSummary.done > 0 || exportSummary.running > 0) && (
 									<span className="rounded bg-elevated px-1 text-[10px] text-neutral-400">
 										{exportSummary.done}/{exportSummary.total}
 									</span>

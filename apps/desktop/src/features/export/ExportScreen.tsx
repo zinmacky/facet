@@ -16,6 +16,7 @@ import { type PreviewState, usePreview } from "../../lib/usePreview";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
 import { clipPreviewSig } from "../../lib/clipSig";
 import { uniqueBaseNames } from "../../lib/uniqueBaseName";
+import { formatTime } from "../../lib/format";
 import { Button } from "../../components/ui/Button";
 import { cn } from "../../components/ui/cn";
 import type { ExportSummary } from "../wizard/StepIndicator";
@@ -304,9 +305,9 @@ export function ExportScreen({
 		<section ref={rootRef} className="flex h-full min-h-0 flex-col">
 			<div className="min-h-0 flex-1 overflow-y-auto p-4">
 				{!started ? (
-					<div className="flex gap-4">
+					<div className="flex h-full min-h-0 gap-4">
 						{/* 中央: 選択中 clip のクロップ内容プレビュー */}
-						<div className="flex min-w-0 flex-1 flex-col gap-2">
+						<div className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2">
 							{selectedClip ? (
 								<ExportPreviewDetail
 									clip={selectedClip}
@@ -322,7 +323,7 @@ export function ExportScreen({
 						</div>
 
 						{/* 右: clip 一覧(プレビュー状態) */}
-						<div className="flex w-60 shrink-0 flex-col gap-1 overflow-y-auto border-l border-line pl-4">
+						<div className="flex min-h-0 w-60 shrink-0 flex-col gap-1 overflow-y-auto border-l border-line pl-4">
 							{clips.map((clip) => (
 								<ExportPreviewListItem
 									key={clip.id}
@@ -335,9 +336,9 @@ export function ExportScreen({
 						</div>
 					</div>
 				) : (
-					<div className="flex gap-4">
+					<div className="flex h-full min-h-0 gap-4">
 						{/* 中央: 選択中 clip の詳細 */}
-						<div className="flex min-w-0 flex-1 flex-col gap-2">
+						<div className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2">
 							{selectedClip ? (
 								<ExportDetail
 									clip={selectedClip}
@@ -351,7 +352,7 @@ export function ExportScreen({
 						</div>
 
 						{/* 右: 一括DL + clip 一覧 */}
-						<div className="flex w-60 shrink-0 flex-col gap-3 border-l border-line pl-4">
+						<div className="flex min-h-0 w-60 shrink-0 flex-col gap-3 border-l border-line pl-4">
 							<div className="flex flex-col gap-1.5">
 								<Button
 									size="sm"
@@ -374,7 +375,7 @@ export function ExportScreen({
 								)}
 							</div>
 
-							<div className="flex flex-col gap-1 overflow-y-auto">
+							<div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
 								{clips.map((clip) => (
 									<ExportListItem
 										key={clip.id}
@@ -440,49 +441,58 @@ function ExportListItem({
 	const pending = task === undefined;
 	const status = task?.status ?? "running";
 	const ratio = task?.ratio ?? 0;
+	const length = Math.max(0, clip.trim.end - clip.trim.start);
 
 	return (
 		<button
 			type="button"
 			onClick={onSelect}
 			className={cn(
-				"flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-left transition-colors",
+				"flex flex-col gap-1 rounded-md border px-2 py-1.5 text-left transition-colors",
 				selected
 					? "border-accent bg-accent/10"
 					: "border-transparent hover:bg-elevated",
 			)}
 		>
-			<span
-				className="truncate font-mono text-xs text-neutral-200"
-				title={`${clip.name}.mp4`}
-			>
-				{clip.name}.mp4
-			</span>
-			<span className="flex shrink-0 items-center gap-1.5">
-				{status === "running" && task?.notice && (
-					<span
-						className="rounded bg-amber-400/15 px-1 text-[11px] font-medium text-amber-400"
-						title={task.notice}
-					>
-						SW
-					</span>
-				)}
+			<span className="flex items-center justify-between gap-2">
 				<span
-					className={cn(
-						"text-[11px]",
-						status === "done" && "text-ok",
-						status === "error" && "text-danger",
-						status === "running" && "text-neutral-400",
-					)}
+					className="truncate font-mono text-xs text-neutral-200"
+					title={`${clip.name}.mp4`}
 				>
-					{pending
-						? "待機中"
-						: status === "done"
-							? "完了"
-							: status === "error"
-								? "失敗"
-								: `${Math.round(ratio * 100)}%`}
+					{clip.name}.mp4
 				</span>
+				<span className="flex shrink-0 items-center gap-1.5">
+					{status === "running" && task?.notice && (
+						<span
+							className="rounded bg-amber-400/15 px-1 text-[11px] font-medium text-amber-400"
+							title={task.notice}
+						>
+							SW
+						</span>
+					)}
+					<span
+						className={cn(
+							"text-[11px]",
+							status === "done" && "text-ok",
+							status === "error" && "text-danger",
+							status === "running" && "text-neutral-400",
+						)}
+					>
+						{pending
+							? "待機中"
+							: status === "done"
+								? "完了"
+								: status === "error"
+									? "失敗"
+									: `${Math.round(ratio * 100)}%`}
+					</span>
+				</span>
+			</span>
+			<span className="flex items-center gap-2 text-[11px] text-neutral-400">
+				<span className="rounded bg-panel px-1.5 py-0.5 font-medium text-neutral-300">
+					{clip.aspect === "free" ? "自由" : clip.aspect}
+				</span>
+				<span className="font-mono tabular-nums">{formatTime(length)}</span>
 			</span>
 		</button>
 	);
@@ -502,39 +512,48 @@ function ExportPreviewListItem({
 }) {
 	const rendering = state?.rendering ?? false;
 	const done = state?.outputPath !== undefined && !rendering;
+	const length = Math.max(0, clip.trim.end - clip.trim.start);
 
 	return (
 		<button
 			type="button"
 			onClick={onSelect}
 			className={cn(
-				"flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-left transition-colors",
+				"flex flex-col gap-1 rounded-md border px-2 py-1.5 text-left transition-colors",
 				selected
 					? "border-accent bg-accent/10"
 					: "border-transparent hover:bg-elevated",
 			)}
 		>
-			<span
-				className="truncate font-mono text-xs text-neutral-200"
-				title={`${clip.name}.mp4`}
-			>
-				{clip.name}.mp4
+			<span className="flex items-center justify-between gap-2">
+				<span
+					className="truncate font-mono text-xs text-neutral-200"
+					title={`${clip.name}.mp4`}
+				>
+					{clip.name}.mp4
+				</span>
+				<span
+					className={cn(
+						"shrink-0 text-[11px]",
+						state?.error && "text-danger",
+						!state?.error && done && "text-ok",
+						!state?.error && !done && "text-neutral-400",
+					)}
+				>
+					{state?.error
+						? "失敗"
+						: rendering
+							? "生成中…"
+							: done
+								? "プレビュー済み"
+								: "未生成"}
+				</span>
 			</span>
-			<span
-				className={cn(
-					"shrink-0 text-[11px]",
-					state?.error && "text-danger",
-					!state?.error && done && "text-ok",
-					!state?.error && !done && "text-neutral-400",
-				)}
-			>
-				{state?.error
-					? "失敗"
-					: rendering
-						? "生成中…"
-						: done
-							? "プレビュー済み"
-							: "未生成"}
+			<span className="flex items-center gap-2 text-[11px] text-neutral-400">
+				<span className="rounded bg-panel px-1.5 py-0.5 font-medium text-neutral-300">
+					{clip.aspect === "free" ? "自由" : clip.aspect}
+				</span>
+				<span className="font-mono tabular-nums">{formatTime(length)}</span>
 			</span>
 		</button>
 	);
@@ -561,23 +580,35 @@ function ExportPreviewDetail({
 	const boxRatio = aspectRatio(clip.aspect) ?? 16 / 9;
 
 	return (
-		<div className="flex flex-col gap-2">
-			<div className="flex items-center justify-between gap-2">
-				<h3
-					className="truncate font-mono text-sm text-neutral-100"
-					title={`${clip.name}.mp4`}
-				>
-					{clip.name}.mp4
-				</h3>
-				<span className="shrink-0 text-[11px] text-neutral-400">
-					クロップ内容プレビュー
-				</span>
-			</div>
+		<div className="flex h-full min-h-0 w-full flex-col items-center justify-center rounded-lg bg-panel/40 p-4">
+			{/*
+			 * ファイル名 + プレビュー枠 + 生成ボタンを 1 つの縦スタックにまとめ、
+			 * スタックごと縦センターに置く(枠を flex-1 で伸ばすと、横長アスペクトでは
+			 * 枠だけが縦センターに contain され、ボタンが下端に取り残されて視覚グループが
+			 * 分断される)。枠の高さは「幅 = min(横いっぱい, 利用可能な縦空間 × アスペクト比)」
+			 * から従属的に決まる — 300px はヘッダ/フッタ/タイトル行/ボタン行ぶんの固定オフセット。
+			 */}
+			<div
+				className="flex min-h-0 flex-col gap-3"
+				style={{
+					width: `min(100%, max(280px, calc((100vh - 300px) * ${boxRatio})))`,
+				}}
+			>
+				<div className="flex shrink-0 items-center justify-between gap-2">
+					<h3
+						className="truncate font-mono text-sm text-neutral-100"
+						title={`${clip.name}.mp4`}
+					>
+						{clip.name}.mp4
+					</h3>
+					<span className="shrink-0 text-[11px] text-neutral-400">
+						クロップ内容プレビュー
+					</span>
+				</div>
 
-			<div className="flex h-[52vh] w-full items-center justify-center rounded-lg bg-panel/40">
 				<div
 					style={{ aspectRatio: boxRatio }}
-					className="flex h-full max-w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/40"
+					className="flex w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/40"
 				>
 					{outputPath ? (
 						/* biome-ignore lint/a11y/useMediaCaption: 書き出し内容確認用のプレビューで字幕データが存在しない */
@@ -593,23 +624,23 @@ function ExportPreviewDetail({
 						</p>
 					)}
 				</div>
-			</div>
 
-			<div className="flex items-center gap-2">
-				<Button
-					variant="secondary"
-					size="sm"
-					onClick={onGenerate}
-					disabled={rendering}
-				>
-					{rendering ? "生成中…" : outputPath ? "プレビュー更新" : "プレビュー生成"}
-				</Button>
-				{rendering && (
-					<Button variant="ghost" size="sm" onClick={onCancel}>
-						キャンセル
+				<div className="flex shrink-0 items-center justify-center gap-2">
+					<Button
+						variant="secondary"
+						size="sm"
+						onClick={onGenerate}
+						disabled={rendering}
+					>
+						{rendering ? "生成中…" : outputPath ? "プレビュー更新" : "プレビュー生成"}
 					</Button>
-				)}
-				{state?.error && <p className="text-xs text-danger">{state.error}</p>}
+					{rendering && (
+						<Button variant="ghost" size="sm" onClick={onCancel}>
+							キャンセル
+						</Button>
+					)}
+					{state?.error && <p className="text-xs text-danger">{state.error}</p>}
+				</div>
 			</div>
 		</div>
 	);
@@ -631,25 +662,32 @@ function ExportDetail({
 	const boxRatio = aspectRatio(clip.aspect) ?? 16 / 9;
 
 	return (
-		<div className="flex flex-col gap-2">
-			<div className="flex items-center justify-between gap-2">
-				<h3
-					className="truncate font-mono text-sm text-neutral-100"
-					title={`${clip.name}.mp4`}
-				>
-					{clip.name}.mp4
-				</h3>
-				{status === "running" && task?.fps !== undefined && (
-					<span className="shrink-0 text-[11px] text-neutral-500">
-						{Math.round(task.fps)}fps
-					</span>
-				)}
-			</div>
+		<div className="flex h-full min-h-0 w-full flex-col items-center justify-center rounded-lg bg-panel/40 p-4">
+			{/* ExportPreviewDetail と同じ縦スタック構造(ファイル名 + 枠 + 補足行を
+			    1 グループとして縦センター)。幅の式も共有する。 */}
+			<div
+				className="flex min-h-0 flex-col gap-3"
+				style={{
+					width: `min(100%, max(280px, calc((100vh - 300px) * ${boxRatio})))`,
+				}}
+			>
+				<div className="flex shrink-0 items-center justify-between gap-2">
+					<h3
+						className="truncate font-mono text-sm text-neutral-100"
+						title={`${clip.name}.mp4`}
+					>
+						{clip.name}.mp4
+					</h3>
+					{status === "running" && task?.fps !== undefined && (
+						<span className="shrink-0 text-[11px] text-neutral-500">
+							{Math.round(task.fps)}fps
+						</span>
+					)}
+				</div>
 
-			<div className="flex h-[52vh] w-full items-center justify-center rounded-lg bg-panel/40">
 				<div
 					style={{ aspectRatio: boxRatio }}
-					className="flex h-full max-w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/40"
+					className="flex w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/40"
 				>
 					{status === "done" && task?.outputPath ? (
 						// biome-ignore lint/a11y/useMediaCaption: 書き出し結果のプレビューで字幕データが存在しない
@@ -694,16 +732,16 @@ function ExportDetail({
 						</div>
 					)}
 				</div>
-			</div>
 
-			{status === "done" && task?.outputPath && (
-				<p
-					className="truncate font-mono text-[11px] text-neutral-500"
-					title={task.outputPath}
-				>
-					{task.outputPath}
-				</p>
-			)}
+				{status === "done" && task?.outputPath && (
+					<p
+						className="truncate font-mono text-[11px] text-neutral-500"
+						title={task.outputPath}
+					>
+						{task.outputPath}
+					</p>
+				)}
+			</div>
 		</div>
 	);
 }
