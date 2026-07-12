@@ -33,6 +33,13 @@ tauri-plugin-dialog = "2"
 # ローカルへ直接書き出すため、ZIP 化ではなく「保存先フォルダを開く」形で完結させる
 # (bulk-download バグ修正、docs/desktop-migration-plan.md の既知ギャップ対応)。
 tauri-plugin-opener = "2"
+# Phase 4 Wave C: 自動更新(起動時チェック→アプリ内通知→ダウンロード→再起動)。
+# tauri-plugin-updater が latest.json(GitHub Releases)の取得・署名検証・
+# インストーラ実行までを担う。tauri-plugin-process は restart コマンドを提供し、
+# renderer から `@tauri-apps/plugin-process` の `relaunch()` を呼ぶために必要
+# (登録しないと invoke が失敗する)。
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # reframe/probe コマンドの実処理(Wave 5: コマンド境界の配線)。

@@ -17,6 +17,7 @@ import { UploadScreen } from "./features/upload/UploadScreen";
 import { WizardShell } from "./features/wizard/WizardShell";
 import { type ExportSummary, StepIndicator } from "./features/wizard/StepIndicator";
 import { SettingsDialog } from "./features/settings/SettingsDialog";
+import { UpdateNotification } from "./features/update/UpdateNotification";
 import { useEncodeSettingsSync } from "./lib/useEncodeSettingsSync";
 import { Card } from "./components/ui/Card";
 import { Button } from "./components/ui/Button";
@@ -327,6 +328,7 @@ export function App() {
 			/>
 
 			<SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+			<UpdateNotification />
 		</div>
 	);
 }
