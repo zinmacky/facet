@@ -106,6 +106,54 @@ fn has_video_stream(path: &Path) -> bool {
 	!String::from_utf8_lossy(&output.stdout).trim().is_empty()
 }
 
+struct VideoStreamInfo {
+	r_frame_rate: String,
+	nb_frames: u64,
+}
+
+/// `ffprobe` で最初の映像ストリームの r_frame_rate/nb_frames を読む。
+fn ffprobe_video_info(path: &Path) -> Option<VideoStreamInfo> {
+	let output = Command::new("ffprobe")
+		.args([
+			"-v",
+			"error",
+			"-select_streams",
+			"v:0",
+			"-show_entries",
+			"stream=r_frame_rate,nb_frames",
+			"-of",
+			"csv=p=0",
+		])
+		.arg(path)
+		.output()
+		.expect("ffprobe を起動できること(PATH に通っていること)");
+	assert!(
+		output.status.success(),
+		"ffprobe の実行に失敗しました: {path:?}"
+	);
+	let text = String::from_utf8_lossy(&output.stdout);
+	let line = text.trim();
+	if line.is_empty() {
+		return None;
+	}
+	let parts: Vec<&str> = line.split(',').collect();
+	let [r_frame_rate, nb_frames] = parts.as_slice() else {
+		panic!("想定外の ffprobe 出力: {line}");
+	};
+	Some(VideoStreamInfo {
+		r_frame_rate: r_frame_rate.to_string(),
+		nb_frames: nb_frames.parse().expect("nb_frames は整数のはず"),
+	})
+}
+
+/// `"30/1"` や `"30000/1001"` 形式の `r_frame_rate` を fps(f64)へ変換する。
+fn parse_frame_rate(raw: &str) -> f64 {
+	let (num, den) = raw.split_once('/').expect("r_frame_rate は分数形式のはず");
+	let num: f64 = num.parse().expect("r_frame_rate の分子は整数のはず");
+	let den: f64 = den.parse().expect("r_frame_rate の分母は整数のはず");
+	num / den
+}
+
 fn run_reframe(input: &Path, output: &Path, trim: Option<Trim>) -> Result<String, String> {
 	let preset = Preset {
 		name: "audio-regression-test".to_string(),
@@ -325,6 +373,102 @@ fn trimmed_stereo_input_produces_audio_track_covering_the_trim_window() {
 		"trim 後の AAC フレーム数が期待値(約 2 秒分)に近いこと: got={}, expected≈{:.1}",
 		audio.nb_frames,
 		expected
+	);
+
+	let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+#[ignore = "実 ffmpeg/ffprobe が PATH に必要。cargo test -p media-core --test audio_regression -- --ignored"]
+fn trim_end_keeps_audio_and_video_durations_close_regardless_of_interleave_pressure() {
+	// 回帰対象: pipeline.rs のパケットループが「映像側が trim の end に到達した瞬間、
+	// 音声パイプラインがまだ自身の trim end に到達していなくてもパケットループ全体を
+	// 打ち切る」実装になっていると、コンテナのインターリーブ順序次第で未処理の音声
+	// パケットが失われ、trim 終端付近の音声/映像 duration がズレうる(修正前の
+	// `break 'decode` 直呼び出し。pipeline.rs `run_pipeline` のパケットループ末尾の
+	// コメント参照)。
+	//
+	// この入力は GOP を大きく(`-g 900`、実質 1 GOP)・B フレームを多く(`-bf 8`)して
+	// デコード遅延を増やし、`-max_interleave_delta` を大きくしてマルチプレクサの
+	// インターリーブ猶予を広げる — 実機検証で「映像の trim end 到達タイミング」を
+	// できるだけ動かし、インターリーブ順序依存の影響が出やすい構成にしている。
+	//
+	// 期待値: 音声/映像の実尺(パケット数から逆算した実際の収録尺、mp4 の
+	// track duration メタデータではなく `nb_frames` ベース)の差は、AAC の
+	// フレーム粒度(1024 サンプル ≈ 21.3ms @48kHz)に起因する原理的な残差の範囲
+	// (数フレーム分、`ALLOWED_DIFF_MS` 参照)に収まること。これを大きく超える
+	// (実測では数百 ms 規模になりうる)場合は、インターリーブ順序依存の
+	// パケット取りこぼしが再発したことを示す。
+	let input = scratch_path("trim_interleave_pressure_in.mp4");
+	let output = scratch_path("trim_interleave_pressure_out.mp4");
+	let _ = std::fs::remove_file(&output);
+
+	generate_input(
+		&input,
+		&[
+			"-f",
+			"lavfi",
+			"-i",
+			"testsrc2=duration=15:size=640x360:rate=30",
+			"-f",
+			"lavfi",
+			"-i",
+			"sine=frequency=440:duration=15",
+			"-c:v",
+			"libx264",
+			"-bf",
+			"8",
+			"-g",
+			"900",
+			"-refs",
+			"4",
+			"-pix_fmt",
+			"yuv420p",
+			"-c:a",
+			"aac",
+			"-ar",
+			"48000",
+			"-ac",
+			"2",
+			"-max_interleave_delta",
+			"10000000",
+			"-shortest",
+		],
+	);
+
+	// 意図的にフレーム/サンプル境界に揃わない値にする(境界の丸め自体は別問題として
+	// 許容するが、境界がどちらのグリッドにも揃わない「典型的な」trim 指定でも
+	// インターリーブ順依存の破綻(数百 ms 規模のズレ)が起きないことを確認する)。
+	let trim = Trim {
+		start: 1.111,
+		end: 8.888,
+	};
+	let result = run_reframe(&input, &output, Some(trim));
+	let _ = std::fs::remove_file(&input);
+	result.expect("trim ありでも reframe は成功すること");
+
+	let audio = ffprobe_audio_info(&output).expect("trim 後も音声ストリームが存在すること");
+	let video = ffprobe_video_info(&output).expect("trim 後も映像ストリームが存在すること");
+
+	let video_content_secs = video.nb_frames as f64 / parse_frame_rate(&video.r_frame_rate);
+	let audio_content_secs = (audio.nb_frames as f64 * 1024.0) / audio.sample_rate as f64;
+	let diff_ms = (audio_content_secs - video_content_secs).abs() * 1000.0;
+
+	// AAC 1 フレーム(1024 サンプル @48kHz ≈ 21.3ms)の数フレーム分までを原理的な
+	// 残差として許容する(trim 境界が音声のフレーム境界に対して持つ最大位相ズレは
+	// 前後合わせて 1 フレーム分、加えてエンコーダ側の末尾パディングで最大 1 フレーム
+	// 分。実測では 20〜31ms 程度)。インターリーブ順依存で音声が丸ごと取りこぼされる
+	// 不具合が再発した場合、この桁を大きく超える(数百 ms 規模)ズレになるため、
+	// 十分な安全マージンを持った上でなお回帰を検知できる。
+	const ALLOWED_DIFF_MS: f64 = 100.0;
+	assert!(
+		diff_ms <= ALLOWED_DIFF_MS,
+		"trim 終端付近の音声/映像 duration の差が大きすぎる(インターリーブ順序依存の \
+		 取りこぼしを疑う): video_content_secs={video_content_secs:.5} \
+		 audio_content_secs={audio_content_secs:.5} diff_ms={diff_ms:.2} \
+		 (nb_video_frames={}, nb_audio_frames={})",
+		video.nb_frames,
+		audio.nb_frames,
 	);
 
 	let _ = std::fs::remove_file(&output);
