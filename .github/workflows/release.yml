@@ -107,6 +107,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
+          # tauri-action は projectPath 内の lockfile でパッケージマネージャを自動判定
+          # するが、pnpm workspace の lockfile はリポジトリルートにあるため npm に
+          # フォールバックし `npm run tauri` が Missing script で失敗する(v0.1.0 の
+          # 2回目ビルドで実際に発生)。pnpm 経由で tauri CLI を起動するよう明示する。
+          tauriScript: pnpm tauri
           args: --config src-tauri/tauri.release.conf.json
           tagName: v__VERSION__
           releaseName: "Facet desktop v__VERSION__"
