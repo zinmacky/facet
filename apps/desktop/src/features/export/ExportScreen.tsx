@@ -580,23 +580,35 @@ function ExportPreviewDetail({
 	const boxRatio = aspectRatio(clip.aspect) ?? 16 / 9;
 
 	return (
-		<div className="flex h-full min-h-0 flex-col gap-2">
-			<div className="flex shrink-0 items-center justify-between gap-2">
-				<h3
-					className="truncate font-mono text-sm text-neutral-100"
-					title={`${clip.name}.mp4`}
-				>
-					{clip.name}.mp4
-				</h3>
-				<span className="shrink-0 text-[11px] text-neutral-400">
-					クロップ内容プレビュー
-				</span>
-			</div>
+		<div className="flex h-full min-h-0 w-full flex-col items-center justify-center rounded-lg bg-panel/40 p-4">
+			{/*
+			 * ファイル名 + プレビュー枠 + 生成ボタンを 1 つの縦スタックにまとめ、
+			 * スタックごと縦センターに置く(枠を flex-1 で伸ばすと、横長アスペクトでは
+			 * 枠だけが縦センターに contain され、ボタンが下端に取り残されて視覚グループが
+			 * 分断される)。枠の高さは「幅 = min(横いっぱい, 利用可能な縦空間 × アスペクト比)」
+			 * から従属的に決まる — 300px はヘッダ/フッタ/タイトル行/ボタン行ぶんの固定オフセット。
+			 */}
+			<div
+				className="flex min-h-0 flex-col gap-3"
+				style={{
+					width: `min(100%, max(280px, calc((100vh - 300px) * ${boxRatio})))`,
+				}}
+			>
+				<div className="flex shrink-0 items-center justify-between gap-2">
+					<h3
+						className="truncate font-mono text-sm text-neutral-100"
+						title={`${clip.name}.mp4`}
+					>
+						{clip.name}.mp4
+					</h3>
+					<span className="shrink-0 text-[11px] text-neutral-400">
+						クロップ内容プレビュー
+					</span>
+				</div>
 
-			<div className="flex min-h-0 flex-1 w-full items-center justify-center rounded-lg bg-panel/40">
 				<div
 					style={{ aspectRatio: boxRatio }}
-					className="flex max-h-full max-w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/40"
+					className="flex w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/40"
 				>
 					{outputPath ? (
 						/* biome-ignore lint/a11y/useMediaCaption: 書き出し内容確認用のプレビューで字幕データが存在しない */
@@ -612,23 +624,23 @@ function ExportPreviewDetail({
 						</p>
 					)}
 				</div>
-			</div>
 
-			<div className="flex shrink-0 items-center justify-center gap-2">
-				<Button
-					variant="secondary"
-					size="sm"
-					onClick={onGenerate}
-					disabled={rendering}
-				>
-					{rendering ? "生成中…" : outputPath ? "プレビュー更新" : "プレビュー生成"}
-				</Button>
-				{rendering && (
-					<Button variant="ghost" size="sm" onClick={onCancel}>
-						キャンセル
+				<div className="flex shrink-0 items-center justify-center gap-2">
+					<Button
+						variant="secondary"
+						size="sm"
+						onClick={onGenerate}
+						disabled={rendering}
+					>
+						{rendering ? "生成中…" : outputPath ? "プレビュー更新" : "プレビュー生成"}
 					</Button>
-				)}
-				{state?.error && <p className="text-xs text-danger">{state.error}</p>}
+					{rendering && (
+						<Button variant="ghost" size="sm" onClick={onCancel}>
+							キャンセル
+						</Button>
+					)}
+					{state?.error && <p className="text-xs text-danger">{state.error}</p>}
+				</div>
 			</div>
 		</div>
 	);
@@ -650,25 +662,32 @@ function ExportDetail({
 	const boxRatio = aspectRatio(clip.aspect) ?? 16 / 9;
 
 	return (
-		<div className="flex h-full min-h-0 flex-col gap-2">
-			<div className="flex shrink-0 items-center justify-between gap-2">
-				<h3
-					className="truncate font-mono text-sm text-neutral-100"
-					title={`${clip.name}.mp4`}
-				>
-					{clip.name}.mp4
-				</h3>
-				{status === "running" && task?.fps !== undefined && (
-					<span className="shrink-0 text-[11px] text-neutral-500">
-						{Math.round(task.fps)}fps
-					</span>
-				)}
-			</div>
+		<div className="flex h-full min-h-0 w-full flex-col items-center justify-center rounded-lg bg-panel/40 p-4">
+			{/* ExportPreviewDetail と同じ縦スタック構造(ファイル名 + 枠 + 補足行を
+			    1 グループとして縦センター)。幅の式も共有する。 */}
+			<div
+				className="flex min-h-0 flex-col gap-3"
+				style={{
+					width: `min(100%, max(280px, calc((100vh - 300px) * ${boxRatio})))`,
+				}}
+			>
+				<div className="flex shrink-0 items-center justify-between gap-2">
+					<h3
+						className="truncate font-mono text-sm text-neutral-100"
+						title={`${clip.name}.mp4`}
+					>
+						{clip.name}.mp4
+					</h3>
+					{status === "running" && task?.fps !== undefined && (
+						<span className="shrink-0 text-[11px] text-neutral-500">
+							{Math.round(task.fps)}fps
+						</span>
+					)}
+				</div>
 
-			<div className="flex min-h-0 flex-1 w-full items-center justify-center rounded-lg bg-panel/40">
 				<div
 					style={{ aspectRatio: boxRatio }}
-					className="flex max-h-full max-w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/40"
+					className="flex w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/40"
 				>
 					{status === "done" && task?.outputPath ? (
 						// biome-ignore lint/a11y/useMediaCaption: 書き出し結果のプレビューで字幕データが存在しない
@@ -713,16 +732,16 @@ function ExportDetail({
 						</div>
 					)}
 				</div>
-			</div>
 
-			{status === "done" && task?.outputPath && (
-				<p
-					className="truncate font-mono text-[11px] text-neutral-500"
-					title={task.outputPath}
-				>
-					{task.outputPath}
-				</p>
-			)}
+				{status === "done" && task?.outputPath && (
+					<p
+						className="truncate font-mono text-[11px] text-neutral-500"
+						title={task.outputPath}
+					>
+						{task.outputPath}
+					</p>
+				)}
+			</div>
 		</div>
 	);
 }
