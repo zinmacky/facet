@@ -21,6 +21,15 @@
 // dialog/opener と同様プラグイン権限(capabilities/default.json の
 // `notification:default`)経由で renderer から直接呼ぶ
 // (`@tauri-apps/plugin-notification` で権限確認と通知発火を行う)。
+//
+// Phase 4 Wave C(自動更新): `tauri-plugin-updater` / `tauri-plugin-process` を追加する。
+// 起動時チェック→アプリ内通知→ダウンロード→再起動は invoke コマンドを介さず、
+// renderer が `@tauri-apps/plugin-updater`(`check`/`Update.download`/`Update.install`)・
+// `@tauri-apps/plugin-process`(`relaunch`)をプラグイン権限経由で直接呼ぶ
+// (capabilities/default.json の `updater:default`/`process:allow-restart`)。
+// 更新の配布元・公開鍵・Windows のインストールモードは tauri.conf.json の
+// `plugins.updater` で設定する(pubkey はユーザーの鍵生成待ちのプレースホルダ — 同ファイルの
+// コメント参照)。
 mod commands;
 
 use commands::reframe::JobsState;
@@ -36,6 +45,8 @@ pub fn run() {
 		.plugin(tauri_plugin_dialog::init())
 		.plugin(tauri_plugin_opener::init())
 		.plugin(tauri_plugin_notification::init())
+		.plugin(tauri_plugin_updater::Builder::new().build())
+		.plugin(tauri_plugin_process::init())
 		.manage(JobsState::default())
 		.invoke_handler(tauri::generate_handler![
 			ping,

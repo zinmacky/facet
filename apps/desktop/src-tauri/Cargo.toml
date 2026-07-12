@@ -36,6 +36,13 @@ tauri-plugin-opener = "2"
 # 書き出し完了時のデスクトップ通知用。renderer から `@tauri-apps/plugin-notification`
 # 経由で権限確認と通知発火を行う(`notification:default` 権限、capabilities/default.json 参照)。
 tauri-plugin-notification = "2"
+# Phase 4 Wave C: 自動更新(起動時チェック→アプリ内通知→ダウンロード→再起動)。
+# tauri-plugin-updater が latest.json(GitHub Releases)の取得・署名検証・
+# インストーラ実行までを担う。tauri-plugin-process は restart コマンドを提供し、
+# renderer から `@tauri-apps/plugin-process` の `relaunch()` を呼ぶために必要
+# (登録しないと invoke が失敗する)。
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # reframe/probe コマンドの実処理(Wave 5: コマンド境界の配線)。
