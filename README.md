@@ -1,5 +1,19 @@
 # Facet
 
+![CI](https://github.com/zinmacky/facet/actions/workflows/ci.yml/badge.svg)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+![React](https://img.shields.io/badge/React-61DAFB?logo=react&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-9135FF?logo=vite&logoColor=white)
+![Vitest](https://img.shields.io/badge/Vitest-00FF74?logo=vitest&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-5FA04E?logo=nodedotjs&logoColor=white)
+![pnpm](https://img.shields.io/badge/pnpm-F69220?logo=pnpm&logoColor=white)
+![Turborepo](https://img.shields.io/badge/Turborepo-FF1E56?logo=turborepo&logoColor=white)
+![Biome](https://img.shields.io/badge/Biome-60A5FA?logo=biome&logoColor=white)
+![Rust](https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white)
+![Tauri](https://img.shields.io/badge/Tauri-24C8D8?logo=tauri&logoColor=white)
+![FFmpeg](https://img.shields.io/badge/FFmpeg-007808?logo=ffmpeg&logoColor=white)
+![Cloudflare Workers](https://img.shields.io/badge/Cloudflare%20Workers-F38020?logo=cloudflareworkers&logoColor=white)
+
 横向きに撮った動画(バンドのライブ映像など)から手動でクリップを切り出し、
 **9:16 / 1:1 / 4:5 / 16:9** へ再フレーミングして書き出すツール群です。
 pnpm + turbo のモノレポ(TypeScript / Node >=22)で、現在の主力は
@@ -19,6 +33,15 @@ Tauri v2 製デスクトップアプリ `apps/desktop`(Rust)です。
   (フォールバックとして `h264_mf`)を優先的に使用します。
 - **書き出し**: 進捗表示付きでクリップをエンコードし、ファイルとして出力します。
 
+## 技術スタック
+
+- **フロントエンド**: React + Vite
+- **デスクトップ**: Tauri v2(Rust)
+- **メディア処理**: FFmpeg(libav を `ffmpeg-next` 経由で直接統合。HW エンコードは videotoolbox / amf)
+- **モノレポ**: pnpm + Turborepo + Biome(lint/format)
+- **テスト**: Vitest(TypeScript)+ `cargo test`(Rust)
+- **スケジューラ**: Cloudflare Workers(D1 + Durable Object + KV + Cron)
+
 ## モノレポ構成
 
 | パッケージ | 役割 |
@@ -26,13 +49,9 @@ Tauri v2 製デスクトップアプリ `apps/desktop`(Rust)です。
 | `packages/contract` | studio/desktop と scheduler 間のジョブ契約。共有の型・zod スキーマ |
 | `packages/core` | 再フレーミングのコアロジック(filtergraph 生成・プリセット・型) |
 | `packages/ffmpeg-runner` | ffmpeg / ffprobe の実行ラッパ(probe・runner) |
-| `apps/desktop` | Tauri v2 デスクトップアプリ(現在の主力)。React/Vite の renderer +
-  Rust workspace(`crates/media-core` で libav を直接統合、`crates/contract-rs`、
-  `crates/license-gate`、`src-tauri`) |
-| `apps/studio` | `server`(Hono)+ `web`(React/Vite)。旧来のローカル編集アプリで、
-  `apps/desktop` への移行元(詳細は `docs/desktop-migration-plan.md`) |
-| `apps/scheduler` | Cloudflare Workers 上の予約公開スケジューラ(D1 + Durable Object +
-  KV + Cron)。開発者運用向けのクラウドコンポーネント |
+| `apps/desktop` | Tauri v2 デスクトップアプリ(現在の主力)。React/Vite の renderer + Rust workspace(`crates/media-core` で libav を直接統合、`crates/contract-rs`、`crates/license-gate`、`src-tauri`) |
+| `apps/studio` | `server`(Hono)+ `web`(React/Vite)。旧来のローカル編集アプリで、`apps/desktop` への移行元(詳細は `docs/desktop-migration-plan.md`) |
+| `apps/scheduler` | Cloudflare Workers 上の予約公開スケジューラ(D1 + Durable Object + KV + Cron)。開発者運用向けのクラウドコンポーネント |
 
 ## 開発セットアップ
 
