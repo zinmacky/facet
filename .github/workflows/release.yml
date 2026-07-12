@@ -180,7 +180,10 @@ jobs:
 
           # ffmpeg.exe / ffprobe.exe 等の実行ファイル混入がないことを確認
           # (fetch-ffmpeg-lgpl.ps1 の防御と同じ趣旨を配布物側でも二重に確認する)。
-          $leakedExe = Get-ChildItem -Path $appDir -Filter "*.exe" -File | Where-Object { $_.Name -ne "facet-desktop.exe" }
+          # uninstall.exe は NSIS が標準生成するアンインストーラで正当な同梱物
+          # (インストーラ本体を 7z 展開する方式にしたことで検査対象に現れるようになった)。
+          $allowedExe = @("facet-desktop.exe", "uninstall.exe")
+          $leakedExe = Get-ChildItem -Path $appDir -Filter "*.exe" -File | Where-Object { $_.Name -notin $allowedExe }
           if ($leakedExe) {
             Write-Error "配布物に想定外の実行ファイルが混入しています: $($leakedExe.Name -join ', ')"
             exit 1
