@@ -14,14 +14,24 @@
 //!   キー自体が一致する必要はなく「同一入力+同一 spec → 同一キー」という決定性のみが
 //!   要件のため、アルゴリズムの選択自体は TS 版と一致させていない。
 //!
-//! **キャッシュ削除ポリシーは未定**(Phase 2 media-core 実装計画の既知リスク4)。
-//! `cache_dir` は際限なく増え続けるため、上限サイズ・世代数・最終アクセス時刻に基づく
-//! 掃除のいずれかを Tauri 統合時までに決める必要がある。本モジュールはキャッシュの
-//! 書き込み・参照のみを行い、削除は一切行わない。
+//! **キャッシュ削除ポリシー(実装済み)**: `render_preview` がキャッシュミスで新規に
+//! ファイルを書き出した直後、`cache_dir` 配下の最終生成物(`<key>.mp4`)の合計サイズを
+//! 数え、上限([`DEFAULT_PREVIEW_CACHE_MAX_BYTES`]、環境変数
+//! [`PREVIEW_CACHE_MAX_BYTES_ENV`] で上書き可 — `concurrency::MAX_CONCURRENT_ENCODES_ENV`
+//! と同じ流儀)を超えていれば `mtime` の古い順に削除し、上限内に収める。
+//! - たった今書き出したファイル自身は常に削除対象から除外する(生成直後に自分の
+//!   キャッシュが消える事故を防ぐ)。
+//! - 実行中ジョブが `pipeline::reframe` を通じて書いている一時ファイル
+//!   (`<key>.tmp.mp4`。`pipeline.rs` 冒頭コメント参照)は対象にしない — 掃除対象は
+//!   拡張子 `.mp4` かつ `.tmp.mp4` で終わらないファイルのみ(`is_finished_cache_file`)。
+//! - 削除はベストエフォート: 個々のファイルの `metadata`/`remove_file` が失敗しても
+//!   (ロック中など)そのファイルをスキップして次に進み、`MediaError` は返さない
+//!   (キャッシュ掃除の失敗でプレビュー生成自体を失敗させない)。
 //!
-//! TODO(キャッシュ削除ポリシー未定): 上限サイズ/世代数/LRU 等の掃除方針を決めて
-//! ここに実装する(docs/desktop-migration-plan.md 側にも追記予定)。
+//! キャッシュヒット時(既存ファイルをそのまま返す経路)は掃除を走らせない
+//! (`render_preview` 冒頭コメント参照)。
 
+use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -114,6 +124,139 @@ fn cache_file_path(cache_dir: &Path, key: &str) -> PathBuf {
 	cache_dir.join(format!("{key}.mp4"))
 }
 
+/// プレビューキャッシュディレクトリ(`cache_dir`)の合計サイズ上限の既定値(2 GiB)。
+///
+/// ユーザー承認済みの初期方針: 合計 2GB 上限・mtime の古い順削除
+/// (モジュール冒頭コメント参照)。
+pub const DEFAULT_PREVIEW_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// [`DEFAULT_PREVIEW_CACHE_MAX_BYTES`] を上書きする環境変数名。
+///
+/// `concurrency::MAX_CONCURRENT_ENCODES_ENV` と同じ流儀(未設定・数値としてパース
+/// 不能・0 以下のいずれの場合も既定値にフォールバックする)。`Facet_` 独自設定である
+/// ことを示すため(`MAX_CONCURRENT_ENCODES_ENV` とは異なり)`FACET_` プレフィックスを
+/// 付けている。
+pub const PREVIEW_CACHE_MAX_BYTES_ENV: &str = "FACET_PREVIEW_CACHE_MAX_BYTES";
+
+/// 環境変数 [`PREVIEW_CACHE_MAX_BYTES_ENV`] からキャッシュ上限バイト数を読む。
+///
+/// 未設定・数値としてパース不能・0 のいずれの場合も
+/// [`DEFAULT_PREVIEW_CACHE_MAX_BYTES`] にフォールバックする。
+pub fn preview_cache_max_bytes() -> u64 {
+	env::var(PREVIEW_CACHE_MAX_BYTES_ENV)
+		.ok()
+		.and_then(|raw| raw.trim().parse::<u64>().ok())
+		.filter(|&max| max > 0)
+		.unwrap_or(DEFAULT_PREVIEW_CACHE_MAX_BYTES)
+}
+
+/// `path` がキャッシュ掃除の対象となる「完成済みの」プレビューファイルかどうかを
+/// 判定する。
+///
+/// `cache_file_path` が作るファイル名は `<key>.mp4`(拡張子 `.mp4`)、`pipeline::reframe`
+/// が書き込み中に使う一時ファイル名は `<key>.tmp.mp4`(`pipeline.rs` の
+/// `temp_output_path` 参照。`.with_extension("")` は最後の拡張子のみを剥がすため、
+/// 出力拡張子が `mp4` の場合は `<stem>.tmp.mp4` になる)。両者はどちらも
+/// `Path::extension()` が `"mp4"` を返すため、拡張子だけでは区別できない —
+/// ファイル名が `.tmp.mp4` で終わっていないことも合わせて確認する。
+fn is_finished_cache_file(path: &Path) -> bool {
+	match path.file_name().and_then(|name| name.to_str()) {
+		Some(name) => name.ends_with(".mp4") && !name.ends_with(".tmp.mp4"),
+		None => false,
+	}
+}
+
+/// `cache_dir` 配下の完成済みキャッシュファイル(`is_finished_cache_file`)の合計サイズが
+/// `max_bytes` を超えていれば、`mtime` の古い順に削除して上限内に収める。
+///
+/// - `just_written`(直前に `render_preview` が書き出したファイル)は常に削除対象から
+///   除外する(ファイル名で比較する — `cache_dir` の表記ゆれに影響されないため)。
+/// - ベストエフォート: `cache_dir` の読み取り自体に失敗した場合、および個々のファイルの
+///   `metadata`/`remove_file` が失敗した場合(他プロセスによるロック等)は、
+///   そのエントリをスキップして処理を続ける。呼び出し元にエラーを伝搬しない
+///   (モジュール冒頭コメント参照)。
+fn evict_if_over_limit(cache_dir: &Path, just_written: &Path, max_bytes: u64) {
+	let entries = match fs::read_dir(cache_dir) {
+		Ok(entries) => entries,
+		Err(err) => {
+			eprintln!(
+				"facet media-core: プレビューキャッシュディレクトリの読み取りに失敗しました(掃除をスキップ): {} ({err})",
+				cache_dir.display()
+			);
+			return;
+		}
+	};
+
+	let just_written_name = just_written.file_name();
+
+	let mut files: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
+	let mut total_bytes: u64 = 0;
+	for entry in entries {
+		let entry = match entry {
+			Ok(entry) => entry,
+			Err(err) => {
+				eprintln!(
+					"facet media-core: プレビューキャッシュディレクトリのエントリ読み取りに失敗しました(スキップ): {err}"
+				);
+				continue;
+			}
+		};
+		let path = entry.path();
+		if !is_finished_cache_file(&path) {
+			continue;
+		}
+		let metadata = match entry.metadata() {
+			Ok(metadata) => metadata,
+			Err(err) => {
+				eprintln!(
+					"facet media-core: プレビューキャッシュファイルの metadata 取得に失敗しました(スキップ): {} ({err})",
+					path.display()
+				);
+				continue;
+			}
+		};
+		if !metadata.is_file() {
+			continue;
+		}
+		let size = metadata.len();
+		// mtime 取得に失敗した場合(非対応プラットフォーム等)は UNIX epoch を割り当て、
+		// 「最も古いファイル」として扱う(削除順の先頭に来るだけで、他の判定には
+		// 影響しない決定的なフォールバック)。
+		let mtime = metadata.modified().unwrap_or(UNIX_EPOCH);
+		total_bytes = total_bytes.saturating_add(size);
+		files.push((path, size, mtime));
+	}
+
+	if total_bytes <= max_bytes {
+		return;
+	}
+
+	// mtime 昇順(古い順)。mtime が同じ場合はパスで安定した順序にする。
+	files.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
+
+	for (path, size, _mtime) in files {
+		if total_bytes <= max_bytes {
+			break;
+		}
+		if path.file_name() == just_written_name {
+			continue;
+		}
+		match fs::remove_file(&path) {
+			Ok(()) => {
+				total_bytes = total_bytes.saturating_sub(size);
+			}
+			Err(err) => {
+				// ロック中(実行中ジョブが読み取り中等)や権限不足などで削除できない
+				// ケースを警告相当に留めて続行する(モジュール冒頭コメント参照)。
+				eprintln!(
+					"facet media-core: プレビューキャッシュファイルの削除に失敗しました(スキップして続行): {} ({err})",
+					path.display()
+				);
+			}
+		}
+	}
+}
+
 /// `spec` に従って `input` を低ビットレートでプレビュー用に再フレーミングし、
 /// `cache_dir` 配下にキャッシュする。
 ///
@@ -126,9 +269,9 @@ fn cache_file_path(cache_dir: &Path, key: &str) -> PathBuf {
 ///   `cache_dir` に残ることはない)。
 /// - エンコーダは [`EncoderSelection::Auto`](プラットフォーム別候補、
 ///   `encoder_select` 参照)を使う(プレビュー用途でも本エンコードと同じ選択規則)。
-///
-/// TODO(キャッシュ削除ポリシー未定): 本関数は `cache_dir` を掃除しない
-///   (モジュール冒頭コメント参照)。
+/// - キャッシュミスで新規に書き出した場合のみ、書き込み成功後に `cache_dir` の掃除
+///   ([`evict_if_over_limit`])を行う(モジュール冒頭コメント参照)。キャッシュヒット時
+///   (既に存在するファイルをそのまま返す経路)は掃除を走らせない。
 pub fn render_preview(
 	input: &Path,
 	spec: &EditSpec,
@@ -164,6 +307,9 @@ pub fn render_preview(
 	};
 
 	pipeline::reframe(input, &output_path, options)?;
+
+	evict_if_over_limit(cache_dir, &output_path, preview_cache_max_bytes());
+
 	Ok(output_path)
 }
 
@@ -343,5 +489,186 @@ mod tests {
 		let dir = Path::new("/cache");
 		let path = cache_file_path(dir, "abcdef0123456789");
 		assert_eq!(path, PathBuf::from("/cache/abcdef0123456789.mp4"));
+	}
+
+	// --- evict_if_over_limit / preview_cache_max_bytes ------------------------------
+
+	use std::fs::OpenOptions;
+
+	// PREVIEW_CACHE_MAX_BYTES_ENV はプロセス全体で共有される状態のため、これを
+	// 読み書きするテスト同士が並行実行(cargo test の既定挙動)されると競合する。
+	// `concurrency.rs` の ENV_TEST_LOCK と同じ考え方でこのロックで直列化する。
+	static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+	fn with_env_lock<R>(f: impl FnOnce() -> R) -> R {
+		let _guard = ENV_TEST_LOCK
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner);
+		f()
+	}
+
+	fn restore_env(previous: Option<String>) {
+		match previous {
+			Some(value) => env::set_var(PREVIEW_CACHE_MAX_BYTES_ENV, value),
+			None => env::remove_var(PREVIEW_CACHE_MAX_BYTES_ENV),
+		}
+	}
+
+	/// 呼び出しごとに一意な一時ディレクトリを作って返す(他テスト・他プロセスとの
+	/// 干渉を避けるため `name` + 現在時刻ナノ秒を組み合わせる。`tempfile` クレートは
+	/// 導入せず、既存テスト(`pipeline.rs`)と同様に素の `std::env::temp_dir()` を使う)。
+	fn unique_test_dir(name: &str) -> PathBuf {
+		let nanos = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.map(|d| d.as_nanos())
+			.unwrap_or(0);
+		let dir = std::env::temp_dir().join(format!("facet-preview-cache-test-{name}-{nanos}"));
+		fs::create_dir_all(&dir).expect("create unique test cache dir");
+		dir
+	}
+
+	/// `dir` 配下に `size` バイトのダミーファイルを作り、`mtime` を明示的に設定する。
+	fn write_dummy_file(dir: &Path, file_name: &str, size: u64, mtime: SystemTime) -> PathBuf {
+		let path = dir.join(file_name);
+		fs::write(&path, vec![0u8; size as usize]).expect("write dummy cache file");
+		let file = OpenOptions::new()
+			.write(true)
+			.open(&path)
+			.expect("open dummy cache file to set mtime");
+		file.set_modified(mtime).expect("set dummy file mtime");
+		path
+	}
+
+	fn dir_entries_sorted(dir: &Path) -> Vec<String> {
+		let mut names: Vec<String> = fs::read_dir(dir)
+			.expect("read test cache dir")
+			.map(|entry| {
+				entry
+					.expect("read dir entry")
+					.file_name()
+					.to_string_lossy()
+					.into_owned()
+			})
+			.collect();
+		names.sort();
+		names
+	}
+
+	#[test]
+	fn is_finished_cache_file_excludes_tmp_files() {
+		assert!(is_finished_cache_file(Path::new("/cache/abcdef.mp4")));
+		assert!(!is_finished_cache_file(Path::new("/cache/abcdef.tmp.mp4")));
+		assert!(!is_finished_cache_file(Path::new("/cache/abcdef.json")));
+	}
+
+	#[test]
+	fn under_limit_deletes_nothing() {
+		let dir = unique_test_dir("under-limit");
+		write_dummy_file(&dir, "a.mp4", 100, epoch_plus(1_000));
+		write_dummy_file(&dir, "b.mp4", 100, epoch_plus(2_000));
+
+		// 実際には存在しないパスを just_written として渡しても、上限内であれば
+		// そもそも削除ループへ入らないため問題にならない。
+		evict_if_over_limit(&dir, &dir.join("does-not-exist.mp4"), 10_000);
+
+		assert_eq!(dir_entries_sorted(&dir), vec!["a.mp4", "b.mp4"]);
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn over_limit_deletes_oldest_first_and_keeps_newest() {
+		let dir = unique_test_dir("over-limit");
+		write_dummy_file(&dir, "oldest.mp4", 100, epoch_plus(1_000));
+		write_dummy_file(&dir, "middle.mp4", 100, epoch_plus(2_000));
+		let newest = write_dummy_file(&dir, "newest.mp4", 100, epoch_plus(3_000));
+
+		// 合計 300 バイト、上限 150 バイト: 古い順に削除し、150 バイト以下になった時点で
+		// 止まる(oldest 削除後に 200、middle も削除して 100 <= 150 で停止)。
+		evict_if_over_limit(&dir, &newest, 150);
+
+		assert_eq!(dir_entries_sorted(&dir), vec!["newest.mp4"]);
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn just_written_file_is_protected_even_if_oldest() {
+		let dir = unique_test_dir("protect-just-written");
+		// just_written をわざと一番古い mtime にする(「生成直後のファイルが消える
+		// 事故」を再現しようとしたケース)。
+		let just_written = write_dummy_file(&dir, "just-written.mp4", 100, epoch_plus(1));
+		write_dummy_file(
+			&dir,
+			"older-mtime-but-not-protected.mp4",
+			100,
+			epoch_plus(2),
+		);
+		write_dummy_file(&dir, "newer.mp4", 100, epoch_plus(3));
+
+		// 合計 300 バイト、上限 250: 1 ファイル(100 バイト)削除すれば足りる。
+		// just_written が(mtime 上は最古でも)保護されるため、実際に削除されるのは
+		// just_written を除いて最も古い "older-mtime-but-not-protected" であり、
+		// "newer" は生き残る。
+		evict_if_over_limit(&dir, &just_written, 250);
+
+		let remaining = dir_entries_sorted(&dir);
+		assert_eq!(
+			remaining,
+			vec!["just-written.mp4", "newer.mp4"],
+			"just_written must survive despite being oldest, and newer.mp4 must not be \
+			 deleted once the limit is satisfied"
+		);
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn tmp_files_are_ignored_by_size_accounting_and_never_deleted() {
+		let dir = unique_test_dir("tmp-files-ignored");
+		// .tmp.mp4 は「実行中ジョブの一時ファイル」を模している。サイズを大きくして
+		// あっても、これのみを理由に削除が発生してはならない(finished ファイルの合計
+		// のみで判定するため)。
+		write_dummy_file(&dir, "in-progress.tmp.mp4", 10_000, epoch_plus(1));
+		let finished = write_dummy_file(&dir, "finished.mp4", 100, epoch_plus(2));
+
+		evict_if_over_limit(&dir, &finished, 10_000_000);
+
+		assert_eq!(
+			dir_entries_sorted(&dir),
+			vec!["finished.mp4", "in-progress.tmp.mp4"]
+		);
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn preview_cache_max_bytes_uses_default_when_env_unset_or_invalid() {
+		with_env_lock(|| {
+			let previous = env::var(PREVIEW_CACHE_MAX_BYTES_ENV).ok();
+
+			env::remove_var(PREVIEW_CACHE_MAX_BYTES_ENV);
+			assert_eq!(preview_cache_max_bytes(), DEFAULT_PREVIEW_CACHE_MAX_BYTES);
+
+			env::set_var(PREVIEW_CACHE_MAX_BYTES_ENV, "not-a-number");
+			assert_eq!(preview_cache_max_bytes(), DEFAULT_PREVIEW_CACHE_MAX_BYTES);
+
+			env::set_var(PREVIEW_CACHE_MAX_BYTES_ENV, "0");
+			assert_eq!(preview_cache_max_bytes(), DEFAULT_PREVIEW_CACHE_MAX_BYTES);
+
+			restore_env(previous);
+		});
+	}
+
+	#[test]
+	fn preview_cache_max_bytes_env_override_takes_effect() {
+		with_env_lock(|| {
+			let previous = env::var(PREVIEW_CACHE_MAX_BYTES_ENV).ok();
+
+			env::set_var(PREVIEW_CACHE_MAX_BYTES_ENV, "12345");
+			assert_eq!(preview_cache_max_bytes(), 12_345);
+
+			restore_env(previous);
+		});
 	}
 }
