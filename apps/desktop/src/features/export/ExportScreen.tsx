@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { join } from "@tauri-apps/api/path";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { useMutation } from "@tanstack/react-query";
@@ -73,6 +73,49 @@ export function ExportScreen({
 	// ユーザーが選んだ書き出し先フォルダ(絶対パス)。「書き出しを開始」時に選ばせる。
 	const outputDirRef = useRef<string | null>(null);
 
+	// 「要再書き出し」clip の集合(sig 不一致で結果が破棄されたが、まだユーザーが
+	// 再書き出しボタンを押していない状態)。自動再書き出しを廃止した代わりに、
+	// この状態を明示表示し、ユーザー操作(runClip)でのみ解消する。
+	const [dirtyClipIds, setDirtyClipIds] = useState<Set<string>>(new Set());
+	// 旧ジョブの reframe_cancel が完了するまでの間、その clip の(再)実行ボタンを
+	// disabled にするための集合(同じ出力パスへ旧ジョブと新ジョブが同時に書き込む
+	// 競合を避けるため)。queue.remove() が返す Promise の解決で解除する。
+	//
+	// state(表示用)に加えて ref も同期して持つ: requestExport の
+	// 「remove() の Promise 解決 → runClip()」という連続処理は同一 tick 内(次の
+	// re-render を待たずに)行うため、runClip 側のガードが state の stale closure
+	// (setCancellingClipIds 直後、再レンダリング前の古い Set)を掴まないよう、
+	// 常に最新の ref を読ませる(useReframeQueue の tasksRef と同じ理由)。
+	const [cancellingClipIds, setCancellingClipIds] = useState<Set<string>>(
+		new Set(),
+	);
+	const cancellingClipIdsRef = useRef<Set<string>>(cancellingClipIds);
+	const addCancelling = useCallback((id: string) => {
+		const next = new Set(cancellingClipIdsRef.current).add(id);
+		cancellingClipIdsRef.current = next;
+		setCancellingClipIds(next);
+	}, []);
+	const removeCancelling = useCallback((id: string) => {
+		if (!cancellingClipIdsRef.current.has(id)) return;
+		const next = new Set(cancellingClipIdsRef.current);
+		next.delete(id);
+		cancellingClipIdsRef.current = next;
+		setCancellingClipIds(next);
+	}, []);
+	/** 現存しない(削除された)clip の id を cancellingClipIds から取り除く。 */
+	const pruneCancelling = useCallback((keepIds: Set<string>) => {
+		const filtered = new Set(
+			[...cancellingClipIdsRef.current].filter((id) => keepIds.has(id)),
+		);
+		if (filtered.size === cancellingClipIdsRef.current.size) return;
+		cancellingClipIdsRef.current = filtered;
+		setCancellingClipIds(filtered);
+	}, []);
+	// 「書き出しを開始」1 回につき、全 clip 一括起動(下記の起動 effect)を 1 度だけ
+	// 行うためのガード。true になった後は clips が変わっても再起動しない
+	// (新規追加/編集された clip は runClip 経由の明示操作でのみ書き出す)。
+	const batchLaunchedRef = useRef(false);
+
 	// クロップ内容プレビュー(preview_start、低ビットレート・app キャッシュ、DL/保存 UI 無し)。
 	// UploadScreen の「最終プレビュー」と同じ実装を共有する。
 	const preview = usePreview();
@@ -88,28 +131,57 @@ export function ExportScreen({
 		setStarted(false);
 		setSelectedClipId(null);
 		outputDirRef.current = null;
+		setDirtyClipIds(new Set());
+		cancellingClipIdsRef.current = new Set();
+		setCancellingClipIds(new Set());
+		batchLaunchedRef.current = false;
 	}, [resetToken]);
 
-	// clip 単位の細粒度無効化(最重要): 配列参照が変わるたびに全消去していた旧実装をやめ、
+	// clip 単位の細粒度無効化: 配列参照が変わるたびに全消去していた旧実装をやめ、
 	// 「削除された clip」「trim/crop/aspect が変わった(sig が変わった) clip」の結果のみを
 	// 個別に破棄する。他 clip の結果・購読・プレビューはそのまま保持する。
+	//
+	// 自動再書き出しの廃止(UX変更): 以前はここで破棄した clip を「起動」effect が
+	// 拾って無言で再書き出ししていたが、ユーザーの知らないところでファイルが
+	// 書き換わる原因になっていたため廃止した。ここでは破棄のみ行い、「要再書き出し」
+	// (dirtyClipIds)としてマークするだけに留める。実際の再実行は ExportListItem の
+	// 「再書き出し」ボタン(runClip)からの明示操作でのみ行う。
+	//
+	// 旧ジョブのキャンセル完了待ち: queue.remove() は tasks からの削除自体は同期的だが、
+	// Rust 側 reframe_cancel の完了は非同期(戻り値の Promise)。同じ出力パスへ旧ジョブと
+	// 新ジョブが同時に書き込む競合を避けるため、この Promise が解決するまで
+	// cancellingClipIds に入れて再書き出しボタンを disabled にする。
 	// biome-ignore lint/correctness/useExhaustiveDependencies: queue.tasksRef は ref(useReframeQueue 内の useRef)で読み取りは非反応的 — 旧実装の resultsRef.current と同じ理由で依存に含めない
 	useEffect(() => {
+		const clipIds = new Set(clips.map((c) => c.id));
 		for (const [id, task] of queue.tasksRef.current) {
 			const clip = clips.find((c) => c.id === id);
-			const stale = clip === undefined || task.sig !== clipPreviewSig(clip);
+			const deleted = clip === undefined;
+			const stale = deleted || task.sig !== clipPreviewSig(clip);
 			if (!stale) continue;
-			// queue.remove は tasksRef を同期更新するため、このコミット内で後続実行される
-			// 「起動」effect(下記、同じく [clips] 依存)が無効化直後の最新状態を見られる
-			// (P1-7: 無効化と起動が同一コミット内で順に走っても再起動を取りこぼさない)。
-			queue.remove(id);
 			preview.remove(id);
+			if (deleted) {
+				// clip 自体が消えた場合は「要再書き出し」表示の対象がそもそも無いため、
+				// キャンセル完了を待たず即座に破棄する(disabled 表示も不要)。
+				void queue.remove(id);
+				continue;
+			}
+			setDirtyClipIds((prev) => new Set(prev).add(id));
+			addCancelling(id);
+			queue.remove(id).then(() => removeCancelling(id));
 		}
+		// 削除された clip の id が dirty/cancelling に残ったままにならないよう掃除する
+		// (稀に「編集で dirty 化した直後に clip 自体が削除される」順序があり得るため)。
+		setDirtyClipIds((prev) => {
+			const next = new Set([...prev].filter((id) => clipIds.has(id)));
+			return next.size === prev.size ? prev : next;
+		});
+		pruneCancelling(clipIds);
 		// 選択中 clip が削除されていたら、selectedClipId 側は別 effect(下記)で
 		// 先頭 clip に補正される。
 		// queue.remove は useCallback([]) で安定した参照のため、依存配列に加えても
 		// 元の [clips, preview.remove] と同じタイミングでのみ発火する。
-	}, [clips, preview.remove, queue.remove]);
+	}, [clips, preview.remove, queue.remove, addCancelling, removeCancelling, pruneCancelling]);
 
 	/** 選択中 clip のクロップ内容プレビューを生成(または更新)する。 */
 	const handlePreviewClip = (clip: Clip) => {
@@ -151,24 +223,25 @@ export function ExportScreen({
 		}
 	};
 
-	// レンダリング開始。開始操作後・source・出力先があり、done 結果を持たない clip のみ対象。
-	// 画面が非アクティブ(離脱済み)でも起動判定は続ける — 常時マウントのウィザードでは
-	// 「編集画面へ戻っている間に書き出しが進む」が期待挙動のため。
-	useEffect(() => {
-		const dir = outputDirRef.current;
-		if (!started || !source || !dir) return;
-		const probe = source.probe;
-		const input = source.inputPath;
-
-		// ファイル名の重複を避ける(同名 clip が複数ある場合など。UploadScreen の
-		// 一括書き出しと同じ採番ロジックを共有する)。現在の clips 全体から都度
-		// 計算する純粋関数のため、この effect が複数回走っても同じ clip 集合であれば
-		// 同じ名前を返す(安定)。
-		const uniqueNames = uniqueBaseNames(clips, (c) => sanitizeFileName(c.name));
-
-		for (const clip of clips) {
-			const existing = queue.tasksRef.current.get(clip.id);
-			if (existing && existing.status === "done") continue;
+	/**
+	 * 指定 clip 1 本の書き出しを起動する(予約 → 出力パス解決 → reframe_start)。
+	 * 「書き出しを開始」直後の一括起動(下記 effect)と、`requestExport`(ExportListItem の
+	 * 「(再)実行」ボタンからの明示操作)の両方から呼ぶ共通処理。
+	 * 既に queue 上に task がある(予約済み/実行中/完了/失敗)clip には何もしない
+	 * (二重起動防止。呼び出し側は「task が無い」clip に対してのみ呼ぶこと —
+	 * status="error" の再試行は `requestExport` が先に queue.remove() してから呼ぶ)。
+	 */
+	const runClip = useCallback(
+		(clip: Clip) => {
+			const dir = outputDirRef.current;
+			if (!source || !dir) return;
+			if (queue.tasksRef.current.has(clip.id)) return;
+			// 旧ジョブの reframe_cancel 完了待ち中は起動しない(ExportListItem 側は
+			// ボタンを disabled にして防いでいるが、念のため二重の防御線を張る)。
+			// ref を読む(state ではない)理由: requestExport は「remove() の Promise 解決
+			// → 同一 tick 内で runClip() を呼ぶ」ため、state の再レンダリングを待つと
+			// cancellingClipIds の stale closure を掴んでしまう。
+			if (cancellingClipIdsRef.current.has(clip.id)) return;
 
 			const sig = clipPreviewSig(clip);
 			// 同期的に「実行中」として予約する(二重起動しない。既に予約/実行中なら何もしない)。
@@ -177,34 +250,82 @@ export function ExportScreen({
 			// 無効化された場合に、下記の非同期処理が新しいジョブの状態を誤って
 			// 上書きしないようにする)。
 			const token = queue.reserve(clip.id, { sig });
-			if (!token) continue;
+			if (!token) return;
+
+			// 再書き出しの場合、この時点で「要再書き出し」表示は解消する(実行中に遷移)。
+			setDirtyClipIds((prev) => {
+				if (!prev.has(clip.id)) return prev;
+				const next = new Set(prev);
+				next.delete(clip.id);
+				return next;
+			});
 
 			const spec = masterSpec(clip, {
-				width: probe.width,
-				height: probe.height,
+				width: source.probe.width,
+				height: source.probe.height,
 			});
+			// ファイル名の重複を避ける(同名 clip が複数ある場合など。UploadScreen の
+			// 一括書き出しと同じ採番ロジックを共有する)。clips 全体から都度計算する
+			// 純粋関数のため、単発の再書き出しでも一括起動時と同じ名前になる(安定)。
+			const uniqueNames = uniqueBaseNames(clips, (c) => sanitizeFileName(c.name));
 
 			void (async () => {
 				try {
 					const base = uniqueNames.get(clip) ?? sanitizeFileName(clip.name);
 					const outputPath = await join(dir, `${base}.mp4`);
-					await queue.run(token, clip.id, input, outputPath, spec, settings.encoder);
+					await queue.run(
+						token,
+						clip.id,
+						source.inputPath,
+						outputPath,
+						spec,
+						settings.encoder,
+					);
 				} catch (err) {
 					// join() 失敗、または queue.run() の起動/実行失敗(状態には反映済み)。
 					queue.fail(token, clip.id, err);
 				}
 			})();
-		}
-	}, [
-		started,
-		source,
-		clips,
-		queue.tasksRef,
-		queue.reserve,
-		queue.run,
-		queue.fail,
-		settings.encoder,
-	]);
+		},
+		[source, clips, queue.tasksRef, queue.reserve, queue.run, queue.fail, settings.encoder],
+	);
+
+	/**
+	 * ExportListItem の「(再)実行」ボタンから呼ぶ唯一のエントリポイント。
+	 * - task が無い(未書き出し/要再書き出し): そのまま `runClip` する。
+	 * - task が status="error"(失敗。自動リトライを廃止した代わりに明示的な再試行手段
+	 *   として用意した): `runClip` の「既に task がある clip には何もしない」ガードに
+	 *   阻まれるため、先に queue.remove() でキャンセル・破棄してから `runClip` する。
+	 *   旧ジョブの reframe_cancel 完了を待つ間は、sig 不一致による自動無効化(上記
+	 *   effect)と同じく cancellingClipIds でボタンを disabled にする。
+	 */
+	const requestExport = useCallback(
+		(clip: Clip) => {
+			if (cancellingClipIdsRef.current.has(clip.id)) return;
+			if (!queue.tasksRef.current.has(clip.id)) {
+				runClip(clip);
+				return;
+			}
+			addCancelling(clip.id);
+			queue.remove(clip.id).then(() => {
+				removeCancelling(clip.id);
+				runClip(clip);
+			});
+		},
+		[queue.tasksRef, queue.remove, runClip, addCancelling, removeCancelling],
+	);
+
+	// レンダリング開始。「書き出しを開始」1 回につき、その時点の全 clip を一括起動する
+	// (batchLaunchedRef で 1 度だけに制限 — 以前は clips 変更のたびに「done でない
+	// clip」を拾い直しており、これが編集後の無言な自動再書き出しの原因だった)。
+	// 画面が非アクティブ(離脱済み)でも起動判定は続ける — 常時マウントのウィザードでは
+	// 「編集画面へ戻っている間に書き出しが進む」が期待挙動のため。
+	useEffect(() => {
+		if (!started || !source || !outputDirRef.current) return;
+		if (batchLaunchedRef.current) return;
+		batchLaunchedRef.current = true;
+		for (const clip of clips) runClip(clip);
+	}, [started, source, clips, runClip]);
 
 	const donePaths = useMemo(() => {
 		const paths: string[] = [];
@@ -328,6 +449,7 @@ export function ExportScreen({
 								<ExportDetail
 									clip={selectedClip}
 									task={queue.tasks.get(selectedClip.id)}
+									dirty={dirtyClipIds.has(selectedClip.id)}
 								/>
 							) : (
 								<p className="text-sm text-neutral-400">
@@ -376,6 +498,9 @@ export function ExportScreen({
 										task={queue.tasks.get(clip.id)}
 										selected={clip.id === selectedClipId}
 										onSelect={() => setSelectedClipId(clip.id)}
+										dirty={dirtyClipIds.has(clip.id)}
+										cancelling={cancellingClipIds.has(clip.id)}
+										onExport={() => requestExport(clip)}
 									/>
 								))}
 							</div>

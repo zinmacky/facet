@@ -69,6 +69,14 @@ function Harness({ initialClips }: { initialClips: Clip[] }) {
 			>
 				remove-clip-b
 			</button>
+			<button
+				type="button"
+				onClick={() =>
+					setClips((prev) => [...prev, makeClip("clip-c", "clipC", 6)])
+				}
+			>
+				add-clip-c
+			</button>
 			<button type="button" onClick={() => setResetToken((t) => t + 1)}>
 				bump-reset-token
 			</button>
@@ -92,7 +100,7 @@ function listRow(fileName: string): HTMLElement {
 }
 
 describe("ExportScreen: clip 単位シグネチャ無効化(clipPreviewSig)", () => {
-	it("1 clip の trim 変更はその clip の結果だけを破棄し、他 clip の結果は保持する", async () => {
+	it("1 clip の trim 変更は自動で再書き出しされず「要再書き出し」になり、再書き出しボタンでその clip だけ再実行される", async () => {
 		const user = userEvent.setup();
 		const clipA = makeClip("clip-a", "clipA", 10);
 		const clipB = makeClip("clip-b", "clipB", 8);
@@ -114,18 +122,22 @@ describe("ExportScreen: clip 単位シグネチャ無効化(clipPreviewSig)", ()
 		// clip-a の trim を変更する(App では ClipEditor の Timeline 操作に相当)。
 		await user.click(screen.getByRole("button", { name: "mutate-clip-a-trim" }));
 
-		// clip-a の結果は即座に破棄される(sig 不一致による無効化)。
-		// clip-b の結果(完了)はそのまま保持される — 破棄も再起動もされない。
+		// clip-a の結果は即座に破棄され「要再書き出し」になるが、自動では再実行されない
+		// (UX 変更: ユーザーの知らないところでファイルが書き換わる自動再書き出しを廃止した)。
+		// clip-b の結果(完了)はそのまま保持される。
 		await waitFor(() => {
-			expect(within(listRow("clipA.mp4")).queryByText("完了")).not.toBeInTheDocument();
+			expect(within(listRow("clipA.mp4")).getByText("要再書き出し")).toBeInTheDocument();
 		});
+		expect(reframeStartCalls()).toHaveLength(2);
 		expect(within(listRow("clipB.mp4")).getByText("完了")).toBeInTheDocument();
 
-		// P1-7 修正の固定テスト: 無効化(clips 依存 effect)と起動(同じく clips 依存、
-		// resultsRef.current を読む)が同一コミット内で順に走っても、無効化 effect が
-		// resultsRef を同期更新するため、起動 effect は 1 回の操作だけで無効化された
-		// clip-a を確実に拾って再起動する(以前は 2 回操作しないと再起動されず、
-		// clip-a が「実行中 0%」の見た目で固まっていた)。
+		// 旧ジョブ(job-1)の reframe_cancel 完了を待ってから、明示的に「再書き出し」ボタンで
+		// clip-a だけを再実行する。
+		const reExportButton = await screen.findByRole("button", {
+			name: "再書き出し: clipA.mp4",
+		});
+		await waitFor(() => expect(reExportButton).toBeEnabled());
+		await user.click(reExportButton);
 		await waitFor(() => expect(reframeStartCalls()).toHaveLength(3));
 
 		emitMockEvent("reframe://done/job-3", { encoder: "h264" });
@@ -133,7 +145,7 @@ describe("ExportScreen: clip 単位シグネチャ無効化(clipPreviewSig)", ()
 			expect(within(listRow("clipA.mp4")).getByText("完了")).toBeInTheDocument();
 		});
 		// clip-b は一連の操作を通じて一度も再起動されていない(reframe_start 呼び出しは
-		// clip-a 用の 2 回分(初回 job-1 + 再生成 job-3)+ clip-b 用の初回 job-2 の計 3 回のみ)。
+		// clip-a 用の 2 回分(初回 job-1 + 明示再書き出し job-3)+ clip-b 用の初回 job-2 の計 3 回のみ)。
 		expect(reframeStartCalls()).toHaveLength(3);
 	});
 
@@ -158,6 +170,105 @@ describe("ExportScreen: clip 単位シグネチャ無効化(clipPreviewSig)", ()
 		expect(mockEventListenerCount("reframe://done/job-1")).toBe(1);
 
 		emitMockEvent("reframe://done/job-1", { encoder: "h264" });
+		await waitFor(() => {
+			expect(within(listRow("clipA.mp4")).getByText("完了")).toBeInTheDocument();
+		});
+	});
+});
+
+describe("ExportScreen: 自動再書き出し廃止(UX 変更1)", () => {
+	it("「書き出しを開始」後に追加された clip は自動では書き出されず、明示ボタンで書き出される", async () => {
+		const user = userEvent.setup();
+		const clipA = makeClip("clip-a", "clipA", 10);
+		renderWithProviders(<Harness initialClips={[clipA]} />);
+
+		mockDialogOpen.mockResolvedValueOnce("/out");
+		await user.click(screen.getByRole("button", { name: /書き出しを開始/ }));
+		await waitFor(() => expect(reframeStartCalls()).toHaveLength(1));
+
+		await user.click(screen.getByRole("button", { name: "add-clip-c" }));
+
+		// 新規追加された clip-c は自動では書き出されない(「未書き出し」表示のまま)。
+		await waitFor(() => {
+			expect(within(listRow("clipC.mp4")).getByText("未書き出し")).toBeInTheDocument();
+		});
+		expect(reframeStartCalls()).toHaveLength(1);
+
+		// 明示的に「書き出す」ボタンを押すと起動する。
+		await user.click(screen.getByRole("button", { name: "書き出す: clipC.mp4" }));
+		await waitFor(() => expect(reframeStartCalls()).toHaveLength(2));
+
+		emitMockEvent("reframe://done/job-2", { encoder: "h264" });
+		await waitFor(() => {
+			expect(within(listRow("clipC.mp4")).getByText("完了")).toBeInTheDocument();
+		});
+	});
+
+	it("再書き出しボタンは旧ジョブの reframe_cancel が完了するまで disabled になる", async () => {
+		const user = userEvent.setup();
+		const clipA = makeClip("clip-a", "clipA", 10);
+		renderWithProviders(<Harness initialClips={[clipA]} />);
+
+		mockDialogOpen.mockResolvedValueOnce("/out");
+		await user.click(screen.getByRole("button", { name: /書き出しを開始/ }));
+		await waitFor(() => expect(reframeStartCalls()).toHaveLength(1));
+		emitMockEvent("reframe://done/job-1", { encoder: "h264" });
+		await waitFor(() => {
+			expect(within(listRow("clipA.mp4")).getByText("完了")).toBeInTheDocument();
+		});
+
+		// reframe_cancel の resolve を保留する(旧ジョブのキャンセルが完了するまで、
+		// 同じ出力パスへ旧ジョブと新ジョブが同時に書き込む競合を避けるため
+		// 再書き出しボタンは disabled のはず)。
+		let resolveCancel: (() => void) | undefined;
+		mockInvoke.mockImplementation(async (cmd: string) => {
+			if (cmd === "reframe_cancel") {
+				return new Promise<void>((resolve) => {
+					resolveCancel = () => resolve(undefined);
+				});
+			}
+			return undefined;
+		});
+
+		await user.click(screen.getByRole("button", { name: "mutate-clip-a-trim" }));
+
+		const reExportButton = await screen.findByRole("button", {
+			name: "再書き出し: clipA.mp4",
+		});
+		await waitFor(() => expect(reExportButton).toBeDisabled());
+		expect(reExportButton).toHaveTextContent("キャンセル待ち…");
+
+		resolveCancel?.();
+
+		await waitFor(() => expect(reExportButton).toBeEnabled());
+		expect(reExportButton).toHaveTextContent("再書き出し");
+	});
+
+	it("失敗(error)した clip は自動でリトライされず、「再試行」ボタンで再実行できる", async () => {
+		const user = userEvent.setup();
+		const clipA = makeClip("clip-a", "clipA", 10);
+		renderWithProviders(<Harness initialClips={[clipA]} />);
+
+		mockDialogOpen.mockResolvedValueOnce("/out");
+		await user.click(screen.getByRole("button", { name: /書き出しを開始/ }));
+		await waitFor(() => expect(reframeStartCalls()).toHaveLength(1));
+
+		emitMockEvent("reframe://error/job-1", { message: "OutputBusy" });
+		await waitFor(() => {
+			expect(within(listRow("clipA.mp4")).getByText("失敗")).toBeInTheDocument();
+		});
+		// 以前は clips 変更のたびに error の task も再起動していたが、自動再書き出しの
+		// 廃止でその経路も無くなったため、明示的な「再試行」ボタンでのみ復帰できる。
+		expect(reframeStartCalls()).toHaveLength(1);
+
+		const retryButton = await screen.findByRole("button", {
+			name: "再試行: clipA.mp4",
+		});
+		await waitFor(() => expect(retryButton).toBeEnabled());
+		await user.click(retryButton);
+		await waitFor(() => expect(reframeStartCalls()).toHaveLength(2));
+
+		emitMockEvent("reframe://done/job-2", { encoder: "h264" });
 		await waitFor(() => {
 			expect(within(listRow("clipA.mp4")).getByText("完了")).toBeInTheDocument();
 		});

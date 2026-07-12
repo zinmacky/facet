@@ -75,9 +75,14 @@ export interface UseReframeQueueResult {
 	/**
 	 * 指定 key の購読・状態を破棄する。jobId が既に確定していれば `reframe_cancel` を
 	 * 呼び、Rust 側のジョブが孤児として走り続けないようにする(バグ1。失敗は
-	 * console.warn に留め、remove 自体は同期的に完了する)。
+	 * console.warn に留める)。`tasks`/購読の破棄自体は同期的に完了するが、戻り値の
+	 * Promise は Rust 側キャンセル(`reframe_cancel`)が完了する(または jobId 未確定で
+	 * キャンセル不要と判明する)まで待つための補助 — 呼び出し側は「同じ key へ即座に
+	 * 再 reserve() しても安全か」を厳密に知りたい場合(例: ExportScreen の再書き出し
+	 * ボタンを、旧ジョブが実際に止まるまで disabled にする)にこの Promise を使う。
+	 * 待たずに `void remove(key)` する既存の使い方もそのまま動く。
 	 */
-	remove: (key: string) => void;
+	remove: (key: string) => Promise<void>;
 	/** 全 key の購読を解除し、jobId が確定しているジョブは cancelJob してから状態を空にする(バグ1)。 */
 	reset: () => void;
 	/**
@@ -126,10 +131,15 @@ export function useReframeQueue(): UseReframeQueueResult {
 		return String(tokenCounterRef.current);
 	}, []);
 
-	/** jobId が既知ならキャンセルを試みる(失敗は握りつぶさず warn に留める。バグ1)。 */
-	const cancelOrphan = useCallback((jobId: string | undefined) => {
-		if (!jobId) return;
-		void cancelJob(jobId).catch((err: unknown) => {
+	/**
+	 * jobId が既知ならキャンセルを試みる(失敗は握りつぶさず warn に留める。バグ1)。
+	 * 戻り値の Promise は常に resolve する(失敗時も warn 後に resolve — 呼び出し側が
+	 * `.catch` を書かずに待てるようにする)。jobId 未確定(＝まだキャンセルすべき
+	 * ジョブが無い)場合は即 resolve 済みの Promise を返す。
+	 */
+	const cancelOrphan = useCallback((jobId: string | undefined): Promise<void> => {
+		if (!jobId) return Promise.resolve();
+		return cancelJob(jobId).catch((err: unknown) => {
 			console.warn(`ジョブのキャンセルに失敗しました(jobId=${jobId})`, err);
 		});
 	}, []);
@@ -266,16 +276,17 @@ export function useReframeQueue(): UseReframeQueueResult {
 	);
 
 	const remove = useCallback(
-		(key: string) => {
+		(key: string): Promise<void> => {
 			unsubsRef.current.get(key)?.();
 			unsubsRef.current.delete(key);
 			activeTokenRef.current.delete(key);
-			cancelOrphan(tasksRef.current.get(key)?.jobId);
-			if (!tasksRef.current.has(key)) return;
+			const cancelled = cancelOrphan(tasksRef.current.get(key)?.jobId);
+			if (!tasksRef.current.has(key)) return cancelled;
 			const next = new Map(tasksRef.current);
 			next.delete(key);
 			tasksRef.current = next;
 			setTasks(next);
+			return cancelled;
 		},
 		[cancelOrphan],
 	);

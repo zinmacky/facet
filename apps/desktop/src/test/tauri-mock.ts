@@ -118,6 +118,9 @@ export const mockDocumentDir = vi.fn(async () => "/mock/Documents");
 
 export const mockOpenPath = vi.fn(async (_path: string) => undefined);
 
+/** ExportDetail の「フォルダで表示」(`revealItemInDir`)のモック。 */
+export const mockRevealItemInDir = vi.fn(async (_path: string | string[]) => undefined);
+
 // 通知権限は既定で許可済み扱い(多くのテストは通知フローそのものを検証しないため)。
 // 権限拒否のケースを検証するテストは isPermissionGranted/requestPermission を
 // 個別に差し替える。
@@ -152,6 +155,9 @@ export function resetTauriMocks(): void {
 
 	mockOpenPath.mockReset();
 	mockOpenPath.mockImplementation(async () => undefined);
+
+	mockRevealItemInDir.mockReset();
+	mockRevealItemInDir.mockImplementation(async () => undefined);
 
 	mockIsPermissionGranted.mockReset();
 	mockIsPermissionGranted.mockImplementation(async () => true);
