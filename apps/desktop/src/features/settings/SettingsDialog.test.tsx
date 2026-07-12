@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderWithProviders } from "../../test/render";
@@ -9,6 +9,12 @@ import { SettingsDialog } from "./SettingsDialog";
 function storedSettings(): unknown {
 	return JSON.parse(window.localStorage.getItem(SETTINGS_STORAGE_KEY) ?? "null");
 }
+
+// 設定(useSettings)は localStorage 経由で読み出される。テスト間で永続化状態が
+// 引き継がれないよう、各テストの前に必ずクリアする。
+beforeEach(() => {
+	window.localStorage.clear();
+});
 
 describe("SettingsDialog: 外観(テーマ)", () => {
 	it("「ライト」を選ぶと html の .dark が外れ、localStorage に保存される", async () => {
@@ -100,6 +106,24 @@ describe("SettingsDialog: 書き出し先", () => {
 		expect(storedSettings()).toEqual({
 			...DEFAULT_SETTINGS,
 			openFolderAfterExport: true,
+		});
+	});
+
+	it("「書き出し完了時に通知する」トグルが永続化される", async () => {
+		const user = userEvent.setup();
+		renderWithProviders(<SettingsDialog open onClose={() => {}} />);
+
+		const checkbox = screen.getByRole("checkbox", {
+			name: "書き出し完了時に通知する",
+		});
+		expect(checkbox).not.toBeChecked();
+
+		await user.click(checkbox);
+
+		expect(checkbox).toBeChecked();
+		expect(storedSettings()).toEqual({
+			...DEFAULT_SETTINGS,
+			notifyOnExportComplete: true,
 		});
 	});
 });

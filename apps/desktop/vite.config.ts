@@ -34,6 +34,7 @@ export default defineConfig(({ mode }) => {
 						"@tauri-apps/api/path": `${mockDir}path.ts`,
 						"@tauri-apps/plugin-dialog": `${mockDir}dialog.ts`,
 						"@tauri-apps/plugin-opener": `${mockDir}opener.ts`,
+						"@tauri-apps/plugin-notification": `${mockDir}notification.ts`,
 					}
 				: undefined,
 		},

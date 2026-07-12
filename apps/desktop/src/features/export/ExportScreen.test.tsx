@@ -11,8 +11,11 @@ import {
 	mockDialogOpen,
 	mockEventListenerCount,
 	mockInvoke,
+	mockIsPermissionGranted,
 	mockJoin,
 	mockOpenPath,
+	mockRequestPermission,
+	mockSendNotification,
 } from "../../test/tauri-mock";
 import { ExportScreen } from "./ExportScreen";
 
@@ -255,5 +258,76 @@ describe("ExportScreen: 設定連携(既定の書き出し先 / 完了後にフ�
 			expect(within(listRow("clipA.mp4")).getByText("完了")).toBeInTheDocument();
 		});
 		expect(mockOpenPath).not.toHaveBeenCalled();
+	});
+
+	it("notifyOnExportComplete=true のとき、バッチ内の全ジョブが完了した時点で一度だけ通知を送る", async () => {
+		window.localStorage.setItem(
+			SETTINGS_STORAGE_KEY,
+			JSON.stringify({ ...DEFAULT_SETTINGS, notifyOnExportComplete: true }),
+		);
+		const user = userEvent.setup();
+		const clipA = makeClip("clip-a", "clipA", 10);
+		const clipB = makeClip("clip-b", "clipB", 8);
+		renderWithProviders(<Harness initialClips={[clipA, clipB]} />);
+
+		await startExport(user);
+
+		// 1 件目のみ完了した時点ではまだ送らない(全件完了が条件)。
+		emitMockEvent("reframe://done/job-1", { encoder: "h264" });
+		await waitFor(() => {
+			expect(within(listRow("clipA.mp4")).getByText("完了")).toBeInTheDocument();
+		});
+		expect(mockSendNotification).not.toHaveBeenCalled();
+
+		// 全件完了した時点で一度だけ送る。
+		emitMockEvent("reframe://done/job-2", { encoder: "h264" });
+		await waitFor(() => expect(mockSendNotification).toHaveBeenCalledTimes(1));
+		expect(mockSendNotification).toHaveBeenCalledWith({
+			title: "書き出しが完了しました",
+			body: "2 本の切り抜きを書き出しました。",
+		});
+
+		// 完了後の再レンダリング(選択 clip の切り替え等)でも二重に送られない。
+		await user.click(listRow("clipB.mp4"));
+		expect(mockSendNotification).toHaveBeenCalledTimes(1);
+	});
+
+	it("notifyOnExportComplete=false(既定)のときは完了しても通知しない", async () => {
+		const user = userEvent.setup();
+		const clipA = makeClip("clip-a", "clipA", 10);
+		renderWithProviders(<Harness initialClips={[clipA]} />);
+
+		mockDialogOpen.mockResolvedValueOnce("/out");
+		await user.click(screen.getByRole("button", { name: /書き出しを開始/ }));
+		await waitFor(() => expect(reframeStartCalls()).toHaveLength(1));
+
+		emitMockEvent("reframe://done/job-1", { encoder: "h264" });
+		await waitFor(() => {
+			expect(within(listRow("clipA.mp4")).getByText("完了")).toBeInTheDocument();
+		});
+		expect(mockSendNotification).not.toHaveBeenCalled();
+	});
+
+	it("notifyOnExportComplete=true でも通知権限が拒否されている場合は通知しない", async () => {
+		mockIsPermissionGranted.mockResolvedValue(false);
+		mockRequestPermission.mockResolvedValue("denied");
+		window.localStorage.setItem(
+			SETTINGS_STORAGE_KEY,
+			JSON.stringify({ ...DEFAULT_SETTINGS, notifyOnExportComplete: true }),
+		);
+		const user = userEvent.setup();
+		const clipA = makeClip("clip-a", "clipA", 10);
+		renderWithProviders(<Harness initialClips={[clipA]} />);
+
+		mockDialogOpen.mockResolvedValueOnce("/out");
+		await user.click(screen.getByRole("button", { name: /書き出しを開始/ }));
+		await waitFor(() => expect(reframeStartCalls()).toHaveLength(1));
+
+		emitMockEvent("reframe://done/job-1", { encoder: "h264" });
+		await waitFor(() => {
+			expect(within(listRow("clipA.mp4")).getByText("完了")).toBeInTheDocument();
+		});
+		await waitFor(() => expect(mockRequestPermission).toHaveBeenCalled());
+		expect(mockSendNotification).not.toHaveBeenCalled();
 	});
 });

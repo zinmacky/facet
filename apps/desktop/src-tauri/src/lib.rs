@@ -15,6 +15,12 @@
 // 同じ経路は使えない(既知ギャップ)。代わりに実ファイルを直接書き出し、
 // 保存先フォルダを OS 既定のファイルマネージャで開く形にする
 // (`opener:default` 経由で renderer から直接呼ぶ。`@tauri-apps/plugin-opener`)。
+//
+// 書き出し完了通知: `tauri-plugin-notification` を追加する。書き出し(reframe)が
+// 完了した際にデスクトップ通知でユーザーに知らせるためで、invoke コマンドではなく
+// dialog/opener と同様プラグイン権限(capabilities/default.json の
+// `notification:default`)経由で renderer から直接呼ぶ
+// (`@tauri-apps/plugin-notification` で権限確認と通知発火を行う)。
 mod commands;
 
 use commands::reframe::JobsState;
@@ -29,6 +35,7 @@ pub fn run() {
 	tauri::Builder::default()
 		.plugin(tauri_plugin_dialog::init())
 		.plugin(tauri_plugin_opener::init())
+		.plugin(tauri_plugin_notification::init())
 		.manage(JobsState::default())
 		.invoke_handler(tauri::generate_handler![
 			ping,

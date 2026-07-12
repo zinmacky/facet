@@ -18,8 +18,8 @@ const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
 
 /**
  * アプリ設定ダイアログ。ヘッダの歯車ボタン(App.tsx)から開く。
- * 「外観(テーマ)」と「書き出し(既定の書き出し先・完了後にフォルダを開く)」の
- * 2 セクションを持つ。すべて `useSettings().updateSettings` で即時反映・永続化される
+ * 「外観(テーマ)」と「書き出し(既定の書き出し先・完了後にフォルダを開く・
+ * 完了時に通知する)」の 2 セクションを持つ。すべて `useSettings().updateSettings` で即時反映・永続化される
  * (保存ボタンは無い — 設定変更に「適用」を挟まない方針)。
  */
 export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
@@ -113,6 +113,18 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
 							className="h-3.5 w-3.5 rounded border-line bg-elevated accent-accent"
 						/>
 						書き出し完了後にフォルダを開く
+					</label>
+
+					<label className="flex items-center gap-2 text-xs text-neutral-300">
+						<input
+							type="checkbox"
+							checked={settings.notifyOnExportComplete}
+							onChange={(e) =>
+								updateSettings({ notifyOnExportComplete: e.target.checked })
+							}
+							className="h-3.5 w-3.5 rounded border-line bg-elevated accent-accent"
+						/>
+						書き出し完了時に通知する
 					</label>
 				</section>
 			</div>

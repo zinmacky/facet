@@ -18,12 +18,15 @@ export type AppSettings = {
 	defaultExportDir: string | null;
 	/** 書き出し完了後に出力フォルダを自動で開く */
 	openFolderAfterExport: boolean;
+	/** 書き出し完了時に OS のデスクトップ通知を送る */
+	notifyOnExportComplete: boolean;
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
 	theme: "dark", // 既定はダーク(現状の見た目を維持)
 	defaultExportDir: null,
 	openFolderAfterExport: false,
+	notifyOnExportComplete: false,
 };
 
 export const SETTINGS_STORAGE_KEY = "facet.desktop.settings";
@@ -67,6 +70,10 @@ export function loadSettings(): AppSettings {
 				typeof obj.openFolderAfterExport === "boolean"
 					? obj.openFolderAfterExport
 					: DEFAULT_SETTINGS.openFolderAfterExport,
+			notifyOnExportComplete:
+				typeof obj.notifyOnExportComplete === "boolean"
+					? obj.notifyOnExportComplete
+					: DEFAULT_SETTINGS.notifyOnExportComplete,
 		};
 	} catch {
 		// JSON.parse 失敗や localStorage アクセス不可はすべて既定値扱い

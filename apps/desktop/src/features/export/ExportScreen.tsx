@@ -7,6 +7,7 @@ import type { Clip } from "../../types";
 import { masterSpec } from "../../types";
 import { pickExportDirectory, sanitizeFileName } from "../../lib/tauri";
 import { useSettings } from "../../lib/settings";
+import { notifyExportComplete } from "../../lib/notification";
 import { usePreview } from "../../lib/usePreview";
 import { useReframeQueue } from "../../lib/useReframeQueue";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
@@ -223,24 +224,33 @@ export function ExportScreen({
 		},
 	});
 
-	// 設定で「書き出し完了後にフォルダを開く」が有効なとき、バッチ内の全 clip が
-	// 成功(done)で完了したタイミングで一度だけ出力先フォルダを自動で開く。
-	// 「未完了 → 全完了」への遷移でのみ発火させる(autoOpenedRef で二重発火を防ぐ。
-	// 失敗中の clip がある間は donePaths が clips.length に届かないため発火しない)。
-	const autoOpenedRef = useRef(false);
+	// バッチ内の全 clip が成功(done)で完了したタイミングで一度だけ発火する
+	// 「完了時アクション」(デスクトップ通知 / 出力先フォルダを開く)。設定で
+	// それぞれ独立に有効/無効を切り替えられる。
+	// 「未完了 → 全完了」への遷移でのみ発火させる(completionActionsFiredRef で
+	// 二重発火を防ぐ。失敗中の clip がある間は donePaths が clips.length に
+	// 届かないため発火しない)。
+	const completionActionsFiredRef = useRef(false);
 	useEffect(() => {
 		const dir = outputDirRef.current;
 		const allDone =
 			started && !!dir && clips.length > 0 && donePaths.length === clips.length;
 		if (!allDone) {
-			autoOpenedRef.current = false;
+			completionActionsFiredRef.current = false;
 			return;
 		}
-		if (autoOpenedRef.current) return;
-		autoOpenedRef.current = true;
+		if (completionActionsFiredRef.current) return;
+		completionActionsFiredRef.current = true;
+		if (settings.notifyOnExportComplete) void notifyExportComplete(clips.length);
 		if (!settings.openFolderAfterExport) return;
 		void openPath(dir);
-	}, [started, clips.length, donePaths.length, settings.openFolderAfterExport]);
+	}, [
+		started,
+		clips.length,
+		donePaths.length,
+		settings.notifyOnExportComplete,
+		settings.openFolderAfterExport,
+	]);
 
 	// 選択中 clip が clips から消えたとき(または未選択のとき)は先頭 clip を選択する。
 	useEffect(() => {
