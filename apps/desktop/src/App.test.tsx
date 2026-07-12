@@ -110,3 +110,26 @@ describe("App: ウィザードの状態保持", () => {
 		expect(freshTitleField).toHaveValue("");
 	});
 });
+
+/**
+ * a11y: ステップ遷移時、遷移先パネルの見出しへフォーカスが移ることの固定テスト。
+ * 各パネルは sr-only の見出し(`wizard-panel-heading-${step}`)を持ち、
+ * goToStep 経由の遷移のたびにそこへフォーカスする(初回マウント時は除く)。
+ */
+describe("App: ステップ遷移時のフォーカス移動(a11y)", () => {
+	it("edit → export → upload と遷移するたびに遷移先パネルの見出しへフォーカスする", async () => {
+		const user = userEvent.setup();
+		renderWithProviders(<App />);
+
+		await pickSource(user, "/video1.mp4");
+
+		await user.click(screen.getByRole("button", { name: /すべて書き出し/ }));
+		expect(screen.getByRole("heading", { name: "書き出し" })).toHaveFocus();
+
+		await goToStep(user, "アップロード");
+		expect(screen.getByRole("heading", { name: "アップロード" })).toHaveFocus();
+
+		await goToStep(user, "編集");
+		expect(screen.getByRole("heading", { name: "編集" })).toHaveFocus();
+	});
+});

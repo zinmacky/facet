@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
 	convertFileSrc,
@@ -148,6 +148,22 @@ export function App() {
 		[step, stepLocked],
 	);
 
+	// ステップ遷移時、遷移先パネルの見出しへフォーカスを移す(a11y: スクリーンリーダー
+	// 利用者が画面切り替えに気付けるようにする)。各パネル側の見出しは
+	// `wizard-panel-heading-${step}` の id を持つ(視覚上は sr-only、tabIndex=-1 で
+	// スクリプトからのみフォーカス可能)。WizardPanel(WizardShell.tsx)が非アクティブ
+	// パネルへ inert を設定する effect は子コンポーネント側のため、同一コミット内で
+	// この effect(親)より先に実行される — 実行時点で遷移先パネルは既に inert 解除済み。
+	// 初回マウント時(まだ「遷移」していない)はフォーカスを奪わない。
+	const mountedRef = useRef(false);
+	useEffect(() => {
+		if (!mountedRef.current) {
+			mountedRef.current = true;
+			return;
+		}
+		document.getElementById(`wizard-panel-heading-${step}`)?.focus();
+	}, [step]);
+
 	return (
 		<div className="flex h-full flex-col bg-panel">
 			{/* トップバー */}
@@ -211,6 +227,14 @@ export function App() {
 				panels={{
 					edit: (
 						<div className="grid h-full min-h-0 grid-cols-[1fr_340px]">
+							{/* ステップ遷移時のフォーカス移動先(a11y)。視覚上は非表示。 */}
+							<h2
+								id="wizard-panel-heading-edit"
+								tabIndex={-1}
+								className="sr-only"
+							>
+								編集
+							</h2>
 							<div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto p-3">
 								{!source ? (
 									<Placeholder text="元動画を選択してください。" />

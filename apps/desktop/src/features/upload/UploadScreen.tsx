@@ -648,6 +648,10 @@ export function UploadScreen({
 	return (
 		<>
 			<section ref={rootRef} className="flex h-full min-h-0 flex-col">
+				{/* ステップ遷移時のフォーカス移動先(a11y、App.tsx goToStep 参照)。視覚上は非表示。 */}
+				<h2 id="wizard-panel-heading-upload" tabIndex={-1} className="sr-only">
+					アップロード
+				</h2>
 				<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-4">
 					{!PUBLISH_SUPPORTED && (
 						<div className="shrink-0 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-300">

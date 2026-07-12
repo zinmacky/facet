@@ -221,6 +221,10 @@ export function ExportScreen({
 
 	return (
 		<section ref={rootRef} className="flex h-full min-h-0 flex-col">
+			{/* ステップ遷移時のフォーカス移動先(a11y、App.tsx goToStep 参照)。視覚上は非表示。 */}
+			<h2 id="wizard-panel-heading-export" tabIndex={-1} className="sr-only">
+				書き出し
+			</h2>
 			<div className="min-h-0 flex-1 overflow-y-auto p-4">
 				{!started ? (
 					<div className="flex h-full min-h-0 gap-4">
