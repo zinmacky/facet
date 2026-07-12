@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderWithProviders } from "../../test/render";
@@ -9,6 +9,13 @@ import { SettingsDialog } from "./SettingsDialog";
 function storedSettings(): unknown {
 	return JSON.parse(window.localStorage.getItem(SETTINGS_STORAGE_KEY) ?? "null");
 }
+
+// 各テストは DEFAULT_SETTINGS からの差分で結果を検証するため、前のテストの
+// localStorage 状態(例: 末尾のトグルテストが残す openFolderAfterExport: true)を
+// 引きずらないよう、テストごとに必ずクリアする。
+beforeEach(() => {
+	window.localStorage.clear();
+});
 
 describe("SettingsDialog: 外観(テーマ)", () => {
 	it("「ライト」を選ぶと html の .dark が外れ、localStorage に保存される", async () => {
@@ -101,5 +108,55 @@ describe("SettingsDialog: 書き出し先", () => {
 			...DEFAULT_SETTINGS,
 			openFolderAfterExport: true,
 		});
+	});
+});
+
+describe("SettingsDialog: エンコード", () => {
+	it("エンコードセクションが表示される", () => {
+		renderWithProviders(<SettingsDialog open onClose={() => {}} />);
+
+		expect(
+			screen.getByRole("heading", { name: "エンコード" }),
+		).toBeInTheDocument();
+		expect(
+			screen.getByRole("button", { name: "自動(推奨)" }),
+		).toHaveAttribute("aria-pressed", "true");
+	});
+
+	it("エンコーダを選ぶと localStorage の encoder が更新される", async () => {
+		const user = userEvent.setup();
+		renderWithProviders(<SettingsDialog open onClose={() => {}} />);
+
+		await user.click(screen.getByRole("button", { name: "h264_amf(AMD HW)" }));
+
+		expect(storedSettings()).toEqual({ ...DEFAULT_SETTINGS, encoder: "h264_amf" });
+		expect(
+			screen.getByRole("button", { name: "h264_amf(AMD HW)" }),
+		).toHaveAttribute("aria-pressed", "true");
+		expect(screen.getByRole("button", { name: "自動(推奨)" })).toHaveAttribute(
+			"aria-pressed",
+			"false",
+		);
+	});
+
+	it("同時エンコード数を選ぶと localStorage の maxConcurrentEncodes が更新される", async () => {
+		const user = userEvent.setup();
+		renderWithProviders(<SettingsDialog open onClose={() => {}} />);
+
+		expect(screen.getByRole("button", { name: "2" })).toHaveAttribute(
+			"aria-pressed",
+			"true",
+		);
+
+		await user.click(screen.getByRole("button", { name: "4" }));
+
+		expect(storedSettings()).toEqual({
+			...DEFAULT_SETTINGS,
+			maxConcurrentEncodes: 4,
+		});
+		expect(screen.getByRole("button", { name: "4" })).toHaveAttribute(
+			"aria-pressed",
+			"true",
+		);
 	});
 });

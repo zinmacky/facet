@@ -37,6 +37,10 @@ export async function invoke<T>(
 			return undefined as unknown as T;
 		}
 
+		case "set_max_concurrent_encodes":
+			// dev:mock はジョブを実際には並列実行しないため、値の保持は不要(no-op)。
+			return undefined as unknown as T;
+
 		default:
 			throw new Error(`[mock] invoke not implemented for command: ${cmd}`);
 	}

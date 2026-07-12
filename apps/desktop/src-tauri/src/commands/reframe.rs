@@ -30,10 +30,15 @@
 //! };
 //!
 //! // 1. ジョブを開始する。戻り値の jobId をイベント名の組み立てに使う。
+//! // encoder は省略可能。省略または "auto" なら自動選択(EncoderSelection::Auto)。
+//! // それ以外("h264_amf" / "h264_mf" 等)は明示指定で、そのプラットフォームの候補
+//! // テーブルに存在しない名前を渡すとジョブを起動せずに Err を返す
+//! // (encoder_choice_from_param がジョブ登録前に検証する)。
 //! const jobId = await invoke<string>("reframe_start", {
 //!   input: "/path/to/input.mp4",
 //!   output: "/path/to/output.mp4",
 //!   spec, // EditSpec
+//!   encoder: "auto", // 省略可。"h264_amf" 等の明示指定も可
 //! });
 //!
 //! // 2. 進捗イベントを購読する(既定 200ms 間隔でスロットリングされる。progress.rs 参照)。
@@ -52,6 +57,10 @@
 //!
 //! // 4. 中断したい場合。
 //! await invoke("reframe_cancel", { jobId });
+//!
+//! // 5. 設定画面から同時実行エンコード数(1〜4)を変更する場合(即時反映。
+//! //    実行中ジョブの既得スロットは奪わず、以後の新規取得のみ新上限に従う)。
+//! await invoke("set_max_concurrent_encodes", { max: 2 });
 //! ```
 //!
 //! `reframe_start` はジョブをバックグラウンド(`tauri::async_runtime::spawn_blocking`、
@@ -77,6 +86,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use media_core::encoder_select::{self, EncoderChoice};
 use media_core::spec::EditSpec;
 use media_core::{encode, fit, CancelToken, EncoderSelection, Progress, ReframeOptions};
 use serde::Serialize;
@@ -159,10 +169,50 @@ fn error_event_name(job_id: &str) -> String {
 	format!("reframe://error/{job_id}")
 }
 
+/// `encoder` invoke パラメータ(UI の手動選択、省略可能)を [`EncoderChoice`] へ解決する。
+///
+/// - `None` または `Some("auto")` は自動選択(`EncoderSelection::Auto` に対応)を表す
+///   `Ok(None)`。
+/// - それ以外の文字列は `encoder_select::find_choice` で `platform` の候補テーブルから
+///   引く。見つからなければ、そのプラットフォームで利用可能な候補名を列挙した日本語
+///   エラーメッセージで `Err` を返す。
+///
+/// [`reframe_start`] はジョブ登録**前**にこれを呼ぶ(無効な `encoder` 値でジョブを
+/// 起動しないため)。`platform` を引数として注入しているのはテストで
+/// `Platform::Windows` 等を固定して検証するため
+/// (`encoder_select::Platform::current` はビルド時の `cfg(target_os)` に依存し、
+/// テスト環境では固定できない)。
+fn encoder_choice_from_param(
+	platform: encoder_select::Platform,
+	param: Option<&str>,
+) -> Result<Option<EncoderChoice>, String> {
+	match param {
+		None | Some("auto") => Ok(None),
+		Some(name) => encoder_select::find_choice(platform, name)
+			.map(Some)
+			.ok_or_else(|| {
+				let available: Vec<&str> = encoder_select::candidate_table(platform)
+					.iter()
+					.map(|choice| choice.name)
+					.collect();
+				let available = if available.is_empty() {
+					"このプラットフォームでは利用可能な候補がありません".to_string()
+				} else {
+					available.join(", ")
+				};
+				format!("不明なエンコーダ指定です: {name}(利用可能な候補: {available})")
+			}),
+	}
+}
+
 /// `input` を `spec` の指定形状へ再フレーミングするジョブを開始し、`JobId` を返す。
 ///
 /// ジョブ本体はバックグラウンドスレッドで実行され、この関数はジョブ登録後すぐに
 /// 返る(完了を待たない)。進捗・完了は上記モジュール doc の Tauri イベントで通知する。
+///
+/// `encoder` は省略可能(省略時は `None`)。[`encoder_choice_from_param`] で解決し、
+/// 無効な値であればジョブを登録せずに `Err` を返す(モジュール doc §renderer 向け API
+/// 参照)。
 #[tauri::command]
 pub async fn reframe_start(
 	app: AppHandle,
@@ -170,7 +220,11 @@ pub async fn reframe_start(
 	input: String,
 	output: String,
 	spec: EditSpec,
+	encoder: Option<String>,
 ) -> Result<JobId, String> {
+	let encoder_choice =
+		encoder_choice_from_param(encoder_select::Platform::current(), encoder.as_deref())?;
+
 	let token = CancelToken::new();
 	let job_id = jobs.register(token);
 
@@ -186,10 +240,21 @@ pub async fn reframe_start(
 			&input_path,
 			&output_path,
 			spec,
+			encoder_choice,
 		);
 	});
 
 	Ok(job_id)
+}
+
+/// 同時実行エンコード数の上限を実行時に変更する(設定画面から呼ばれる想定)。
+///
+/// UI は 1〜4 の範囲で `max` を渡す想定だが、範囲外の値をここで拒否することはせず
+/// `EncodeSlots::set_max` の 0→1 切り上げ(`concurrency.rs` 参照)にそのまま委ねる。
+/// 実行中ジョブが既に取得済みのスロットは奪わない(以後の新規取得のみ新上限に従う)。
+#[tauri::command]
+pub fn set_max_concurrent_encodes(max: usize) {
+	media_core::concurrency::EncodeSlots::global().set_max(max);
 }
 
 /// ジョブ本体(ブロッキングスレッド上で実行)。State からトークンを取り出し、
@@ -206,7 +271,18 @@ pub async fn reframe_start(
 /// (P2: `commands::preview::run_job` との重複解消。詳細は `run_media_job` 冒頭コメント参照)。
 /// ここでは `media_core::reframe` 固有の [`ReframeOptions`] 組み立てと、成功時の
 /// done ペイロード([`ReframeDone`])への変換のみを行う。
-fn run_job(app: &AppHandle, job_id: &str, input: &Path, output: &Path, spec: EditSpec) {
+///
+/// `encoder_choice` は [`encoder_choice_from_param`] が解決した結果。`None` は
+/// `EncoderSelection::Auto`、`Some(choice)` は `choice.name`/`choice.to_dictionary()`
+/// を使った `EncoderSelection::Explicit` に変換する。
+fn run_job(
+	app: &AppHandle,
+	job_id: &str,
+	input: &Path,
+	output: &Path,
+	spec: EditSpec,
+	encoder_choice: Option<EncoderChoice>,
+) {
 	run_media_job(
 		app,
 		job_id,
@@ -214,13 +290,20 @@ fn run_job(app: &AppHandle, job_id: &str, input: &Path, output: &Path, spec: Edi
 		done_event_name(job_id),
 		error_event_name(job_id),
 		move |token, on_progress| {
+			let encoder = match encoder_choice {
+				None => EncoderSelection::Auto,
+				Some(choice) => EncoderSelection::Explicit {
+					name: choice.name,
+					options: choice.to_dictionary(),
+				},
+			};
 			let options = ReframeOptions {
 				preset: &spec.preset,
 				sigma: fit::DEFAULT_SIGMA,
 				crop: spec.crop,
 				source: spec.source,
 				trim: spec.trim,
-				encoder: EncoderSelection::Auto,
+				encoder,
 				bit_rate: encode::DEFAULT_BITRATE,
 				cancel: token,
 				on_progress,
@@ -430,5 +513,43 @@ mod tests {
 		assert_eq!(progress_event_name(job_id), "reframe://progress/abc-123");
 		assert_eq!(done_event_name(job_id), "reframe://done/abc-123");
 		assert_eq!(error_event_name(job_id), "reframe://error/abc-123");
+	}
+
+	// --- encoder_choice_from_param ---------------------------------------------------
+
+	#[test]
+	fn encoder_choice_from_param_none_or_auto_means_auto_selection() {
+		assert_eq!(
+			encoder_choice_from_param(encoder_select::Platform::Windows, None),
+			Ok(None)
+		);
+		assert_eq!(
+			encoder_choice_from_param(encoder_select::Platform::Windows, Some("auto")),
+			Ok(None)
+		);
+	}
+
+	#[test]
+	fn encoder_choice_from_param_resolves_h264_mf_with_hw_encoding_option() {
+		let choice = encoder_choice_from_param(encoder_select::Platform::Windows, Some("h264_mf"))
+			.expect("h264_mf should resolve")
+			.expect("should be Some");
+		assert_eq!(choice.name, "h264_mf");
+		assert_eq!(choice.options, &[("hw_encoding", "1")]);
+	}
+
+	#[test]
+	fn encoder_choice_from_param_unknown_name_lists_available_candidates() {
+		let err = encoder_choice_from_param(encoder_select::Platform::Windows, Some("libx264"))
+			.expect_err("libx264 is not a windows candidate");
+		assert!(err.contains("h264_amf"), "message was: {err}");
+		assert!(err.contains("h264_mf"), "message was: {err}");
+	}
+
+	#[test]
+	fn encoder_choice_from_param_errors_on_unsupported_platform_with_explicit_name() {
+		let err = encoder_choice_from_param(encoder_select::Platform::Other, Some("h264_amf"))
+			.expect_err("Other platform has no candidates");
+		assert!(err.contains("h264_amf"), "message was: {err}");
 	}
 }
