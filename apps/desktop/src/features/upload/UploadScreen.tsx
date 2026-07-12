@@ -608,7 +608,8 @@ export function UploadScreen({
 				(t) => `${sanitizeFileName(t.clip.name)}_${t.target.id}_${t.output.fit}`,
 			);
 
-			bulkExportQueue.startBatch(tasks.map((t) => t.output.id));
+			// key ごとの世代トークン(バグ3: 世代管理)。run() にそのまま渡す。
+			const tokens = bulkExportQueue.startBatch(tasks.map((t) => t.output.id));
 
 			const outcomes = await Promise.all(
 				tasks.map(async (t) => {
@@ -617,7 +618,11 @@ export function UploadScreen({
 						`${sanitizeFileName(t.clip.name)}_${t.target.id}_${t.output.fit}`;
 					try {
 						const outputPath = await join(dir, `${base}.mp4`);
+						// startBatch が tasks 全 output.id 分のトークンを発行済みなので必ず存在する。
+						const token = tokens.get(t.output.id);
+						if (!token) return false;
 						await bulkExportQueue.run(
+							token,
 							t.output.id,
 							source.inputPath,
 							outputPath,

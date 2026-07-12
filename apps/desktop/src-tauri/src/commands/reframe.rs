@@ -2,7 +2,7 @@
 //! 進捗・完了を Tauri イベントで通知する。
 //!
 //! `reframe_cancel` はジョブ ID 空間を [`crate::commands::preview`] と共有しており、
-//! `preview_start` が返した `jobId` に対しても同じコマンドでキャンセルできる
+//! `preview_start` が受け取った `jobId` に対しても同じコマンドでキャンセルできる
 //! (両モジュールとも同一の [`JobsState`] に登録するため。`preview.rs` 冒頭コメント参照)。
 //!
 //! ## renderer 向け API
@@ -29,25 +29,14 @@
 //!   speed: number;
 //! };
 //!
-//! // 1. ジョブを開始する。戻り値の jobId をイベント名の組み立てに使う。
-//! // encoder は省略可能。省略または "auto" なら自動選択(EncoderSelection::Auto)。
-//! // それ以外("h264_amf" / "h264_mf" 等)は明示指定で、そのプラットフォームの候補
-//! // テーブルに存在しない名前を渡すとジョブを起動せずに Err を返す
-//! // (encoder_choice_from_param がジョブ登録前に検証する)。
-//! const jobId = await invoke<string>("reframe_start", {
-//!   input: "/path/to/input.mp4",
-//!   output: "/path/to/output.mp4",
-//!   spec, // EditSpec
-//!   encoder: "auto", // 省略可。"h264_amf" 等の明示指定も可
-//! });
+//! // 1. jobId は呼び出し側(renderer)が採番する(crypto.randomUUID() 等)。
+//! //    Rust 側では採番しない — 理由は下記「jobId 採番をフロントエンドへ移した理由」参照。
+//! const jobId = crypto.randomUUID();
 //!
-//! // 2. 進捗イベントを購読する(既定 200ms 間隔でスロットリングされる。progress.rs 参照)。
+//! // 2. invoke() より先に listen() を完了させる(取りこぼし防止。理由は下記参照)。
 //! const unlistenProgress = await listen<Progress>(`reframe://progress/${jobId}`, (event) => {
 //!   console.log(event.payload.percent);
 //! });
-//!
-//! // 3. 完了 / 失敗イベント(いずれか一方が必ず一度だけ発火する。キャンセルも失敗の一種として
-//! //    `reframe://error/${jobId}` に "キャンセルされました" のメッセージで通知される)。
 //! const unlistenDone = await listen<{ encoder: string }>(`reframe://done/${jobId}`, (event) => {
 //!   console.log("encoder used:", event.payload.encoder);
 //! });
@@ -55,16 +44,47 @@
 //!   console.error(event.payload.message);
 //! });
 //!
-//! // 4. 中断したい場合。
+//! // 3. 購読が揃ってからジョブを開始する。
+//! // encoder は省略可能。省略または "auto" なら自動選択(EncoderSelection::Auto)。
+//! // それ以外("h264_amf" / "h264_mf" 等)は明示指定で、そのプラットフォームの候補
+//! // テーブルに存在しない名前を渡すとジョブを起動せずに Err を返す
+//! // (encoder_choice_from_param がジョブ登録前に検証する)。
+//! await invoke("reframe_start", {
+//!   jobId,
+//!   input: "/path/to/input.mp4",
+//!   output: "/path/to/output.mp4",
+//!   spec, // EditSpec
+//!   encoder: "auto", // 省略可。"h264_amf" 等の明示指定も可
+//! });
+//!
+//! // 4. 完了 / 失敗イベント(いずれか一方が必ず一度だけ発火する。キャンセルも失敗の一種として
+//! //    `reframe://error/${jobId}` に "キャンセルされました" のメッセージで通知される)。
+//! //    listen() を invoke() より先に張っているため、ジョブがどれだけ早く完了/失敗しても
+//! //    取りこぼさない。
+//!
+//! // 5. 中断したい場合。
 //! await invoke("reframe_cancel", { jobId });
 //!
-//! // 5. 設定画面から同時実行エンコード数(1〜4)を変更する場合(即時反映。
+//! // 6. 設定画面から同時実行エンコード数(1〜4)を変更する場合(即時反映。
 //! //    実行中ジョブの既得スロットは奪わず、以後の新規取得のみ新上限に従う)。
 //! await invoke("set_max_concurrent_encodes", { max: 2 });
 //! ```
 //!
+//! ### jobId 採番をフロントエンドへ移した理由(バグ2 対策)
+//!
+//! 以前は `reframe_start` が Rust 側で jobId を採番し、その戻り値を待ってから
+//! renderer が `listen()` を張っていた。しかしジョブは `reframe_start` 内で
+//! `spawn_blocking` された直後から進行し(OutputBusy 等の即時エラーはマイクロ秒単位で
+//! 発火しうる)、`reframe_start` の `Result` が renderer に届く IPC 応答と、
+//! イベント emit の IPC は別経路のため到達順序の保証が無い。つまり
+//! 「jobId が Rust 側にしか無い」設計では、renderer が `listen()` を張る前に
+//! イベントが発火して取りこぼす構造的なレースを避けられなかった。
+//! jobId を renderer 側で先に採番し、`listen()` の完了を待ってから `invoke()` する
+//! ことで、ジョブが実際に開始される(= イベントが発火しうる)より前に購読が
+//! 確実に完了していることを保証できる。
+//!
 //! `reframe_start` はジョブをバックグラウンド(`tauri::async_runtime::spawn_blocking`、
-//! tokio のブロッキングスレッドプール)へ投げて即座に `jobId` を返す(reframe 本体の完了を
+//! tokio のブロッキングスレッドプール)へ投げて即座に返る(reframe 本体の完了を
 //! 待たない)。同時実行数の制限は `media_core::concurrency::EncodeSlots` が
 //! `media_core::reframe` 内部で担うため、複数ジョブを同時に `reframe_start` してよい
 //! (`concurrency.rs` 冒頭コメント参照)。
@@ -73,8 +93,9 @@
 //!
 //! - [`JobsState`] は `Mutex<HashMap<JobId, CancelToken>>` を保持する(`lib.rs` の
 //!   `.manage(JobsState::default())` でアプリ全体に 1 つ登録する)。
-//! - `reframe_start` はジョブ登録時に [`CancelToken`] を発行して State に挿入し、
-//!   同じトークンの clone(`Arc<AtomicBool>` の共有、安価)をブロッキングタスクへ渡す。
+//! - `reframe_start` は renderer から渡された `job_id` に対して [`CancelToken`] を発行して
+//!   State に挿入し、同じトークンの clone(`Arc<AtomicBool>` の共有、安価)を
+//!   ブロッキングタスクへ渡す。
 //! - `reframe_cancel` は State からトークンを取得して `cancel()` を呼ぶだけ
 //!   (トークン自体はブロッキングタスク側が `is_cancelled()` をループ境界で見ている
 //!   — `media_core::cancel` 冒頭コメント参照)。
@@ -91,9 +112,9 @@ use media_core::spec::EditSpec;
 use media_core::{encode, fit, CancelToken, EncoderSelection, Progress, ReframeOptions};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-use uuid::Uuid;
 
-/// `reframe_start` が発行するジョブ ID。進捗/完了イベント名の組み立てにも使う。
+/// renderer が採番し `reframe_start`/`preview_start` へ渡すジョブ ID。
+/// 進捗/完了イベント名の組み立てにも使う。
 pub type JobId = String;
 
 /// 実行中ジョブの [`CancelToken`] を保持する State。
@@ -113,15 +134,18 @@ impl JobsState {
 			.unwrap_or_else(|poisoned| poisoned.into_inner())
 	}
 
-	/// 新しい [`CancelToken`] を登録し、発行した `JobId` を返す。
+	/// 呼び出し側(renderer)が採番した `job_id` に対して新しい [`CancelToken`] を登録する。
+	///
+	/// jobId は Rust 側では採番しない(renderer 側で `crypto.randomUUID()` 等により
+	/// 採番する。理由はモジュール冒頭コメント「jobId 採番をフロントエンドへ移した理由」
+	/// 参照)。同じ `job_id` で複数回 `register` を呼ぶと既存のトークンを上書きする
+	/// (renderer 側は毎回新しい UUID を採番するため、通常はこの経路を通らない)。
 	///
 	/// `pub(crate)`: `commands::preview` がジョブ ID 空間を共有する
 	/// (`preview_start` も同じ [`JobsState`] に登録し、`reframe_cancel` を
 	/// そのままキャンセルコマンドとして再利用できるようにするため)。
-	pub(crate) fn register(&self, token: CancelToken) -> JobId {
-		let job_id = Uuid::new_v4().to_string();
-		self.lock().insert(job_id.clone(), token);
-		job_id
+	pub(crate) fn register(&self, job_id: JobId, token: CancelToken) {
+		self.lock().insert(job_id, token);
 	}
 
 	/// `job_id` に紐づく [`CancelToken`] の clone を返す(`Arc` 共有なので安価)。
@@ -205,10 +229,12 @@ fn encoder_choice_from_param(
 	}
 }
 
-/// `input` を `spec` の指定形状へ再フレーミングするジョブを開始し、`JobId` を返す。
+/// `input` を `spec` の指定形状へ再フレーミングするジョブを開始する。
 ///
-/// ジョブ本体はバックグラウンドスレッドで実行され、この関数はジョブ登録後すぐに
-/// 返る(完了を待たない)。進捗・完了は上記モジュール doc の Tauri イベントで通知する。
+/// `job_id` は renderer 側が採番して渡す(モジュール冒頭コメント「jobId 採番を
+/// フロントエンドへ移した理由」参照)。ジョブ本体はバックグラウンドスレッドで実行され、
+/// この関数はジョブ登録後すぐに返る(完了を待たない)。進捗・完了は上記モジュール doc の
+/// Tauri イベントで通知する。
 ///
 /// `encoder` は省略可能(省略時は `None`)。[`encoder_choice_from_param`] で解決し、
 /// 無効な値であればジョブを登録せずに `Err` を返す(モジュール doc §renderer 向け API
@@ -217,19 +243,20 @@ fn encoder_choice_from_param(
 pub async fn reframe_start(
 	app: AppHandle,
 	jobs: State<'_, JobsState>,
+	job_id: JobId,
 	input: String,
 	output: String,
 	spec: EditSpec,
 	encoder: Option<String>,
-) -> Result<JobId, String> {
+) -> Result<(), String> {
 	let encoder_choice =
 		encoder_choice_from_param(encoder_select::Platform::current(), encoder.as_deref())?;
 
 	let token = CancelToken::new();
-	let job_id = jobs.register(token);
+	jobs.register(job_id.clone(), token);
 
 	let app_for_task = app.clone();
-	let job_id_for_task = job_id.clone();
+	let job_id_for_task = job_id;
 	let input_path = PathBuf::from(input);
 	let output_path = PathBuf::from(output);
 
@@ -244,7 +271,7 @@ pub async fn reframe_start(
 		);
 	});
 
-	Ok(job_id)
+	Ok(())
 }
 
 /// 同時実行エンコード数の上限を実行時に変更する(設定画面から呼ばれる想定)。
@@ -446,7 +473,8 @@ mod tests {
 	fn register_then_cancel_marks_token_cancelled() {
 		let jobs = JobsState::default();
 		let token = CancelToken::new();
-		let job_id = jobs.register(token.clone());
+		let job_id = "job-a".to_string();
+		jobs.register(job_id.clone(), token.clone());
 
 		assert!(!token.is_cancelled(), "登録直後はキャンセルされていない");
 
@@ -477,7 +505,8 @@ mod tests {
 	fn remove_makes_job_and_get_disappear() {
 		let jobs = JobsState::default();
 		let token = CancelToken::new();
-		let job_id = jobs.register(token);
+		let job_id = "job-a".to_string();
+		jobs.register(job_id.clone(), token);
 
 		jobs.remove(&job_id);
 
@@ -493,8 +522,10 @@ mod tests {
 		let jobs = JobsState::default();
 		let token_a = CancelToken::new();
 		let token_b = CancelToken::new();
-		let job_a = jobs.register(token_a.clone());
-		let job_b = jobs.register(token_b.clone());
+		let job_a = "job-a".to_string();
+		let job_b = "job-b".to_string();
+		jobs.register(job_a.clone(), token_a.clone());
+		jobs.register(job_b.clone(), token_b.clone());
 
 		jobs.cancel(&job_a).expect("job_a must exist");
 

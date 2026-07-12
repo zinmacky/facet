@@ -3,6 +3,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { documentDir } from "@tauri-apps/api/path";
 import { open } from "@tauri-apps/plugin-dialog";
+import { newJobId } from "./jobId";
 import type { EncoderPreference } from "./settings";
 
 /**
@@ -120,7 +121,7 @@ export interface Progress {
 	speed: number;
 }
 
-/** ジョブ ID(`reframe_start`/`preview_start` の戻り値)。 */
+/** ジョブ ID(renderer 側で採番し `reframe_start`/`preview_start` の引数として渡す。`lib/jobId.ts` 参照)。 */
 export type JobId = string;
 
 /** `reframe_cancel` を呼ぶ(`preview_start` が返した jobId にも使える。§commands/preview.rs 冒頭コメント)。 */
@@ -150,6 +151,12 @@ export interface JobHandle {
  * (`media_core::reframe` は出力ディレクトリを作成しない)。
  * `encoder` は省略または `"auto"` なら Rust 側の自動選択に委ねる(invoke へは渡さない —
  * `undefined` もそのまま渡してよいが、キー自体を省略した方が意図が明確なため省く)。
+ *
+ * jobId はこの関数(renderer 側)で採番し、`listen()` を完了させてから
+ * `invoke("reframe_start", …)` を呼ぶ(取りこぼし対策。理由は
+ * `src-tauri/src/commands/reframe.rs` 冒頭コメント「jobId 採番をフロントエンドへ移した
+ * 理由」参照)。Rust 側はジョブ登録直後(`spawn_blocking` 後すぐ)に進捗/完了/失敗を
+ * emit しうるため、購読を先に確立しておかないとイベントを丸ごと取りこぼす。
  */
 export async function startReframe(
 	input: string,
@@ -158,30 +165,53 @@ export async function startReframe(
 	handlers: ReframeHandlers,
 	encoder?: EncoderPreference,
 ): Promise<JobHandle> {
-	const jobId = await invoke<JobId>("reframe_start", {
-		input,
-		output,
-		spec,
-		...(encoder && encoder !== "auto" ? { encoder } : {}),
-	});
-	const unlisteners: UnlistenFn[] = await Promise.all([
+	const jobId: JobId = newJobId();
+	const handle = await subscribeReframeEvents(jobId, handlers);
+	try {
+		await invoke<void>("reframe_start", {
+			jobId,
+			input,
+			output,
+			spec,
+			...(encoder && encoder !== "auto" ? { encoder } : {}),
+		});
+	} catch (err) {
+		handle.unsubscribe();
+		throw err;
+	}
+	return handle;
+}
+
+/**
+ * `reframe://{progress,done,error}/${jobId}` を購読し、`JobHandle` を返す。
+ * done/error はジョブの終端イベントなので、発火した時点でこの関数が自ら購読解除する
+ * (呼び出し側の `handle` 変数の代入タイミングに依存させない — invoke() より先に
+ * listen() する設計上、done/error が invoke() の resolve より先に発火しうるため、
+ * 呼び出し側で `handle` を参照する形の自己クリーンアップは間に合わない可能性がある)。
+ */
+async function subscribeReframeEvents(
+	jobId: JobId,
+	handlers: ReframeHandlers,
+): Promise<JobHandle> {
+	let unlisteners: UnlistenFn[] = [];
+	const unsubscribe = () => {
+		for (const unlisten of unlisteners) unlisten();
+		unlisteners = [];
+	};
+	unlisteners = await Promise.all([
 		listen<Progress>(`reframe://progress/${jobId}`, (event) => {
 			handlers.onProgress?.(event.payload);
 		}),
 		listen<{ encoder: string }>(`reframe://done/${jobId}`, (event) => {
+			unsubscribe();
 			handlers.onDone?.(event.payload.encoder);
 		}),
 		listen<{ message: string }>(`reframe://error/${jobId}`, (event) => {
+			unsubscribe();
 			handlers.onError?.(event.payload.message);
 		}),
 	]);
-	return {
-		jobId,
-		unsubscribe: () => {
-			for (const unlisten of unlisteners) unlisten();
-		},
-		cancel: () => cancelJob(jobId),
-	};
+	return { jobId, unsubscribe, cancel: () => cancelJob(jobId) };
 }
 
 // ---- preview(低ビットレート・キャッシュ付き仮エンコード) -----------------
@@ -197,31 +227,42 @@ export interface PreviewHandlers {
  * `input` を `spec` の指定形状へ低ビットレートでプレビュー生成する
  * (`reframe_start` と同じジョブ ID 空間。キャンセルは `cancelJob` を使う)。
  * done イベントの絶対パスは `convertFileSrc` を通してから `<video>` の `src` に使う。
+ *
+ * jobId 採番・listen-before-invoke の理由は `startReframe` と同じ(取りこぼし対策。
+ * `src-tauri/src/commands/reframe.rs` 冒頭コメント参照)。
  */
 export async function startPreview(
 	input: string,
 	spec: EditSpec,
 	handlers: PreviewHandlers,
 ): Promise<JobHandle> {
-	const jobId = await invoke<JobId>("preview_start", { input, spec });
-	const unlisteners: UnlistenFn[] = await Promise.all([
+	const jobId: JobId = newJobId();
+	let unlisteners: UnlistenFn[] = [];
+	const unsubscribe = () => {
+		for (const unlisten of unlisteners) unlisten();
+		unlisteners = [];
+	};
+	unlisteners = await Promise.all([
 		listen<Progress>(`preview://progress/${jobId}`, (event) => {
 			handlers.onProgress?.(event.payload);
 		}),
 		listen<{ path: string }>(`preview://done/${jobId}`, (event) => {
+			unsubscribe();
 			handlers.onDone?.(event.payload.path);
 		}),
 		listen<{ message: string }>(`preview://error/${jobId}`, (event) => {
+			unsubscribe();
 			handlers.onError?.(event.payload.message);
 		}),
 	]);
-	return {
-		jobId,
-		unsubscribe: () => {
-			for (const unlisten of unlisteners) unlisten();
-		},
-		cancel: () => cancelJob(jobId),
-	};
+	const handle: JobHandle = { jobId, unsubscribe, cancel: () => cancelJob(jobId) };
+	try {
+		await invoke<void>("preview_start", { jobId, input, spec });
+	} catch (err) {
+		unsubscribe();
+		throw err;
+	}
+	return handle;
 }
 
 // ---- エンコード設定 ---------------------------------------------------------

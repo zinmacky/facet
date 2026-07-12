@@ -23,7 +23,27 @@ export const DEFAULT_MEDIA_INFO: MediaInfo = {
 	codec: "h264",
 };
 
+/**
+ * jobId 採番(`lib/jobId.ts` の `newJobId()`)のモック。バグ2対策で jobId は renderer 側
+ * (`lib/tauri.ts` の `startReframe`/`startPreview`)が採番するようになったため、
+ * Rust コマンド(`reframe_start`/`preview_start`)は jobId を戻り値として返さなくなった
+ * (`Result<(), String>` を返すだけ)。テスト側は jobId を予測可能にするため
+ * `newJobId()` を差し替え、以前の `job-${N}`(呼び出し順に採番)と同じ命名を保つ
+ * (既存テストの `emitMockEvent("reframe://done/job-1", …)` 等をそのまま使えるようにする)。
+ *
+ * `crypto.randomUUID()` 自体はグローバルに差し替えない — `App.tsx`/
+ * `features/upload/uploadTypes.ts` 等が clip/post/output の id 生成に直接
+ * `crypto.randomUUID()` を使っており、グローバルに差し替えるとそれらの id も
+ * `job-N` になってしまい、ジョブ ID の連番と衝突する(`lib/jobId.ts` の設計コメント
+ * 参照)。ジョブ ID 採番だけを専用モジュール `lib/jobId.ts` に切り出し、
+ * `src/test/setup.ts` で `vi.mock("../lib/jobId", …)` によりそのモジュールだけを
+ * 差し替えることで分離している。
+ */
 let jobCounter = 0;
+export const mockNewJobId = vi.fn((): string => {
+	jobCounter += 1;
+	return `job-${jobCounter}`;
+});
 
 /** invoke コマンドの既定実装。未対応コマンドは reject する(テスト側の見落としに気付けるように)。 */
 async function defaultInvokeImpl(cmd: string, _args?: unknown): Promise<unknown> {
@@ -34,8 +54,8 @@ async function defaultInvokeImpl(cmd: string, _args?: unknown): Promise<unknown>
 			return DEFAULT_MEDIA_INFO;
 		case "reframe_start":
 		case "preview_start":
-			jobCounter += 1;
-			return `job-${jobCounter}`;
+			// jobId は呼び出し側(renderer)が args.jobId として渡す。Rust 側は戻り値を返さない。
+			return undefined;
 		case "reframe_cancel":
 		case "set_max_concurrent_encodes":
 			return undefined;
@@ -45,6 +65,17 @@ async function defaultInvokeImpl(cmd: string, _args?: unknown): Promise<unknown>
 }
 
 export const mockInvoke = vi.fn(defaultInvokeImpl);
+
+/**
+ * `mockInvoke` の `callIndex` 番目の呼び出しに渡された `jobId` 引数を返す
+ * (`reframe_start`/`preview_start` の呼び出しから、渡された jobId を読み取るための
+ * テスト用ヘルパ。以前の `await mockInvoke.mock.results[callIndex]?.value` 相当 —
+ * jobId が戻り値ではなく引数になったため置き換え)。
+ */
+export function invokeJobId(callIndex: number): string | undefined {
+	const args = mockInvoke.mock.calls[callIndex]?.[1] as { jobId?: string } | undefined;
+	return args?.jobId;
+}
 
 // event 名 → 登録済みハンドラの集合(reframe://progress/<jobId> のような動的イベント名)。
 type EventHandler = (event: { payload: unknown }) => void;
@@ -100,6 +131,8 @@ export const mockSendNotification = vi.fn(async (_options: unknown) => undefined
 export function resetTauriMocks(): void {
 	mockInvoke.mockReset();
 	mockInvoke.mockImplementation(defaultInvokeImpl);
+
+	mockNewJobId.mockClear();
 	jobCounter = 0;
 
 	mockListen.mockClear();

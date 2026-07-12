@@ -172,7 +172,12 @@ export function ExportScreen({
 
 			const sig = clipPreviewSig(clip);
 			// 同期的に「実行中」として予約する(二重起動しない。既に予約/実行中なら何もしない)。
-			if (!queue.reserve(clip.id, { sig })) continue;
+			// 返り値の世代トークンは run()/fail() にそのまま渡す(バグ3: 世代管理。
+			// このトークンを渡すことで、この予約が後から remove()/再 reserve() で
+			// 無効化された場合に、下記の非同期処理が新しいジョブの状態を誤って
+			// 上書きしないようにする)。
+			const token = queue.reserve(clip.id, { sig });
+			if (!token) continue;
 
 			const spec = masterSpec(clip, {
 				width: probe.width,
@@ -183,10 +188,10 @@ export function ExportScreen({
 				try {
 					const base = uniqueNames.get(clip) ?? sanitizeFileName(clip.name);
 					const outputPath = await join(dir, `${base}.mp4`);
-					await queue.run(clip.id, input, outputPath, spec, settings.encoder);
+					await queue.run(token, clip.id, input, outputPath, spec, settings.encoder);
 				} catch (err) {
 					// join() 失敗、または queue.run() の起動/実行失敗(状態には反映済み)。
-					queue.fail(clip.id, err);
+					queue.fail(token, clip.id, err);
 				}
 			})();
 		}

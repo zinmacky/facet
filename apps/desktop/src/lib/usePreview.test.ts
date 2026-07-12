@@ -3,6 +3,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import {
 	emitMockEvent,
+	invokeJobId,
 	mockEventListenerCount,
 	mockInvoke,
 } from "../test/tauri-mock";
@@ -27,11 +28,12 @@ describe("usePreview", () => {
 			expect(result.current.states.get("clip-1")?.rendering).toBe(true);
 		});
 		expect(mockInvoke).toHaveBeenCalledWith("preview_start", {
+			jobId: "job-1",
 			input: "/in.mp4",
 			spec: SPEC,
 		});
 
-		const jobId = await mockInvoke.mock.results[0]?.value;
+		const jobId = invokeJobId(0);
 		act(() => {
 			emitMockEvent(`preview://done/${jobId}`, { path: "/cache/out.mp4" });
 		});
@@ -74,10 +76,8 @@ describe("usePreview", () => {
 		act(() => {
 			void result.current.ensure("clip-1", "/in.mp4", SPEC, "sig-1");
 		});
-		const jobId = await waitFor(async () => {
-			expect(mockInvoke).toHaveBeenCalledTimes(1);
-			return mockInvoke.mock.results[0]?.value;
-		});
+		await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+		const jobId = invokeJobId(0);
 		act(() => {
 			emitMockEvent(`preview://done/${jobId}`, { path: "/cache/out.mp4" });
 		});
@@ -105,10 +105,8 @@ describe("usePreview", () => {
 					throw e;
 				});
 		});
-		const jobId = await waitFor(async () => {
-			expect(mockInvoke).toHaveBeenCalledTimes(1);
-			return mockInvoke.mock.results[0]?.value;
-		});
+		await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+		const jobId = invokeJobId(0);
 
 		act(() => {
 			emitMockEvent(`preview://error/${jobId}`, { message: "boom" });
@@ -126,7 +124,7 @@ describe("usePreview", () => {
 			void result.current.ensure("clip-2", "/in.mp4", SPEC, "sig-1");
 		});
 		await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(2));
-		const job1 = await mockInvoke.mock.results[0]?.value;
+		const job1 = invokeJobId(0);
 		await waitFor(() => expect(mockEventListenerCount(`preview://done/${job1}`)).toBe(1));
 
 		act(() => {
@@ -138,6 +136,26 @@ describe("usePreview", () => {
 		expect(mockEventListenerCount(`preview://done/${job1}`)).toBe(0);
 	});
 
+	it("remove(key) は jobId が確定済みなら reframe_cancel を呼ぶ(バグ1: 孤児ジョブ対策)", async () => {
+		const { result } = renderHook(() => usePreview());
+
+		act(() => {
+			void result.current.ensure("clip-1", "/in.mp4", SPEC, "sig-1");
+		});
+		await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+		const jobId = invokeJobId(0);
+		// jobId が state に反映される(= invoke の then が実行された)まで待つ。
+		await waitFor(() => expect(result.current.states.get("clip-1")?.jobId).toBe(jobId));
+
+		act(() => {
+			result.current.remove("clip-1");
+		});
+
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith("reframe_cancel", { jobId }),
+		);
+	});
+
 	it("reset() は全 key の購読を解除し states を空にする", async () => {
 		const { result } = renderHook(() => usePreview());
 
@@ -146,8 +164,8 @@ describe("usePreview", () => {
 			void result.current.ensure("clip-2", "/in.mp4", SPEC, "sig-1");
 		});
 		await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(2));
-		const job1 = await mockInvoke.mock.results[0]?.value;
-		const job2 = await mockInvoke.mock.results[1]?.value;
+		const job1 = invokeJobId(0);
+		const job2 = invokeJobId(1);
 		await waitFor(() => {
 			expect(mockEventListenerCount(`preview://done/${job1}`)).toBe(1);
 			expect(mockEventListenerCount(`preview://done/${job2}`)).toBe(1);
@@ -160,5 +178,66 @@ describe("usePreview", () => {
 		expect(result.current.states.size).toBe(0);
 		expect(mockEventListenerCount(`preview://done/${job1}`)).toBe(0);
 		expect(mockEventListenerCount(`preview://done/${job2}`)).toBe(0);
+	});
+
+	it("invoke() の resolve より先に emit された error でも states.error に反映する(バグ2: 取りこぼし対策)", async () => {
+		// tauri.ts は jobId を先に採番し listen() を確立してから invoke() する。
+		// Rust 側は spawn 直後(invoke の Result が renderer に届くより前)に
+		// OutputBusy 等のエラーを emit しうるため、ここでは invoke 自体の
+		// mock 実装内で(resolve する前に)emitMockEvent する形でその状況を再現する。
+		mockInvoke.mockImplementationOnce(async (cmd: string, args?: unknown) => {
+			expect(cmd).toBe("preview_start");
+			const jobId = (args as { jobId: string }).jobId;
+			// invoke がまだ resolve していない時点で emit する。
+			emitMockEvent(`preview://error/${jobId}`, { message: "OutputBusy" });
+			return undefined;
+		});
+
+		const { result } = renderHook(() => usePreview());
+
+		let pending!: Promise<string>;
+		act(() => {
+			pending = result.current
+				.ensure("clip-1", "/in.mp4", SPEC, "sig-1")
+				.catch((e: unknown) => {
+					throw e;
+				});
+		});
+
+		await expect(pending).rejects.toThrow("OutputBusy");
+		// emitMockEvent は mockInvoke の実装内部(act() の外)で呼ばれるため、setStates の
+		// 反映を待つ(他の act() 直接呼び出しのテストと異なり、ここでは result.current の
+		// 即時反映を保証できない)。
+		await waitFor(() => {
+			expect(result.current.states.get("clip-1")).toMatchObject({
+				rendering: false,
+				error: "OutputBusy",
+			});
+		});
+	});
+
+	it("reset() は jobId が確定済みの全ジョブへ reframe_cancel を呼ぶ(バグ1: 孤児ジョブ対策)", async () => {
+		const { result } = renderHook(() => usePreview());
+
+		act(() => {
+			void result.current.ensure("clip-1", "/in.mp4", SPEC, "sig-1");
+			void result.current.ensure("clip-2", "/in.mp4", SPEC, "sig-1");
+		});
+		await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(2));
+		const job1 = invokeJobId(0);
+		const job2 = invokeJobId(1);
+		await waitFor(() => {
+			expect(result.current.states.get("clip-1")?.jobId).toBe(job1);
+			expect(result.current.states.get("clip-2")?.jobId).toBe(job2);
+		});
+
+		act(() => {
+			result.current.reset();
+		});
+
+		await waitFor(() => {
+			expect(mockInvoke).toHaveBeenCalledWith("reframe_cancel", { jobId: job1 });
+			expect(mockInvoke).toHaveBeenCalledWith("reframe_cancel", { jobId: job2 });
+		});
 	});
 });
