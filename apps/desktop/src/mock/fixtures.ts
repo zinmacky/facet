@@ -38,3 +38,13 @@ export const MOCK_PROBE: MediaInfo = {
 	hasAudio: true,
 	codec: "h264",
 };
+
+/**
+ * `check()`(`@tauri-apps/plugin-updater`)が dev:mock で返す固定の更新情報
+ * (§mock/updater.ts)。UpdateNotification バナーの目視確認用に、起動のたびに
+ * 「更新あり」状態を再現する固定値。
+ */
+export const MOCK_UPDATE_INFO = {
+	version: "9.9.9-mock",
+	body: "モック更新(UI 確認用のダミーリリースノートです。dev:mock では常にこの更新が「利用可能」として通知されます。",
+};
