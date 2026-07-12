@@ -78,7 +78,7 @@ use media_core::{preview, CancelToken, Progress};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use super::reframe::{JobId, JobsState};
+use super::reframe::{JobGuard, JobId, JobsState};
 
 /// キャッシュディレクトリ名(`app_data_dir()` からの相対)。
 const CACHE_DIR_NAME: &str = "preview-cache";
@@ -162,11 +162,20 @@ pub async fn preview_start(
 /// ジョブ本体(ブロッキングスレッド上で実行)。State からトークンを取り出し、
 /// `media_core::render_preview` を呼び、完了イベントを emit してからジョブを
 /// State から削除する(`reframe.rs` の `run_job` と対応する構造)。
+///
+/// **P1-5: パニック時の State リーク対策**(`reframe.rs` の `run_job` と同型。
+/// 詳細な理由は同ファイルの `run_job` 冒頭コメント参照)。`render_preview` の呼び出しを
+/// `catch_unwind` で包み、`jobs.remove(job_id)` は `JobGuard` の `Drop` で保証する。
 fn run_job(app: &AppHandle, job_id: &str, input: &Path, cache_dir: &Path, spec: EditSpec) {
 	let jobs = app.state::<JobsState>();
 	let Some(token) = jobs.get(job_id) else {
 		// register 直後に必ず存在するはずだが、万一取得できなくても panic はしない。
 		return;
+	};
+
+	let _remove_on_exit = JobGuard {
+		jobs: &jobs,
+		job_id,
 	};
 
 	let app_for_progress = app.clone();
@@ -175,8 +184,14 @@ fn run_job(app: &AppHandle, job_id: &str, input: &Path, cache_dir: &Path, spec: 
 		let _ = app_for_progress.emit(&progress_event_name(&job_id_for_progress), progress);
 	};
 
-	match preview::render_preview(input, &spec, cache_dir, &token, &on_progress) {
-		Ok(path) => {
+	// `AssertUnwindSafe` の妥当性は `reframe.rs::run_job` と同じ理由
+	// (パニック後は結果を再利用せず即座に破棄するのみ)。
+	let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+		preview::render_preview(input, &spec, cache_dir, &token, &on_progress)
+	}));
+
+	match result {
+		Ok(Ok(path)) => {
 			let _ = app.emit(
 				&done_event_name(job_id),
 				PreviewDone {
@@ -184,7 +199,7 @@ fn run_job(app: &AppHandle, job_id: &str, input: &Path, cache_dir: &Path, spec: 
 				},
 			);
 		}
-		Err(err) => {
+		Ok(Err(err)) => {
 			let _ = app.emit(
 				&error_event_name(job_id),
 				PreviewError {
@@ -192,9 +207,17 @@ fn run_job(app: &AppHandle, job_id: &str, input: &Path, cache_dir: &Path, spec: 
 				},
 			);
 		}
+		Err(_panic) => {
+			let _ = app.emit(
+				&error_event_name(job_id),
+				PreviewError {
+					message: "内部エラーが発生しました(パニック)".to_string(),
+				},
+			);
+		}
 	}
 
-	jobs.remove(job_id);
+	// `jobs.remove(job_id)` は `_remove_on_exit` の Drop で行われる(ここでは何もしない)。
 }
 
 #[cfg(test)]
