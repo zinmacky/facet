@@ -10,9 +10,9 @@ import {
 	convertFileSrc,
 	pickExportDirectory,
 	sanitizeFileName,
-	startReframe,
 } from "../../lib/tauri";
 import { type PreviewState, usePreview } from "../../lib/usePreview";
+import { type ReframeTaskState, useReframeQueue } from "../../lib/useReframeQueue";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
 import { getErrorMessage } from "../../lib/getErrorMessage";
 import { clipPreviewSig } from "../../lib/clipSig";
@@ -39,23 +39,12 @@ interface ExportScreenProps {
 	onProgressSummary?: (summary: ExportSummary) => void;
 }
 
-/** clip 単位の書き出し進捗・結果。 */
-interface TaskState {
-	status: "running" | "done" | "error";
-	ratio: number;
-	fps?: number;
-	outputPath?: string;
-	error?: string;
-	/** キャンセル/失敗の区別無く、実行中ジョブの ID(キャンセルボタン用)。 */
-	jobId?: string;
-	/** フォールバック等の一時通知(例: ソフトウェアエンコードで再試行中)。 */
-	notice?: string;
-	/**
-	 * 生成時点の clipPreviewSig。clips 側の対応する clip の現在の sig と異なれば
-	 * この結果は古い(要無効化) — clip 単位の細粒度無効化に使う。
-	 */
-	sig: string;
-}
+/**
+ * clip 単位の書き出し進捗・結果。`useReframeQueue` の `ReframeTaskState` そのもの
+ * (`sig` は生成時点の clipPreviewSig。clips 側の対応する clip の現在の sig と異なれば
+ * この結果は古い(要無効化) — clip 単位の細粒度無効化に使う)。
+ */
+type TaskState = ReframeTaskState;
 
 /**
  * 書き出し画面: 各 clip のマスター(クロップ内容そのもの)を書き出す。
@@ -73,7 +62,10 @@ export function ExportScreen({
 	onGoToUpload,
 	onProgressSummary,
 }: ExportScreenProps) {
-	const [results, setResults] = useState<Map<string, TaskState>>(new Map());
+	// clip 単位の書き出し進捗・結果。「reframe_start 起動 + progress/done/error を Map と
+	// 購読解除関数に反映」する部分は UploadScreen の一括書き出しと共通のため
+	// `useReframeQueue` に集約している(queue.tasksRef が旧 resultsRef 相当の同期ミラー)。
+	const queue = useReframeQueue();
 
 	// 明示的に「書き出しを開始」するまでレンダリングを始めない(切替直後に
 	// 全 clip のレンダリングを走らせて CPU を占有しないため)。
@@ -83,13 +75,6 @@ export function ExportScreen({
 
 	// マスター/詳細レイアウトの選択中 clip。
 	const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
-
-	// 結果を effect から参照するためのミラー(再購読トリガにしないため ref で持つ)。
-	const resultsRef = useRef<Map<string, TaskState>>(results);
-	resultsRef.current = results;
-
-	// clipId ごとの購読解除関数。
-	const unsubsRef = useRef<Map<string, () => void>>(new Map());
 
 	// ユーザーが選んだ書き出し先フォルダ(絶対パス)。「書き出しを開始」時に選ばせる。
 	const outputDirRef = useRef<string | null>(null);
@@ -104,9 +89,7 @@ export function ExportScreen({
 	// 新しい元動画選択(App からの resetToken 増加)時のみ、全状態を明示的に破棄する。
 	// biome-ignore lint/correctness/useExhaustiveDependencies: resetToken の変化そのものがトリガ(mount 時の初回実行は無害)
 	useEffect(() => {
-		for (const unsub of unsubsRef.current.values()) unsub();
-		unsubsRef.current.clear();
-		setResults(new Map());
+		queue.reset();
 		preview.reset();
 		setStarted(false);
 		setSelectedClipId(null);
@@ -116,31 +99,23 @@ export function ExportScreen({
 	// clip 単位の細粒度無効化(最重要): 配列参照が変わるたびに全消去していた旧実装をやめ、
 	// 「削除された clip」「trim/crop/aspect が変わった(sig が変わった) clip」の結果のみを
 	// 個別に破棄する。他 clip の結果・購読・プレビューはそのまま保持する。
+	// biome-ignore lint/correctness/useExhaustiveDependencies: queue.tasksRef は ref(useReframeQueue 内の useRef)で読み取りは非反応的 — 旧実装の resultsRef.current と同じ理由で依存に含めない
 	useEffect(() => {
-		const next = new Map(resultsRef.current);
-		let changed = false;
-		for (const [id, task] of resultsRef.current) {
+		for (const [id, task] of queue.tasksRef.current) {
 			const clip = clips.find((c) => c.id === id);
 			const stale = clip === undefined || task.sig !== clipPreviewSig(clip);
 			if (!stale) continue;
-			unsubsRef.current.get(id)?.();
-			unsubsRef.current.delete(id);
+			// queue.remove は tasksRef を同期更新するため、このコミット内で後続実行される
+			// 「起動」effect(下記、同じく [clips] 依存)が無効化直後の最新状態を見られる
+			// (P1-7: 無効化と起動が同一コミット内で順に走っても再起動を取りこぼさない)。
+			queue.remove(id);
 			preview.remove(id);
-			next.delete(id);
-			changed = true;
-		}
-		if (changed) {
-			setResults(next);
-			// resultsRef は次のレンダリング(=このコミット後)まで更新されない。
-			// このコミット内で後続実行される「起動」effect(下記、同じく [clips] 依存)が
-			// 無効化前の古い resultsRef を見て「まだ done/実行中」と誤判定し、再起動を
-			// スキップしてしまう(P1-7)。ここで同期的に ref も更新し、起動 effect が
-			// 無効化直後の最新状態を見られるようにする。
-			resultsRef.current = next;
 		}
 		// 選択中 clip が削除されていたら、selectedClipId 側は別 effect(下記)で
 		// 先頭 clip に補正される。
-	}, [clips, preview.remove]);
+		// queue.remove は useCallback([]) で安定した参照のため、依存配列に加えても
+		// 元の [clips, preview.remove] と同じタイミングでのみ発火する。
+	}, [clips, preview.remove, queue.remove]);
 
 	/** 選択中 clip のクロップ内容プレビューを生成(または更新)する。 */
 	const handlePreviewClip = (clip: Clip) => {
@@ -181,100 +156,52 @@ export function ExportScreen({
 		const uniqueNames = uniqueBaseNames(clips, (c) => sanitizeFileName(c.name));
 
 		for (const clip of clips) {
-			const existing = resultsRef.current.get(clip.id);
+			const existing = queue.tasksRef.current.get(clip.id);
 			if (existing && existing.status === "done") continue;
-			if (unsubsRef.current.has(clip.id)) continue; // 実行中は二重起動しない
 
 			const sig = clipPreviewSig(clip);
-
-			// running としてマーク(仮の unsubscribe を先に登録し二重起動を防ぐ)。
-			unsubsRef.current.set(clip.id, () => {});
-			setResults((prev) => {
-				const next = new Map(prev);
-				next.set(clip.id, { status: "running", ratio: 0, sig });
-				return next;
-			});
+			// 同期的に「実行中」として予約する(二重起動しない。既に予約/実行中なら何もしない)。
+			if (!queue.reserve(clip.id, { sig })) continue;
 
 			const spec = masterSpec(clip, {
 				width: probe.width,
 				height: probe.height,
 			});
 
-			const update = (patch: Partial<TaskState>) => {
-				setResults((prev) => {
-					const next = new Map(prev);
-					const cur = next.get(clip.id) ?? { status: "running", ratio: 0, sig };
-					next.set(clip.id, { ...cur, ...patch });
-					return next;
-				});
-			};
-
 			void (async () => {
 				try {
 					const base = uniqueNames.get(clip) ?? sanitizeFileName(clip.name);
 					const outputPath = await join(dir, `${base}.mp4`);
-					const handle = await startReframe(input, outputPath, spec, {
-						onProgress: (progress) => {
-							update({
-								status: "running",
-								ratio: (progress.percent ?? 0) / 100,
-								fps: progress.fps,
-							});
-						},
-						onDone: () => {
-							update({ status: "done", ratio: 1, outputPath });
-							unsubsRef.current.get(clip.id)?.();
-							unsubsRef.current.delete(clip.id);
-						},
-						onError: (message) => {
-							update({ status: "error", error: message });
-							unsubsRef.current.get(clip.id)?.();
-							unsubsRef.current.delete(clip.id);
-						},
-					});
-					update({ jobId: handle.jobId });
-					unsubsRef.current.set(clip.id, handle.unsubscribe);
+					await queue.run(clip.id, input, outputPath, spec);
 				} catch (err) {
-					unsubsRef.current.delete(clip.id);
-					update({
-						status: "error",
-						error: getErrorMessage(err),
-					});
+					// join() 失敗、または queue.run() の起動/実行失敗(状態には反映済み)。
+					queue.fail(clip.id, err);
 				}
 			})();
 		}
-	}, [started, source, clips]);
-
-	// アンマウント時に全購読を解除。
-	useEffect(() => {
-		const unsubs = unsubsRef.current;
-		return () => {
-			for (const unsub of unsubs.values()) unsub();
-			unsubs.clear();
-		};
-	}, []);
+	}, [started, source, clips, queue.tasksRef, queue.reserve, queue.run, queue.fail]);
 
 	const donePaths = useMemo(() => {
 		const paths: string[] = [];
 		for (const clip of clips) {
-			const task = results.get(clip.id);
+			const task = queue.tasks.get(clip.id);
 			if (task?.status === "done" && task.outputPath)
 				paths.push(task.outputPath);
 		}
 		return paths;
-	}, [clips, results]);
+	}, [clips, queue.tasks]);
 
 	// 進捗サマリを App(StepIndicator バッジ)へ押し上げる。
 	const progressSummary = useMemo<ExportSummary>(() => {
 		let done = 0;
 		let running = 0;
 		for (const clip of clips) {
-			const task = results.get(clip.id);
+			const task = queue.tasks.get(clip.id);
 			if (task?.status === "done") done += 1;
 			else if (task?.status === "running") running += 1;
 		}
 		return { total: clips.length, done, running };
-	}, [clips, results]);
+	}, [clips, queue.tasks]);
 
 	useEffect(() => {
 		onProgressSummary?.(progressSummary);
@@ -343,7 +270,7 @@ export function ExportScreen({
 							{selectedClip ? (
 								<ExportDetail
 									clip={selectedClip}
-									task={results.get(selectedClip.id)}
+									task={queue.tasks.get(selectedClip.id)}
 								/>
 							) : (
 								<p className="text-sm text-neutral-400">
@@ -381,7 +308,7 @@ export function ExportScreen({
 									<ExportListItem
 										key={clip.id}
 										clip={clip}
-										task={results.get(clip.id)}
+										task={queue.tasks.get(clip.id)}
 										selected={clip.id === selectedClipId}
 										onSelect={() => setSelectedClipId(clip.id)}
 									/>

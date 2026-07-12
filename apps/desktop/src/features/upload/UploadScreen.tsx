@@ -1,6 +1,6 @@
 import type { EditSpec, FitMode } from "@facet/core";
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { join } from "@tauri-apps/api/path";
 import { useMutation } from "@tanstack/react-query";
 import type { Clip, OutputTarget } from "../../types";
@@ -16,7 +16,6 @@ import {
 	convertFileSrc,
 	pickExportDirectory,
 	sanitizeFileName,
-	startReframe,
 } from "../../lib/tauri";
 import {
 	WEEKDAY_LABELS,
@@ -25,6 +24,7 @@ import {
 	msToLocalInput,
 } from "../../lib/schedule";
 import { type PreviewState, usePreview } from "../../lib/usePreview";
+import { useReframeQueue } from "../../lib/useReframeQueue";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
 import { clipPreviewSig } from "../../lib/clipSig";
 import { uniqueBaseNames } from "../../lib/uniqueBaseName";
@@ -111,20 +111,10 @@ function outputSig(
 	return `${post.clipId}|${clipSig}|${output.targetId}|${output.fit}`;
 }
 
-/**
- * 「フォルダへ一括書き出し」1 件(= 1 Output)ぶんの進行状態。
- * `PreviewState`(プレビュー品質・preview_start、usePreview フック)とは別物で、実書き出し品質
- * (reframe_start, 既定 8Mbps)をユーザーが選んだフォルダへ直接書き出す。
- */
-interface BulkExportTask {
-	status: "running" | "done" | "error";
-	/** 0..1。見積り不能な区間は 0 のまま進む。 */
-	ratio: number;
-	outputPath?: string;
-	error?: string;
-	/** キャンセルボタン用。 */
-	jobId?: string;
-}
+// 「フォルダへ一括書き出し」1 件(= 1 Output)ぶんの進行状態は `useReframeQueue` の
+// `ReframeTaskState` をそのまま使う(`PreviewState`(プレビュー品質・preview_start、
+// usePreview フック)とは別物で、実書き出し品質(reframe_start, 既定 8Mbps)を
+// ユーザーが選んだフォルダへ直接書き出す)。
 
 const DEFAULT_TARGET_ID = "yt-shorts";
 const DEFAULT_FIT: FitMode = "crop";
@@ -185,11 +175,9 @@ export function UploadScreen({
 	// 共通フック(ExportScreen の「クロップ内容プレビュー」と同じ実装)。
 	const preview = usePreview();
 	// output.id → 「フォルダへ一括書き出し」の進行状態(プレビュー品質の preview とは別軸)。
-	const [bulkExports, setBulkExports] = useState<Map<string, BulkExportTask>>(
-		new Map(),
-	);
-	// output.id → 実行中の一括書き出しジョブの購読解除関数(キャンセル・cleanup 用)。
-	const bulkUnsubsRef = useRef<Map<string, () => void>>(new Map());
+	// 「reframe_start 起動 + progress/done/error を Map と購読解除関数に反映」する部分は
+	// ExportScreen の書き出しと共通のため `useReframeQueue` に集約している。
+	const bulkExportQueue = useReframeQueue();
 	const confirm = useConfirm();
 
 	// 一括予約スケジュールの入力状態。
@@ -231,20 +219,8 @@ export function UploadScreen({
 		setBulkSettingsOpen(false);
 		setScheduleSettingsOpen(false);
 		// 実行中の一括書き出しジョブを止めてから状態をクリアする。
-		for (const unsub of bulkUnsubsRef.current.values()) unsub();
-		bulkUnsubsRef.current.clear();
-		setBulkExports(new Map());
+		bulkExportQueue.reset();
 	}, [resetToken]);
-
-	// アンマウント時に一括書き出しの購読を解除する(保険。通常は上の resetToken effect や
-	// 個々のジョブの onDone/onError で解除済み)。
-	useEffect(() => {
-		const unsubs = bulkUnsubsRef.current;
-		return () => {
-			for (const unsub of unsubs.values()) unsub();
-			unsubs.clear();
-		};
-	}, []);
 
 	// clips が揃っていて posts が空のときのみ初期化する(active/open には依存しない)。
 	// 画面を離れて戻ってきても既存の posts はそのまま保持する。
@@ -653,18 +629,6 @@ export function UploadScreen({
 	// 一括書き出し可否の判定に使う全 Output 数。
 	const totalOutputs = posts.reduce((sum, p) => sum + p.outputs.length, 0);
 
-	const setBulkTask = (outputId: string, patch: Partial<BulkExportTask>) => {
-		setBulkExports((prev) => {
-			const next = new Map(prev);
-			const cur = next.get(outputId) ?? {
-				status: "running" as const,
-				ratio: 0,
-			};
-			next.set(outputId, { ...cur, ...patch });
-			return next;
-		});
-	};
-
 	/**
 	 * フォルダへ一括書き出し: 保存先フォルダを選ばせたうえで、全 Post の全 Output を
 	 * 実書き出し品質(reframe_start, 既定 8Mbps)で直接そのフォルダへ書き出す。
@@ -716,12 +680,7 @@ export function UploadScreen({
 				(t) => `${sanitizeFileName(t.clip.name)}_${t.target.id}_${t.output.fit}`,
 			);
 
-			setBulkExports(() => {
-				const next = new Map<string, BulkExportTask>();
-				for (const t of tasks)
-					next.set(t.output.id, { status: "running", ratio: 0 });
-				return next;
-			});
+			bulkExportQueue.startBatch(tasks.map((t) => t.output.id));
 
 			const outcomes = await Promise.all(
 				tasks.map(async (t) => {
@@ -730,45 +689,10 @@ export function UploadScreen({
 						`${sanitizeFileName(t.clip.name)}_${t.target.id}_${t.output.fit}`;
 					try {
 						const outputPath = await join(dir, `${base}.mp4`);
-						await new Promise<void>((resolve, reject) => {
-							let handle: { unsubscribe: () => void } | undefined;
-							startReframe(source.inputPath, outputPath, t.spec, {
-								onProgress: (progress) => {
-									setBulkTask(t.output.id, {
-										ratio: (progress.percent ?? 0) / 100,
-									});
-								},
-								onDone: () => {
-									handle?.unsubscribe();
-									bulkUnsubsRef.current.delete(t.output.id);
-									setBulkTask(t.output.id, {
-										status: "done",
-										ratio: 1,
-										outputPath,
-									});
-									resolve();
-								},
-								onError: (message) => {
-									handle?.unsubscribe();
-									bulkUnsubsRef.current.delete(t.output.id);
-									setBulkTask(t.output.id, { status: "error", error: message });
-									reject(new Error(message));
-								},
-							})
-								.then((h) => {
-									handle = h;
-									bulkUnsubsRef.current.set(t.output.id, h.unsubscribe);
-									setBulkTask(t.output.id, { jobId: h.jobId });
-								})
-								.catch((err: unknown) => {
-									const message = getErrorMessage(err);
-									setBulkTask(t.output.id, { status: "error", error: message });
-									reject(err instanceof Error ? err : new Error(message));
-								});
-						});
+						await bulkExportQueue.run(t.output.id, source.inputPath, outputPath, t.spec);
 						return true;
 					} catch {
-						// 個別の失敗は bulkExports.error に反映済み。スキップして続行。
+						// 個別の失敗は bulkExportQueue.tasks の error に反映済み。スキップして続行。
 						return false;
 					}
 				}),
@@ -784,18 +708,22 @@ export function UploadScreen({
 
 	/** 実行中の一括書き出しジョブをすべてキャンセルする。 */
 	const cancelBulkExport = () => {
-		for (const task of bulkExports.values()) {
+		for (const task of bulkExportQueue.tasks.values()) {
 			if (task.status === "running" && task.jobId) void cancelJob(task.jobId);
 		}
 	};
 
 	const bulkExportDone = useMemo(
-		() => [...bulkExports.values()].filter((t) => t.status === "done").length,
-		[bulkExports],
+		() =>
+			[...bulkExportQueue.tasks.values()].filter((t) => t.status === "done")
+				.length,
+		[bulkExportQueue.tasks],
 	);
 	const bulkExportErrors = useMemo(
-		() => [...bulkExports.values()].filter((t) => t.status === "error").length,
-		[bulkExports],
+		() =>
+			[...bulkExportQueue.tasks.values()].filter((t) => t.status === "error")
+				.length,
+		[bulkExportQueue.tasks],
 	);
 
 	// プレビュー生成(現在設定でレンダリング)。
@@ -891,10 +819,10 @@ export function UploadScreen({
 										? "書き出し中…"
 										: "フォルダへ一括書き出し"}
 								</Button>
-								{bulkExports.size > 0 && (
+								{bulkExportQueue.tasks.size > 0 && (
 									<div className="flex items-center justify-between gap-2">
 										<span className="text-[11px] text-neutral-400">
-											完了 {bulkExportDone} / {bulkExports.size} 件
+											完了 {bulkExportDone} / {bulkExportQueue.tasks.size} 件
 											{bulkExportErrors > 0
 												? `(失敗 ${bulkExportErrors} 件)`
 												: ""}
