@@ -1,5 +1,6 @@
 import type { EditSpec } from "@facet/core";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getErrorMessage } from "./getErrorMessage";
 import { cancelJob, startPreview } from "./tauri";
 
 /**
@@ -112,7 +113,7 @@ export function usePreview(): UsePreviewResult {
 					})
 					.catch((err: unknown) => {
 						pendingRef.current.delete(key);
-						const message = err instanceof Error ? err.message : String(err);
+						const message = getErrorMessage(err);
 						patch(key, { rendering: false, error: message });
 						reject(err instanceof Error ? err : new Error(message));
 					});

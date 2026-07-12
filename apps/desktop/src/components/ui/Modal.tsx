@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "./cn";
 import { CloseIcon } from "./icons";
@@ -9,6 +9,18 @@ import { CloseIcon } from "./icons";
  * 確認ダイアログを別モーダルの上に重ねたとき、Esc で下のモーダルまで閉じるのを防ぐ。
  */
 const modalStack: symbol[] = [];
+
+/** フォーカストラップ対象とみなす要素の CSS セレクタ(無効化されたものは除く)。 */
+const FOCUSABLE_SELECTOR =
+	'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** container 内のフォーカス可能な要素を DOM 順で返す。 */
+function getFocusable(container: HTMLElement | null): HTMLElement[] {
+	if (!container) return [];
+	return Array.from(
+		container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+	);
+}
 
 interface ModalProps {
 	open: boolean;
@@ -45,6 +57,11 @@ export function Modal({
 	scrollBody = true,
 	dismissable = true,
 }: ModalProps) {
+	// モーダルのパネル要素(フォーカストラップの境界)。
+	const panelRef = useRef<HTMLDivElement>(null);
+	// 開く直前にフォーカスされていた要素。閉じたときにここへフォーカスを戻す。
+	const triggerRef = useRef<HTMLElement | null>(null);
+
 	useEffect(() => {
 		if (!open) return;
 		// 開いている間だけスタックへ登録(dismissable でなくても重なり順の管理には積む)。
@@ -63,6 +80,51 @@ export function Modal({
 			window.removeEventListener("keydown", onKey);
 		};
 	}, [open, dismissable, onClose]);
+
+	// フォーカストラップ: 開いたら最初のフォーカス可能要素へフォーカスし、Tab/Shift+Tab は
+	// パネル内でループさせる(パネル外へフォーカスが漏れない)。閉じたら開く直前に
+	// フォーカスされていたトリガー要素へフォーカスを戻す。
+	// このモーダル自身の panelRef 配下でのみ keydown を拾うため、確認ダイアログのように
+	// 別モーダルの上に重ねて開いた場合でも、それぞれ独立して自分のパネル内だけをトラップする
+	// (イベントはフォーカス中の要素からその祖先へしかバブルしないため、重ならない)。
+	useEffect(() => {
+		if (!open) return;
+		triggerRef.current =
+			document.activeElement instanceof HTMLElement
+				? document.activeElement
+				: null;
+
+		const panel = panelRef.current;
+		const first = getFocusable(panel)[0] ?? panel;
+		first?.focus();
+
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key !== "Tab") return;
+			const focusables = getFocusable(panelRef.current);
+			if (focusables.length === 0) {
+				e.preventDefault();
+				return;
+			}
+			const firstEl = focusables[0];
+			const lastEl = focusables[focusables.length - 1];
+			const active = document.activeElement;
+			if (e.shiftKey) {
+				if (active === firstEl || !panelRef.current?.contains(active)) {
+					e.preventDefault();
+					lastEl?.focus();
+				}
+			} else if (active === lastEl || !panelRef.current?.contains(active)) {
+				e.preventDefault();
+				firstEl?.focus();
+			}
+		};
+		panel?.addEventListener("keydown", onKeyDown);
+
+		return () => {
+			panel?.removeEventListener("keydown", onKeyDown);
+			triggerRef.current?.focus();
+		};
+	}, [open]);
 
 	if (!open) return null;
 	// document.body へ portal する。WizardShell が各画面を transform 付きの
@@ -84,8 +146,10 @@ export function Modal({
 				onClick={onClose}
 			/>
 			<div
+				ref={panelRef}
+				tabIndex={-1}
 				className={cn(
-					"relative flex max-h-[88vh] w-full flex-col overflow-hidden rounded-lg border border-line bg-panel shadow-2xl",
+					"relative flex max-h-[88vh] w-full flex-col overflow-hidden rounded-lg border border-line bg-panel shadow-2xl focus:outline-none",
 					widthClass,
 				)}
 			>

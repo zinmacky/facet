@@ -305,6 +305,7 @@ export const ClipEditor = forwardRef<ClipEditorHandle, ClipEditorProps>(
 							<button
 								key={t.value}
 								type="button"
+								aria-pressed={clip.aspect === t.value}
 								onClick={() => onChange({ ...clip, aspect: t.value })}
 								className={cn(
 									"rounded px-2 py-1 text-[11px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
