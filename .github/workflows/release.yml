@@ -1,0 +1,175 @@
+name: Release
+
+# タグ v* の push でのみ起動する(Phase 4 Wave D)。
+# バージョンの単一ソースは apps/desktop/src-tauri/tauri.conf.json。
+# タグはこの値と "v" プレフィックスで一致させる運用(scripts/check-release-version.ps1
+# が機械検証する。docs/phase4-packaging.md「リリース手順」参照)。
+on:
+  push:
+    tags:
+      - "v*"
+
+# GitHub Release(draft)の作成・アセットのアップロードに必要。
+permissions:
+  contents: write
+
+# 同一タグに対する再 push(タグの付け直し)があれば実行中のものをキャンセルする。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: Build & draft release (Windows / LGPL FFmpeg)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # --- 1. checkout + pnpm/Node セットアップ + 依存インストール(ci.yml と同形) ---
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # --- 2. タグとバージョン単一ソース(tauri.conf.json)の一致チェック ---
+      # 不一致なら即 fail する(scripts/check-release-version.ps1、単体テスト済み)。
+      - name: Check tag matches version (tauri.conf.json / package.json / Cargo.toml)
+        run: ./scripts/check-release-version.ps1 -Tag "${{ github.ref_name }}"
+
+      # --- 3. Rust toolchain + rust-cache + LIBCLANG_PATH(rust-windows-check と同形) ---
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop -> target
+
+      # windows-latest ランナーには LLVM が既定でプリインストールされている
+      # (C:\Program Files\LLVM。ci.yml の rust-windows-check ジョブと同じ前提)。
+      # ffmpeg-sys-next のビルドスクリプト(bindgen)が libclang を要求するため明示する。
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      # --- 4. LGPL FFmpeg 取得 + ffmpeg-dist ステージング + FFMPEG_DIR 設定 ---
+      # scripts/fetch-ffmpeg-lgpl.ps1 は BtbN の日付固定タグ(pin)から win64-lgpl-shared
+      # を取得し、apps/desktop/src-tauri/ffmpeg-dist/ に DLL のみをステージングする
+      # (docs/phase4-packaging.md、THIRD_PARTY_NOTICES.md §1)。標準出力の最終行が
+      # 展開ルート(FFMPEG_DIR に指定すべきパス)。
+      - name: Fetch LGPL FFmpeg + stage ffmpeg-dist
+        run: |
+          $lgplRoot = ./scripts/fetch-ffmpeg-lgpl.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "LGPL root: $lgplRoot"
+          echo "FFMPEG_DIR=$lgplRoot" >> $env:GITHUB_ENV
+
+      # --- 5. ライセンス適合ゲート(tauri build より前。fail で全停止) ---
+      # PATH を ffmpeg-dist に絞って license-gate を実行し、実際に LGPL DLL に
+      # リンクされ GPL/nonfree コンポーネントを含まないことを機械検証する
+      # (apps/desktop/crates/license-gate、THIRD_PARTY_NOTICES.md 末尾)。
+      - name: Run license gate (LGPL FFmpeg conformance)
+        run: ./scripts/run-license-gate.ps1
+
+      # --- 6. ワークスペース依存(contract の schema/dist、core の dist)を先にビルド ---
+      # apps/desktop の beforeBuildCommand(vite build)は @facet/contract /
+      # @facet/core の dist/ を解決する。tauri-action は projectPath 配下でしか
+      # コマンドを実行しないため、依存パッケージのビルドはここで事前に行う。
+      - name: Build workspace dependencies (@facet/contract, @facet/core)
+        run: pnpm --filter "@facet/desktop^..." build
+
+      # --- 7. tauri-action(署名付きビルド + GitHub Release draft 作成) ---
+      # tauri.release.conf.json をオーバーレイし、LGPL FFmpeg の DLL と
+      # LICENSES/COPYING.LGPLv3 を exe 隣接にバンドルする(Wave A/B)。
+      # TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) が未設定だとこのステップで失敗する
+      # (初回リリース前チェックリスト、docs/phase4-packaging.md 参照)。
+      - name: Build & publish draft release (tauri-action)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          args: --config src-tauri/tauri.release.conf.json
+          tagName: v__VERSION__
+          releaseName: "Facet desktop v__VERSION__"
+          releaseBody: |
+            Facet desktop v__VERSION__
+
+            インストーラ(NSIS, .exe)をダウンロードして実行してください。
+            初回起動時に SmartScreen の警告が出る場合は「詳細情報」→「実行」を選択してください
+            (署名なし配布のため。README.md 参照)。
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+      # --- 8. 成果物検査: NSIS の updater 用 zip を展開し、LGPL DLL のみが
+      #     同梱されていること(GPL 実行ファイルの混入がないこと)を機械検証する。
+      #     これは「配布物そのもの」に対する検査であり、5 のビルド前ゲートとは
+      #     独立した二重防御。 ---
+      - name: Inspect release artifacts (bundled DLLs)
+        run: |
+          $ErrorActionPreference = "Stop"
+          $nsisDir = "apps/desktop/src-tauri/target/release/bundle/nsis"
+          $zip = Get-ChildItem -Path $nsisDir -Filter "*.nsis.zip" -File | Select-Object -First 1
+          if (-not $zip) {
+            Write-Error "NSIS updater zip (*.nsis.zip) が見つかりません: $nsisDir"
+            exit 1
+          }
+          Write-Host "検査対象: $($zip.FullName)"
+
+          $extractDir = Join-Path $env:RUNNER_TEMP "release-artifact-inspect"
+          if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
+          Expand-Archive -Path $zip.FullName -DestinationPath $extractDir -Force
+
+          # NSIS zip はネストしたディレクトリを含みうるため exe の隣を機械的に探す。
+          $exe = Get-ChildItem -Path $extractDir -Recurse -Filter "facet-desktop.exe" -File | Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "展開後に facet-desktop.exe が見つかりません: $extractDir"
+            exit 1
+          }
+          $appDir = $exe.DirectoryName
+          Write-Host "アプリディレクトリ: $appDir"
+
+          # ffmpeg-dist にステージングした DLL 名を期待リストとする(ハードコード禁止)。
+          $expectedDlls = Get-ChildItem -Path "apps/desktop/src-tauri/ffmpeg-dist" -Filter "*.dll" -File | Select-Object -ExpandProperty Name
+          $bundledDlls = Get-ChildItem -Path $appDir -Filter "*.dll" -File | Select-Object -ExpandProperty Name
+
+          $missing = $expectedDlls | Where-Object { $_ -notin $bundledDlls }
+          if ($missing) {
+            Write-Error "配布物に含まれるべき DLL が見つかりません: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host "OK: 期待する DLL がすべて同梱されている ($($expectedDlls -join ', '))"
+
+          # ffmpeg.exe / ffprobe.exe 等の実行ファイル混入がないことを確認
+          # (fetch-ffmpeg-lgpl.ps1 の防御と同じ趣旨を配布物側でも二重に確認する)。
+          $leakedExe = Get-ChildItem -Path $appDir -Filter "*.exe" -File | Where-Object { $_.Name -ne "facet-desktop.exe" }
+          if ($leakedExe) {
+            Write-Error "配布物に想定外の実行ファイルが混入しています: $($leakedExe.Name -join ', ')"
+            exit 1
+          }
+
+          # COPYING.LGPLv3 が同梱されていることを確認(tauri.release.conf.json の resources)。
+          if (-not (Test-Path (Join-Path $appDir "COPYING.LGPLv3"))) {
+            Write-Error "COPYING.LGPLv3 が配布物に同梱されていません: $appDir"
+            exit 1
+          }
+
+          # license-gate を配布物ディレクトリそのものに対して再実行し、実際に
+          # LGPL 構成(GPL/nonfree コンポーネント不在)であることを最終確認する。
+          Write-Host "配布物ディレクトリに対して license-gate を再実行します"
+          ./scripts/run-license-gate.ps1 -FfmpegDistPath $appDir
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "配布物に対する license-gate 再検証に失敗しました"
+            exit $LASTEXITCODE
+          }

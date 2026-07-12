@@ -58,3 +58,112 @@ GitHub Releases API(`gh api repos/BtbN/FFmpeg-Builds/releases`)で実在を
 - アセット: `ffmpeg-n8.1.2-22-g94138f6973-win64-lgpl-shared-8.1.zip`
 - DLL(機械列挙、変更されうる): `avutil-60` / `avcodec-62` / `avformat-62` /
   `avfilter-11` / `swscale-9` / `swresample-6` / `avdevice-62`
+
+---
+
+## リリース手順(完全版、Wave D)
+
+`.github/workflows/release.yml` が `v*` タグの push をトリガに Windows ランナー
+1 ジョブでビルド・署名・GitHub Release(draft)作成までを行う。ローカルでの
+作業は「バージョン bump → タグ push」のみで、それ以外は CI が担う。
+
+### 1. バージョン bump
+
+バージョンの**単一ソースは `apps/desktop/src-tauri/tauri.conf.json` の
+`version`**。bump 時は以下 3 箇所を**同時に**更新する(CI 側で
+`scripts/check-release-version.ps1` が 3 箇所 + git タグの一致を機械検証し、
+1つでもズレていればビルド全体を fail させる):
+
+1. `apps/desktop/src-tauri/tauri.conf.json` の `version`
+2. `apps/desktop/package.json` の `version`
+3. `apps/desktop/Cargo.toml` の `[workspace.package]` `version`
+   (`src-tauri` / `crates/*` 配下の全クレートがここを `version.workspace = true`
+   で参照しているため、この 1 箇所を変えれば全クレートに伝播する)
+
+ルート直下の `package.json`(`facet` パッケージ自体のバージョン)は対象外
+(モノレポ全体のバージョンとデスクトップアプリのリリースバージョンは独立)。
+
+ローカルで一致を確認したい場合:
+
+```pwsh
+./scripts/check-release-version.ps1 -Tag "v0.1.0"
+```
+
+### 2. タグ push
+
+```pwsh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+タグ形式は `vX.Y.Z`(正式版)または `vX.Y.Z-rc.N`(release candidate)。
+`-` を含むタグ(rc 等)は GitHub Release 上で自動的に `prerelease` フラグが
+付き、`releases/latest`(updater の配信先)には影響しない。
+
+### 3. CI の流れ(`.github/workflows/release.yml`)
+
+1. checkout + pnpm/Node セットアップ + `pnpm install --frozen-lockfile`
+2. タグとバージョン単一ソースの一致チェック(`check-release-version.ps1`、
+   不一致で即 fail)
+3. Rust toolchain + rust-cache + `LIBCLANG_PATH` 設定
+4. `scripts/fetch-ffmpeg-lgpl.ps1` で LGPL FFmpeg を取得し `FFMPEG_DIR` に設定
+5. `scripts/run-license-gate.ps1`(tauri build 前のゲート。fail で全停止)
+6. `pnpm --filter "@facet/desktop^..." build`(`@facet/contract` /
+   `@facet/core` の dist/schema を先にビルド)
+7. `tauri-apps/tauri-action@v0`(`--config src-tauri/tauri.release.conf.json`、
+   `releaseDraft: true`、`TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` で署名)
+8. 成果物検査: NSIS の updater 用 zip(`*.nsis.zip`)を展開し、期待する DLL が
+   すべて同梱・実行ファイルの混入なし・`COPYING.LGPLv3` 同梱・
+   `license-gate` の再実行、を確認
+
+### 4. draft 確認 → publish
+
+CI 成功後、GitHub の Releases ページに **draft** リリースが作成される
+(自動公開はしない)。以下を目視確認してから `Publish release` する:
+
+- 添付アセット: NSIS インストーラ(`*.exe`)、`*.nsis.zip`、`*.sig`、
+  `latest.json`(updater 用マニフェスト)が揃っていること
+- リリースノート(`releaseBody`)の内容
+- `prerelease` フラグが意図通りか(rc は on、正式版は off)
+
+publish すると `latest.json` が
+`https://github.com/zinmacky/facet/releases/latest/download/latest.json`
+から取得可能になり、既存ユーザーのアプリ内更新チェック(Wave C
+`useUpdateChecker`)が新バージョンを検知するようになる。**publish は
+ユーザー作業**(§ ユーザー作業 参照)。
+
+### 5. 初回リリース前チェックリスト(未完了の前提)
+
+Wave D 時点では updater の署名鍵が未生成のため、`tauri-action` の署名ステップは
+`TAURI_SIGNING_PRIVATE_KEY` が未設定のままだと失敗する(既知・意図的。
+下記が揃うまで実際のリリースは実行できない)。初回リリース前に**ユーザーが**
+行う必要がある作業:
+
+1. **updater 鍵の生成**:
+   ```pwsh
+   pnpm tauri signer generate -w ~/.tauri/facet-updater.key
+   ```
+   パスワード付きで生成すること。生成される公開鍵(pubkey)と秘密鍵
+   (`.key` ファイル)の 2 つを次のステップで使う。
+2. **GitHub Secrets への登録**(リポジトリの Settings → Secrets and variables →
+   Actions):
+   - `TAURI_SIGNING_PRIVATE_KEY`: 生成した秘密鍵ファイルの中身
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: 鍵生成時に設定したパスワード
+3. **pubkey の差し替え**: `apps/desktop/src-tauri/tauri.conf.json` の
+   `plugins.updater.pubkey` は現在プレースホルダ
+   (`TODO_REPLACE_WITH_UPDATER_PUBKEY`)のまま。手順 1 で生成した公開鍵の
+   文字列に差し替えるコミットを作成すること(このコミットもバージョン bump と
+   同様にタグより前に main へマージしておく必要がある)。
+4. **秘密鍵のオフラインバックアップ**: 秘密鍵ファイル(`~/.tauri/facet-updater.key`)
+   と、そのパスワードを Secrets とは別の場所にバックアップする。**紛失すると
+   既存ユーザーへの更新配信ができなくなる**(pubkey を差し替えると既存インストール
+   済みアプリが新しい更新を検証できなくなるため)。
+5. **初回 e2e 更新テスト**(ユーザー立ち会い): 旧バージョンをインストール → 新
+   タグを publish → アプリ内通知が表示され更新が完走することを確認する。
+6. **タグ push / publish の実運用**: 上記 1〜3 が完了した状態で、初回タグ
+   (例 `v0.1.0`)の push と draft の publish を行う。
+
+上記が未完了の間は、`release.yml` は署名ステップ(手順 7)まで到達してエラーで
+停止する(検証は Wave D で実施済み。エラーメッセージ含め本文書の変更履歴・
+PR の報告を参照)。それより前のステップ(バージョンチェック・LGPL FFmpeg
+取得・ライセンスゲート・ワークスペースビルド)はすべて正常に通ることを確認済み。
