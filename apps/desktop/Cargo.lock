@@ -2089,6 +2089,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "license-gate"
+version = "0.0.0"
+dependencies = [
+ "ffmpeg-next",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

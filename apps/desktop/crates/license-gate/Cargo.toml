@@ -1,0 +1,25 @@
+[package]
+name = "license-gate"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "配布用 FFmpeg(LGPL 構成)が実際にリンクされているかを実行時に検査するゲート(Phase 4 Wave B)"
+
+[dependencies]
+# media-core と同一の FFmpeg メジャー系列(8.1)にリンクする。検査対象は
+# PATH 上で解決される FFmpeg 共有ライブラリそのもの(scripts/run-license-gate.ps1
+# 参照)であり、このクレート自体のビルド時リンク(FFMPEG_DIR)は開発用 GPL 構成
+# のままで構わない(検査ロジックは実行時の avutil_license() 等の戻り値を見るため、
+# ビルド時にリンクした FFmpeg のライセンスとは無関係)。
+ffmpeg-next = "8.1"
+
+[target.'cfg(windows)'.dependencies]
+# 検査対象の DLL(avutil-*.dll / avcodec-*.dll)が実際にどのパスからロードされたかを
+# ログ出力するために使う。ロード済みモジュール一覧を列挙し(EnumProcessModules)、
+# ファイル名のプレフィックス一致で該当 DLL を特定する(src/module_path.rs 参照。
+# バージョン付番をハードコードしない理由も同ファイルのコメントに記載)。
+windows-sys = { version = "0.61", features = [
+	"Win32_Foundation",
+	"Win32_System_ProcessStatus",
+	"Win32_System_Threading",
+] }
