@@ -64,7 +64,7 @@ use crate::crop;
 use crate::decode;
 use crate::encode::{self, EncoderSpec};
 use crate::encoder_select;
-use crate::error::{MediaError, Result};
+use crate::error::{is_again_or_eof, MediaError, Result};
 use crate::fit::{self, FilterGraphSpec};
 use crate::probe;
 use crate::progress::ProgressTracker;
@@ -412,7 +412,12 @@ fn run_pipeline(
 			decoder
 				.send_packet(&packet)
 				.map_err(|source| MediaError::Decode { source })?;
-			while decoder.receive_frame(&mut decoded).is_ok() {
+			loop {
+				match decoder.receive_frame(&mut decoded) {
+					Ok(()) => {}
+					Err(err) if is_again_or_eof(&err) => break,
+					Err(source) => return Err(MediaError::Decode { source }),
+				}
 				match classify_and_rebase(&mut decoded, &frame_window) {
 					TrimDecision::Skip => continue,
 					TrimDecision::Stop => {
@@ -455,7 +460,12 @@ fn run_pipeline(
 		decoder
 			.send_eof()
 			.map_err(|source| MediaError::Decode { source })?;
-		while decoder.receive_frame(&mut decoded).is_ok() {
+		loop {
+			match decoder.receive_frame(&mut decoded) {
+				Ok(()) => {}
+				Err(err) if is_again_or_eof(&err) => break,
+				Err(source) => return Err(MediaError::Decode { source }),
+			}
 			match classify_and_rebase(&mut decoded, &frame_window) {
 				TrimDecision::Skip => continue,
 				TrimDecision::Stop => break,
@@ -561,9 +571,10 @@ fn total_frames_with_trim(
 /// 使われたエンコーダ名(`reframe` の戻り値としてそのまま呼び出し側へ伝わる)。
 ///
 /// `Auto` の場合は `encoder_select::select()` が返す候補を先頭から順に試し、
-/// `MediaError::EncoderOpen`(open 失敗)なら次候補へ進む。それ以外の失敗
-/// (`EncoderNotFound` 等)は即座に返す。全候補が `EncoderOpen` で失敗した場合は
-/// 最後に発生した `EncoderOpen` を返す(§11-2: libx264 等へのソフトウェア
+/// `MediaError::EncoderOpen`(エンコーダ open 失敗)または `MediaError::OutputStreamCreate`
+/// (open 成功後の add_stream 失敗、P2)なら次候補へ進む。それ以外の失敗
+/// (`EncoderNotFound` 等)は即座に返す。全候補がこの 2 つのいずれかで失敗した場合は
+/// 最後に発生したエラーを返す(§11-2: libx264 等へのソフトウェア
 /// フォールバックはしない)。
 #[allow(clippy::too_many_arguments)]
 fn open_selected_encoder(
@@ -623,7 +634,15 @@ fn open_selected_encoder(
 					Ok((opened, pixel_format, stream_index)) => {
 						return Ok((opened, pixel_format, stream_index, choice.name.to_string()))
 					}
-					Err(err @ MediaError::EncoderOpen { .. }) => last_err = Some(err),
+					// `EncoderOpen`(エンコーダ自体の open 失敗)・`OutputStreamCreate`
+					// (open 成功後の add_stream 失敗、P2 で EncoderOpen から分離)の
+					// いずれも「この候補は使えない、次候補へ」という扱いは変えない
+					// (add_stream 失敗を専用 variant に分けたのは診断精度のためであり、
+					// Auto 選択のフォールバック挙動自体は分離前と同じに保つ)。
+					Err(
+						err @ (MediaError::EncoderOpen { .. }
+						| MediaError::OutputStreamCreate { .. }),
+					) => last_err = Some(err),
 					Err(err) => return Err(err),
 				}
 			}
@@ -728,7 +747,12 @@ fn drain_encoder(
 	ost_time_base: Rational,
 	encoded: &mut Packet,
 ) -> Result<()> {
-	while encoder.receive_packet(encoded).is_ok() {
+	loop {
+		match encoder.receive_packet(encoded) {
+			Ok(()) => {}
+			Err(err) if is_again_or_eof(&err) => break,
+			Err(source) => return Err(MediaError::Encode { source }),
+		}
 		encoded.set_stream(stream_index);
 		encoded.rescale_ts(ist_time_base, ost_time_base);
 		encoded
@@ -753,16 +777,17 @@ fn pull_filtered<F: Fn() -> Instant>(
 	tracker: &mut ProgressTracker<'_, F>,
 ) -> Result<()> {
 	loop {
-		let has_frame = graph
+		let sink_result = graph
 			.get("out")
 			.ok_or_else(|| MediaError::FilterNotFound {
 				name: "out".to_string(),
 			})?
 			.sink()
-			.frame(filtered)
-			.is_ok();
-		if !has_frame {
-			break;
+			.frame(filtered);
+		match sink_result {
+			Ok(()) => {}
+			Err(err) if is_again_or_eof(&err) => break,
+			Err(source) => return Err(MediaError::Filter { source }),
 		}
 		encoder
 			.send_frame(filtered)
