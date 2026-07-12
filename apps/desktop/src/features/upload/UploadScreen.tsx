@@ -2,9 +2,9 @@ import type { EditSpec, FitMode } from "@facet/core";
 import { useEffect, useMemo, useState } from "react";
 import { join } from "@tauri-apps/api/path";
 import { useMutation } from "@tanstack/react-query";
+import type { Source } from "../../App";
 import type { Clip, OutputTarget } from "../../types";
 import { finalSpec, targetById } from "../../types";
-import type { MediaInfo } from "../../lib/tauri";
 import { cancelJob, pickExportDirectory, sanitizeFileName } from "../../lib/tauri";
 import { generateSchedule } from "../../lib/schedule";
 import { usePreview } from "../../lib/usePreview";
@@ -44,7 +44,8 @@ import {
 interface UploadScreenProps {
 	/** true のとき現在表示中の画面(ウィザードのアクティブステップ)。 */
 	active: boolean;
-	source: { inputPath: string; probe: MediaInfo } | null;
+	/** App.tsx の Source から videoSrc(元動画プレビュー用 URL)を除いたもの。アップロードでは使わない。 */
+	source: Omit<Source, "videoSrc"> | null;
 	clips: Clip[];
 	/**
 	 * 増加するたびに全状態(posts/pubStatuses/preview/一括設定/スケジュール等)を

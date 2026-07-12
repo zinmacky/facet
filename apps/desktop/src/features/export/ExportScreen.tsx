@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { join } from "@tauri-apps/api/path";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { useMutation } from "@tanstack/react-query";
+import type { Source } from "../../App";
 import type { Clip } from "../../types";
 import { masterSpec } from "../../types";
-import type { MediaInfo } from "../../lib/tauri";
 import { pickExportDirectory, sanitizeFileName } from "../../lib/tauri";
 import { usePreview } from "../../lib/usePreview";
 import { useReframeQueue } from "../../lib/useReframeQueue";
@@ -22,7 +22,8 @@ import { ExportDetail } from "./ExportDetail";
 interface ExportScreenProps {
 	/** true のとき現在表示中の画面(ウィザードのアクティブステップ)。 */
 	active: boolean;
-	source: { inputPath: string; probe: MediaInfo } | null;
+	/** App.tsx の Source から videoSrc(元動画プレビュー用 URL)を除いたもの。書き出しでは使わない。 */
+	source: Omit<Source, "videoSrc"> | null;
 	clips: Clip[];
 	/**
 	 * 増加するたびに全状態を明示的に破棄する(新しい元動画を選択したときのみ App
