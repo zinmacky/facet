@@ -126,9 +126,20 @@ pub fn reframe(
 ) -> Result<String> {
 	ffmpeg::init().map_err(|source| MediaError::Init { source })?;
 
+	// スロット取得前の早期キャンセルチェック(P1-3)。ここで検知できれば、
+	// 一時ファイルの作成やスロット待機を一切行わずに即座に抜けられる。
+	if options.cancel.is_cancelled() {
+		return Err(MediaError::Cancelled);
+	}
+
 	// 同時エンコード数を制限するスロットを取得する(関数末尾までスコープに保持し、
 	// drop 時に RAII で解放される。`concurrency` モジュール冒頭コメント参照)。
-	let _slot = concurrency::EncodeSlots::global().acquire();
+	// `acquire_cancellable` はスロット待機中も `cancel` を短周期でポーリングし、
+	// 待機中にキャンセルされた場合は待ち続けずに `None` を返す(P1-3)。
+	let _slot = match concurrency::EncodeSlots::global().acquire_cancellable(options.cancel) {
+		Some(slot) => slot,
+		None => return Err(MediaError::Cancelled),
+	};
 
 	let tmp_output_path = temp_output_path(output_path);
 	// パイプライン自体の失敗・成功後の `rename` 失敗のいずれでも、完成済みの
@@ -183,6 +194,13 @@ fn run_pipeline(
 		cancel,
 		on_progress,
 	} = options;
+
+	// 入力オープン前の早期キャンセルチェック(P1-3)。`reframe()` 冒頭のチェック
+	// (スロット取得前)から入力オープンまでの間にキャンセルされた場合、ここで
+	// 検知して無駄な demuxer オープンを避ける。
+	if cancel.is_cancelled() {
+		return Err(MediaError::Cancelled);
+	}
 
 	let mut decode_ctx = decode::open_input(input_path)?;
 	let ist_index = decode_ctx.stream_index;
@@ -242,6 +260,14 @@ fn run_pipeline(
 	})?;
 
 	let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
+
+	// エンコーダ open 直前の早期キャンセルチェック(P1-3)。`Auto` 選択時は候補ごとに
+	// リトライ待機(`concurrency::retry_on_encoder_open`)が入りうるため、ここで
+	// 検知しておくことで無駄な HW セッション確保の試行を避ける。
+	if cancel.is_cancelled() {
+		return Err(MediaError::Cancelled);
+	}
+
 	let (mut encoder_ctx, enc_pix_fmt, stream_index, encoder_name_used) = open_selected_encoder(
 		&mut octx,
 		encoder,

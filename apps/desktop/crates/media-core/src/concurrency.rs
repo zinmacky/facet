@@ -77,7 +77,17 @@ use std::env;
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
+use crate::cancel::CancelToken;
 use crate::error::{MediaError, Result};
+
+/// [`EncodeSlots::acquire_cancellable`] がキャンセルを確認する周期。
+///
+/// `Condvar` はトークン(`AtomicBool`)自体をウェイクの条件にできないため、
+/// `wait_timeout` で短時間だけブロックし、タイムアウトのたびに
+/// `cancel.is_cancelled()` をポーリングする以外に能動的な方法がない。詰まっている
+/// ジョブへの応答性(P1-3 の「スロット待機中キャンセル即応」要件)と、無駄な
+/// ウェイクアップによる CPU 消費のバランスを見て 50ms とした。
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// 同時エンコード数上限の既定値。
 ///
@@ -164,6 +174,35 @@ impl EncodeSlots {
 		SlotGuard { slots: self }
 	}
 
+	/// 空きスロットができるまでブロックして 1 つ取得するが、`cancel` が待機中に
+	/// キャンセルされた場合は取得を諦めて `None` を返す(P1-3: スロット待機中の
+	/// キャンセル即応)。
+	///
+	/// [`acquire`](Self::acquire) は無条件にブロックし続けるため、スロットが
+	/// 埋まっている間にジョブがキャンセルされても待機が終わるまで検知できない
+	/// (=キャンセルの反映がスロット解放まで遅延する)問題があった。本メソッドは
+	/// `Condvar::wait_timeout` を [`CANCEL_POLL_INTERVAL`] 周期でポーリングし、
+	/// タイムアウトのたびに `cancel.is_cancelled()` を確認することでこれを解消する。
+	///
+	/// 既存の [`acquire`](Self::acquire) はキャンセル非対応の呼び出し元(テスト等)との
+	/// 互換のためそのまま残す。
+	pub fn acquire_cancellable(&self, cancel: &CancelToken) -> Option<SlotGuard<'_>> {
+		if cancel.is_cancelled() {
+			return None;
+		}
+		let mut active = lock_or_recover(&self.active);
+		loop {
+			if *active < self.max {
+				*active += 1;
+				return Some(SlotGuard { slots: self });
+			}
+			if cancel.is_cancelled() {
+				return None;
+			}
+			active = wait_timeout_or_recover(&self.available, active, CANCEL_POLL_INTERVAL);
+		}
+	}
+
 	/// ブロックせずに取得を試みる。空きがなければ `None` を返す。
 	pub fn try_acquire(&self) -> Option<SlotGuard<'_>> {
 		let mut active = lock_or_recover(&self.active);
@@ -210,6 +249,20 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// [`Condvar::wait`] を poisoning 復旧つきで呼ぶ(理由は [`lock_or_recover`] と同じ)。
 fn wait_or_recover<'a, T>(condvar: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
 	condvar.wait(guard).unwrap_or_else(PoisonError::into_inner)
+}
+
+/// [`Condvar::wait_timeout`] を poisoning 復旧つきで呼ぶ(理由は [`lock_or_recover`] と同じ)。
+/// タイムアウトしたかどうかは呼び出し側([`EncodeSlots::acquire_cancellable`])が
+/// 毎ループ `cancel.is_cancelled()` を再確認するため、ここでは戻り値のガードのみ返す。
+fn wait_timeout_or_recover<'a, T>(
+	condvar: &Condvar,
+	guard: MutexGuard<'a, T>,
+	timeout: Duration,
+) -> MutexGuard<'a, T> {
+	condvar
+		.wait_timeout(guard, timeout)
+		.unwrap_or_else(PoisonError::into_inner)
+		.0
 }
 
 /// [`retry_on_encoder_open`] の挙動を設定する。
@@ -354,6 +407,65 @@ mod tests {
 			let _guard = slots.acquire();
 			assert_eq!(slots.active_count(), 1);
 		}
+		assert_eq!(slots.active_count(), 0);
+	}
+
+	#[test]
+	fn acquire_cancellable_returns_none_when_cancelled_while_waiting() {
+		let slots = Arc::new(EncodeSlots::new(1));
+		// 唯一のスロットを埋めて、後続の acquire_cancellable が待機せざるを得ない状態にする。
+		let _held = slots.acquire();
+
+		let cancel = CancelToken::new();
+		let cancel_for_waiter = cancel.clone();
+		let slots_for_waiter = Arc::clone(&slots);
+		let (waited_tx, waited_rx) = mpsc::channel::<bool>();
+		let waiter = thread::spawn(move || {
+			let result = slots_for_waiter.acquire_cancellable(&cancel_for_waiter);
+			waited_tx
+				.send(result.is_none())
+				.expect("send whether acquire_cancellable returned None");
+		});
+
+		// waiter がポーリングループに入るのを軽く待ってからキャンセルする
+		// (先にキャンセルしても acquire_cancellable 冒頭のチェックで即 None になるだけで、
+		// このテストが検証したい「待機中の」キャンセル反映も別途カバーされる)。
+		thread::sleep(Duration::from_millis(120));
+		cancel.cancel();
+
+		let returned_none = waited_rx
+			.recv_timeout(Duration::from_secs(5))
+			.expect("waiter should observe cancellation and return promptly");
+		assert!(
+			returned_none,
+			"acquire_cancellable should return None once cancelled while waiting for a slot"
+		);
+
+		waiter.join().expect("join waiter");
+		// スロット自体はキャンセルされた待機者に渡らず、依然として _held が保持している。
+		assert_eq!(slots.active_count(), 1);
+	}
+
+	#[test]
+	fn acquire_cancellable_returns_none_immediately_if_already_cancelled() {
+		let slots = EncodeSlots::new(1);
+		let cancel = CancelToken::new();
+		cancel.cancel();
+
+		assert!(slots.acquire_cancellable(&cancel).is_none());
+		assert_eq!(slots.active_count(), 0);
+	}
+
+	#[test]
+	fn acquire_cancellable_succeeds_immediately_when_slot_available() {
+		let slots = EncodeSlots::new(1);
+		let cancel = CancelToken::new();
+
+		let guard = slots
+			.acquire_cancellable(&cancel)
+			.expect("slot should be available");
+		assert_eq!(slots.active_count(), 1);
+		drop(guard);
 		assert_eq!(slots.active_count(), 0);
 	}
 
