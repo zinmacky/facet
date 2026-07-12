@@ -104,10 +104,10 @@ Windows 検証(docs/phase2-0-windows-setup.md §4 と同じ観点)の Mac 版:
 
 ## 6. 運用ノウハウ(Windows セッションで確立したもの)
 
-- **マージ規律**: main はブランチ保護が実質未設定のため、`gh pr merge --auto` は **CI を待たず即マージ
-  される**(これで main が一時 red になった事故あり)。鉄則: `gh pr checks <PR> --watch` で全 green を
-  確認してから `gh pr merge --merge`。ルールセット main は存在するが required checks が
-  typecheck/lint/test の3つのみで build や Rust 系(clippy/test)が未登録 — 拡張作業中
+- **マージ規律**: ルールセット main の required checks を全11チェック(build / typecheck / lint /
+  test / rust fmt・clippy・test・deny・audit・windows check・macos test)に拡張済み(2026-07-13)。
+  strict(up-to-date 要求)も有効のため、CI 未完了・fail の PR は構造的にマージ不可。
+  習慣としての `gh pr checks <PR> --watch` → `gh pr merge --merge` は引き続き推奨
 - **CI トリガー**: ci.yml は base=main の PR しか走らない。スタック PR はローカルゲートで代替
 - **LGPL 規律**: 配布ビルドは必ず `FFMPEG_DIR`=LGPL でリンク(DLL だけ差し替え禁止)。
   BtbN pin タグ `autobuild-2026-07-11-13-13`(scripts/fetch-ffmpeg-lgpl.ps1 と THIRD_PARTY_NOTICES.md、
