@@ -11,7 +11,7 @@ function storedSettings(): unknown {
 }
 
 // 各テストは DEFAULT_SETTINGS からの差分で結果を検証するため、前のテストの
-// localStorage 状態(例: 末尾のトグルテストが残す openFolderAfterExport: true)を
+// localStorage 状態(例: トグルテストが残す openFolderAfterExport: true)を
 // 引きずらないよう、テストごとに必ずクリアする。
 beforeEach(() => {
 	window.localStorage.clear();
@@ -107,6 +107,24 @@ describe("SettingsDialog: 書き出し先", () => {
 		expect(storedSettings()).toEqual({
 			...DEFAULT_SETTINGS,
 			openFolderAfterExport: true,
+		});
+	});
+
+	it("「書き出し完了時に通知する」トグルが永続化される", async () => {
+		const user = userEvent.setup();
+		renderWithProviders(<SettingsDialog open onClose={() => {}} />);
+
+		const checkbox = screen.getByRole("checkbox", {
+			name: "書き出し完了時に通知する",
+		});
+		expect(checkbox).not.toBeChecked();
+
+		await user.click(checkbox);
+
+		expect(checkbox).toBeChecked();
+		expect(storedSettings()).toEqual({
+			...DEFAULT_SETTINGS,
+			notifyOnExportComplete: true,
 		});
 	});
 });

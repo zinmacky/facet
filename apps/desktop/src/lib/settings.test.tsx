@@ -143,7 +143,11 @@ describe("SettingsProvider", () => {
 	it("部分的な保存値・不正なフィールドは DEFAULT_SETTINGS とマージされる", () => {
 		window.localStorage.setItem(
 			SETTINGS_STORAGE_KEY,
-			JSON.stringify({ theme: "light", openFolderAfterExport: "yes" }),
+			JSON.stringify({
+				theme: "light",
+				openFolderAfterExport: "yes",
+				notifyOnExportComplete: "yes",
+			}),
 		);
 		installMatchMedia(false);
 		const { result } = renderSettings();
@@ -154,6 +158,7 @@ describe("SettingsProvider", () => {
 			defaultExportDir: null,
 			// 型が不正なフィールドも既定値へフォールバック
 			openFolderAfterExport: false,
+			notifyOnExportComplete: false,
 			encoder: "auto",
 			maxConcurrentEncodes: 2,
 		});

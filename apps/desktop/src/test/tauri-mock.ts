@@ -2,10 +2,11 @@ import { vi } from "vitest";
 import type { MediaInfo } from "../lib/tauri";
 
 /**
- * `@tauri-apps/api` / `@tauri-apps/plugin-dialog` / `@tauri-apps/plugin-opener` の
- * テスト用モック実装。`src/test/setup.ts` が `vi.mock` でこのモジュールへ差し替える
- * (全テストファイル共通)。個々のテストは `mockInvoke.mockImplementationOnce(...)` 等で
- * 挙動を差し替え、`emitMockEvent` でジョブ完了/進捗/エラーイベントを発火させる。
+ * `@tauri-apps/api` / `@tauri-apps/plugin-dialog` / `@tauri-apps/plugin-opener` /
+ * `@tauri-apps/plugin-notification` のテスト用モック実装。`src/test/setup.ts` が
+ * `vi.mock` でこのモジュールへ差し替える(全テストファイル共通)。個々のテストは
+ * `mockInvoke.mockImplementationOnce(...)` 等で挙動を差し替え、`emitMockEvent` で
+ * ジョブ完了/進捗/エラーイベントを発火させる。
  *
  * `resetTauriMocks()` を各テストの `beforeEach` で呼び、前のテストの状態を引きずらない
  * ようにする(setup.ts の afterEach でも呼ぶ)。
@@ -83,6 +84,15 @@ export const mockJoin = vi.fn(async (...parts: string[]) => parts.join("/"));
 
 export const mockOpenPath = vi.fn(async (_path: string) => undefined);
 
+// 通知権限は既定で許可済み扱い(多くのテストは通知フローそのものを検証しないため)。
+// 権限拒否のケースを検証するテストは isPermissionGranted/requestPermission を
+// 個別に差し替える。
+export const mockIsPermissionGranted = vi.fn(async () => true);
+
+export const mockRequestPermission = vi.fn(async (): Promise<NotificationPermission> => "granted");
+
+export const mockSendNotification = vi.fn(async (_options: unknown) => undefined);
+
 /** 各テスト後に呼び、モックの呼び出し履歴・購読・ジョブ採番をリセットする。 */
 export function resetTauriMocks(): void {
 	mockInvoke.mockReset();
@@ -103,4 +113,13 @@ export function resetTauriMocks(): void {
 
 	mockOpenPath.mockReset();
 	mockOpenPath.mockImplementation(async () => undefined);
+
+	mockIsPermissionGranted.mockReset();
+	mockIsPermissionGranted.mockImplementation(async () => true);
+
+	mockRequestPermission.mockReset();
+	mockRequestPermission.mockImplementation(async () => "granted");
+
+	mockSendNotification.mockReset();
+	mockSendNotification.mockImplementation(async () => undefined);
 }
