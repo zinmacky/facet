@@ -571,9 +571,10 @@ fn total_frames_with_trim(
 /// 使われたエンコーダ名(`reframe` の戻り値としてそのまま呼び出し側へ伝わる)。
 ///
 /// `Auto` の場合は `encoder_select::select()` が返す候補を先頭から順に試し、
-/// `MediaError::EncoderOpen`(open 失敗)なら次候補へ進む。それ以外の失敗
-/// (`EncoderNotFound` 等)は即座に返す。全候補が `EncoderOpen` で失敗した場合は
-/// 最後に発生した `EncoderOpen` を返す(§11-2: libx264 等へのソフトウェア
+/// `MediaError::EncoderOpen`(エンコーダ open 失敗)または `MediaError::OutputStreamCreate`
+/// (open 成功後の add_stream 失敗、P2)なら次候補へ進む。それ以外の失敗
+/// (`EncoderNotFound` 等)は即座に返す。全候補がこの 2 つのいずれかで失敗した場合は
+/// 最後に発生したエラーを返す(§11-2: libx264 等へのソフトウェア
 /// フォールバックはしない)。
 #[allow(clippy::too_many_arguments)]
 fn open_selected_encoder(
@@ -633,7 +634,14 @@ fn open_selected_encoder(
 					Ok((opened, pixel_format, stream_index)) => {
 						return Ok((opened, pixel_format, stream_index, choice.name.to_string()))
 					}
-					Err(err @ MediaError::EncoderOpen { .. }) => last_err = Some(err),
+					// `EncoderOpen`(エンコーダ自体の open 失敗)・`OutputStreamCreate`
+					// (open 成功後の add_stream 失敗、P2 で EncoderOpen から分離)の
+					// いずれも「この候補は使えない、次候補へ」という扱いは変えない
+					// (add_stream 失敗を専用 variant に分けたのは診断精度のためであり、
+					// Auto 選択のフォールバック挙動自体は分離前と同じに保つ)。
+					Err(err @ (MediaError::EncoderOpen { .. } | MediaError::OutputStreamCreate { .. })) => {
+						last_err = Some(err)
+					}
 					Err(err) => return Err(err),
 				}
 			}

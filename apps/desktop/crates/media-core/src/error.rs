@@ -75,6 +75,20 @@ pub enum MediaError {
 		source: ffmpeg_next::Error,
 	},
 
+	/// エンコーダの open 成功後、出力コンテキストへストリームを追加する
+	/// (`octx.add_stream()`/`avformat_new_stream`)のが失敗した(P2)。
+	///
+	/// [`MediaError::EncoderOpen`] とは失敗の原因が異なる(エンコーダ自体は正常に
+	/// open できている)ため区別する。`encode::open_encoder` / `audio::open_audio_encoder`
+	/// はいずれも「open 成功後にのみ `add_stream` する」設計のため、この variant は
+	/// エンコーダ open 済みの状態でのみ発生しうる(冒頭コメント参照)。
+	#[error("出力ストリームを追加できませんでした: {name} ({source})")]
+	OutputStreamCreate {
+		name: String,
+		#[source]
+		source: ffmpeg_next::Error,
+	},
+
 	/// 必須の libavfilter フィルタ(`buffer`/`buffersink`)や、構築済みグラフ内の
 	/// ノード(`in`/`out`)が見つからなかった。通常は環境の libavfilter が
 	/// 壊れている・ビルド構成に filter が含まれていない場合のみ発生する。

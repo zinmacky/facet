@@ -145,7 +145,7 @@ pub fn open_encoder(
 	// ここまで到達したら open は成功している。ここで初めてストリームを追加する。
 	let mut ost = octx
 		.add_stream(codec)
-		.map_err(|source| MediaError::EncoderOpen {
+		.map_err(|source| MediaError::OutputStreamCreate {
 			name: spec.name.to_string(),
 			source,
 		})?;
