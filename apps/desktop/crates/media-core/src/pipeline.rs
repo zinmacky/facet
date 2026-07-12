@@ -131,18 +131,21 @@ pub fn reframe(
 	let _slot = concurrency::EncodeSlots::global().acquire();
 
 	let tmp_output_path = temp_output_path(output_path);
-	match run_pipeline(input_path, &tmp_output_path, options) {
-		Ok(encoder_name) => {
-			fs::rename(&tmp_output_path, output_path)?;
-			Ok(encoder_name)
-		}
-		Err(err) => {
-			// 途中終了(エラー・キャンセル)。一時出力が存在すれば削除する
-			// (存在しない場合の Err は無視してよい)。
-			let _ = fs::remove_file(&tmp_output_path);
-			Err(err)
-		}
+	// パイプライン自体の失敗・成功後の `rename` 失敗のいずれでも、完成済みの
+	// `.tmp.<ext>` が `output_path` へリネームされないまま残ることを防ぐため、
+	// 掃除(`remove_file`)を両パスで共通化する(P1-1: リネーム失敗時の一時ファイル
+	// 放置対策)。`rename` 失敗は Windows ではファイルロック等で起こりうる。
+	let result = run_pipeline(input_path, &tmp_output_path, options).and_then(|encoder_name| {
+		fs::rename(&tmp_output_path, output_path)
+			.map(|()| encoder_name)
+			.map_err(MediaError::from)
+	});
+	if result.is_err() {
+		// 途中終了(パイプライン失敗・キャンセル・リネーム失敗のいずれか)。
+		// 一時出力が存在すれば削除する(存在しない場合の Err は無視してよい)。
+		let _ = fs::remove_file(&tmp_output_path);
 	}
+	result
 }
 
 /// 一時出力ファイルパスを組み立てる。最終的な拡張子(muxer 判定に使われる)を
