@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { describe, expect, it } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Clip } from "../../types";
 import { renderWithProviders } from "../../test/render";
@@ -102,6 +102,22 @@ function Harness({ initialClips }: { initialClips: Clip[] }) {
 			>
 				remove-clip-b
 			</button>
+			<button
+				type="button"
+				onClick={() =>
+					setClips((prev) => [
+						...prev,
+						{
+							id: "clip-c",
+							name: "ClipThree",
+							trim: { start: 0, end: 5 },
+							aspect: "free",
+						},
+					])
+				}
+			>
+				add-clip-c
+			</button>
 		</div>
 	);
 }
@@ -184,6 +200,119 @@ describe("UploadScreen: 孤児 post の無効化", () => {
 		await waitFor(() =>
 			expect(screen.queryByRole("button", { name: /ClipTwo/ })).not.toBeInTheDocument(),
 		);
+		expect(screen.getByRole("button", { name: /ClipOne/ })).toBeInTheDocument();
+	});
+});
+
+/**
+ * 追加 clip への post 追従(孤児 post 除去 effect と対になる「追加」側の同期)。
+ * 編集画面でクリップを追加しても投稿一覧に反映されない P1 バグの固定テスト。
+ */
+describe("UploadScreen: 追加された clip に post が追従する", () => {
+	it("posts 初期化後に clips が追加されると、対応する post が一覧に追加される", async () => {
+		const user = userEvent.setup();
+		const clipA: Clip = {
+			id: "clip-1",
+			name: "ClipOne",
+			trim: { start: 0, end: 5 },
+			aspect: "free",
+		};
+		renderWithProviders(<Harness initialClips={[clipA]} />);
+
+		// 初期化で clip-1 分の post が生成されるのを待つ。
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /ClipOne/ })).toBeInTheDocument(),
+		);
+		expect(screen.queryByRole("button", { name: /ClipThree/ })).not.toBeInTheDocument();
+
+		await user.click(screen.getByRole("button", { name: "add-clip-c" }));
+
+		// 追加した clip-c 分の post が新たに一覧へ追加される。既存の clip-1 の post は残る。
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /ClipThree/ })).toBeInTheDocument(),
+		);
+		expect(screen.getByRole("button", { name: /ClipOne/ })).toBeInTheDocument();
+	});
+
+	it("追加時に既存 posts の内容と選択中の post は保持される", async () => {
+		const user = userEvent.setup();
+		const clipA: Clip = {
+			id: "clip-1",
+			name: "ClipOne",
+			trim: { start: 0, end: 5 },
+			aspect: "free",
+		};
+		const clipB: Clip = {
+			id: "clip-b",
+			name: "ClipTwo",
+			trim: { start: 0, end: 5 },
+			aspect: "free",
+		};
+		renderWithProviders(<Harness initialClips={[clipA, clipB]} />);
+
+		// 2 clip 分の post が生成されるのを待つ(先頭の ClipOne が既定で選択される)。
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /ClipTwo/ })).toBeInTheDocument(),
+		);
+
+		// 選択を ClipTwo の post へ切り替える(既定選択のままだと保持の検証にならない)。
+		await user.click(screen.getByRole("button", { name: /ClipTwo/ }));
+		await waitFor(() =>
+			expect(screen.getByRole("combobox", { name: "対象 clip" })).toHaveValue("clip-b"),
+		);
+
+		await user.click(screen.getByRole("button", { name: "add-clip-c" }));
+
+		// 追加後も選択は ClipTwo のまま(ユーザーの選択を奪わない)。
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /ClipThree/ })).toBeInTheDocument(),
+		);
+		expect(screen.getByRole("combobox", { name: "対象 clip" })).toHaveValue("clip-b");
+		// 既存 post(ClipOne/ClipTwo)は内容・件数とも保持される(重複追加されていないこと
+		// を件数でも確認する。post 一覧行は末尾が「n 出力」で終わる)。
+		expect(screen.getByRole("button", { name: /ClipOne/ })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /ClipTwo/ })).toBeInTheDocument();
+		expect(screen.getAllByRole("button", { name: /出力$/ })).toHaveLength(3);
+	});
+
+	it("手動で削除した post は、無関係な clip 編集による再レンダーで復活しない", async () => {
+		const user = userEvent.setup();
+		const clipA: Clip = {
+			id: "clip-1",
+			name: "ClipOne",
+			trim: { start: 0, end: 5 },
+			aspect: "free",
+		};
+		const clipB: Clip = {
+			id: "clip-b",
+			name: "ClipTwo",
+			trim: { start: 0, end: 5 },
+			aspect: "free",
+		};
+		renderWithProviders(<Harness initialClips={[clipA, clipB]} />);
+
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /ClipTwo/ })).toBeInTheDocument(),
+		);
+
+		// ClipTwo の post を「削除」で手動除去する(clip-b 自体は clips に残ったまま)。
+		const clipTwoRow = screen.getByRole("button", { name: /ClipTwo/ });
+		await user.click(within(clipTwoRow).getByRole("button", { name: "削除" }));
+		const confirmDialog = screen.getByRole("dialog");
+		await user.click(
+			within(confirmDialog).getByRole("button", { name: "削除" }),
+		);
+		await waitFor(() =>
+			expect(screen.queryByRole("button", { name: /ClipTwo/ })).not.toBeInTheDocument(),
+		);
+
+		// clip-b が clips に残ったまま、無関係な clip-1 側の trim を編集する
+		// (App.changeClip 相当: clips 配列は新しい参照になるが id 集合は不変)。
+		await user.click(screen.getByRole("button", { name: "mutate-clip-1-trim" }));
+
+		// 「追加」判定を clip id ベースにしていないと、ここで ClipTwo の post が
+		// 復活してしまう(手動削除の意図に反する P1 回帰)。
+		expect(screen.queryByRole("button", { name: /ClipTwo/ })).not.toBeInTheDocument();
 		expect(screen.getByRole("button", { name: /ClipOne/ })).toBeInTheDocument();
 	});
 });
