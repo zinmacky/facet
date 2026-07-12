@@ -47,7 +47,7 @@ export function ExportListItem({
 				<span className="flex shrink-0 items-center gap-1.5">
 					{status === "running" && task?.notice && (
 						<span
-							className="rounded bg-amber-400/15 px-1 text-[11px] font-medium text-amber-400"
+							className="rounded bg-amber-400/15 px-1 text-[11px] font-medium text-amber-700 dark:text-amber-400"
 							title={task.notice}
 						>
 							SW

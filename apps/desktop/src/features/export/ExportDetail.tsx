@@ -45,7 +45,7 @@ export function ExportDetail({
 
 				<div
 					style={{ aspectRatio: boxRatio }}
-					className="flex w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/40"
+					className="flex w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-black/5 dark:bg-black/40"
 				>
 					{status === "done" && task?.outputPath ? (
 						// biome-ignore lint/a11y/useMediaCaption: 書き出し結果のプレビューで字幕データが存在しない
@@ -83,7 +83,7 @@ export function ExportDetail({
 								)}
 							</div>
 							{task?.notice && (
-								<span className="text-[11px] text-amber-400">
+								<span className="text-[11px] text-amber-700 dark:text-amber-400">
 									{task.notice}
 								</span>
 							)}

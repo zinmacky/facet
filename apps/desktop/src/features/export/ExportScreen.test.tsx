@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Clip } from "../../types";
 import { renderWithProviders } from "../../test/render";
+import { DEFAULT_SETTINGS, SETTINGS_STORAGE_KEY } from "../../lib/settings";
 import {
 	DEFAULT_MEDIA_INFO,
 	emitMockEvent,
@@ -11,8 +12,15 @@ import {
 	mockEventListenerCount,
 	mockInvoke,
 	mockJoin,
+	mockOpenPath,
 } from "../../test/tauri-mock";
 import { ExportScreen } from "./ExportScreen";
+
+// 設定(useSettings)は localStorage 経由で読み出される。他テストへ影響しないよう、
+// このファイル内で設定を注入するテストの前後で必ずクリアする。
+beforeEach(() => {
+	window.localStorage.clear();
+});
 
 const SOURCE = { inputPath: "/in.mp4", probe: DEFAULT_MEDIA_INFO };
 
@@ -169,5 +177,83 @@ describe("ExportScreen: 書き出しファイル名の重複回避", () => {
 		// 2 件目は "Clip-2.mp4" になる。
 		expect(mockJoin).toHaveBeenCalledWith("/out", "Clip.mp4");
 		expect(mockJoin).toHaveBeenCalledWith("/out", "Clip-2.mp4");
+	});
+});
+
+describe("ExportScreen: 設定連携(既定の書き出し先 / 完了後にフォルダを開く)", () => {
+	it("defaultExportDir 設定時はダイアログを出さず、設定済みのパスへ直接書き出す", async () => {
+		window.localStorage.setItem(
+			SETTINGS_STORAGE_KEY,
+			JSON.stringify({ ...DEFAULT_SETTINGS, defaultExportDir: "/preset/out" }),
+		);
+		const user = userEvent.setup();
+		const clipA = makeClip("clip-a", "clipA", 10);
+		renderWithProviders(<Harness initialClips={[clipA]} />);
+
+		await user.click(screen.getByRole("button", { name: /書き出しを開始/ }));
+		await waitFor(() => expect(reframeStartCalls()).toHaveLength(1));
+
+		expect(mockDialogOpen).not.toHaveBeenCalled();
+		expect(mockJoin).toHaveBeenCalledWith("/preset/out", "clipA.mp4");
+		// スキップされても出力先パスは UI 上に見える。
+		expect(screen.getByText("/preset/out")).toBeInTheDocument();
+	});
+
+	it("defaultExportDir 未設定時は従来どおりダイアログで書き出し先を選ばせる", async () => {
+		const user = userEvent.setup();
+		const clipA = makeClip("clip-a", "clipA", 10);
+		renderWithProviders(<Harness initialClips={[clipA]} />);
+
+		mockDialogOpen.mockResolvedValueOnce("/chosen");
+		await user.click(screen.getByRole("button", { name: /書き出しを開始/ }));
+		await waitFor(() => expect(reframeStartCalls()).toHaveLength(1));
+
+		expect(mockDialogOpen).toHaveBeenCalledTimes(1);
+		expect(mockJoin).toHaveBeenCalledWith("/chosen", "clipA.mp4");
+	});
+
+	it("openFolderAfterExport=true のとき、バッチ内の全ジョブが完了した時点で一度だけフォルダを開く", async () => {
+		window.localStorage.setItem(
+			SETTINGS_STORAGE_KEY,
+			JSON.stringify({ ...DEFAULT_SETTINGS, openFolderAfterExport: true }),
+		);
+		const user = userEvent.setup();
+		const clipA = makeClip("clip-a", "clipA", 10);
+		const clipB = makeClip("clip-b", "clipB", 8);
+		renderWithProviders(<Harness initialClips={[clipA, clipB]} />);
+
+		await startExport(user);
+
+		// 1 件目のみ完了した時点ではまだ開かない(全件完了が条件)。
+		emitMockEvent("reframe://done/job-1", { encoder: "h264" });
+		await waitFor(() => {
+			expect(within(listRow("clipA.mp4")).getByText("完了")).toBeInTheDocument();
+		});
+		expect(mockOpenPath).not.toHaveBeenCalled();
+
+		// 全件完了した時点で一度だけ開く。
+		emitMockEvent("reframe://done/job-2", { encoder: "h264" });
+		await waitFor(() => expect(mockOpenPath).toHaveBeenCalledTimes(1));
+		expect(mockOpenPath).toHaveBeenCalledWith("/out");
+
+		// 完了後の再レンダリング(選択 clip の切り替え等)でも二重に開かれない。
+		await user.click(listRow("clipB.mp4"));
+		expect(mockOpenPath).toHaveBeenCalledTimes(1);
+	});
+
+	it("openFolderAfterExport=false(既定)のときは完了してもフォルダを開かない", async () => {
+		const user = userEvent.setup();
+		const clipA = makeClip("clip-a", "clipA", 10);
+		renderWithProviders(<Harness initialClips={[clipA]} />);
+
+		mockDialogOpen.mockResolvedValueOnce("/out");
+		await user.click(screen.getByRole("button", { name: /書き出しを開始/ }));
+		await waitFor(() => expect(reframeStartCalls()).toHaveLength(1));
+
+		emitMockEvent("reframe://done/job-1", { encoder: "h264" });
+		await waitFor(() => {
+			expect(within(listRow("clipA.mp4")).getByText("完了")).toBeInTheDocument();
+		});
+		expect(mockOpenPath).not.toHaveBeenCalled();
 	});
 });

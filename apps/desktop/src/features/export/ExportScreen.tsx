@@ -6,6 +6,7 @@ import type { Source } from "../../App";
 import type { Clip } from "../../types";
 import { masterSpec } from "../../types";
 import { pickExportDirectory, sanitizeFileName } from "../../lib/tauri";
+import { useSettings } from "../../lib/settings";
 import { usePreview } from "../../lib/usePreview";
 import { useReframeQueue } from "../../lib/useReframeQueue";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
@@ -57,6 +58,7 @@ export function ExportScreen({
 	// 購読解除関数に反映」する部分は UploadScreen の一括書き出しと共通のため
 	// `useReframeQueue` に集約している(queue.tasksRef が旧 resultsRef 相当の同期ミラー)。
 	const queue = useReframeQueue();
+	const { settings } = useSettings();
 
 	// 明示的に「書き出しを開始」するまでレンダリングを始めない(切替直後に
 	// 全 clip のレンダリングを走らせて CPU を占有しないため)。
@@ -118,8 +120,19 @@ export function ExportScreen({
 		preview.trigger(clip.id, source.inputPath, spec, clipPreviewSig(clip));
 	};
 
-	/** 書き出し先フォルダを選ばせてからレンダリングを開始する。キャンセル時は何もしない。 */
+	/**
+	 * 書き出し先フォルダを決めてからレンダリングを開始する。
+	 * 設定で既定の書き出し先(`settings.defaultExportDir`)が設定されていれば、
+	 * ダイアログを出さずそのままそのパスを使う。未設定なら従来どおりダイアログで選ばせる
+	 * (ダイアログで選んだパスは、この操作では設定へ書き戻さない)。キャンセル時は何もしない。
+	 */
 	const handleStart = async () => {
+		const preset = settings.defaultExportDir;
+		if (preset) {
+			outputDirRef.current = preset;
+			setStarted(true);
+			return;
+		}
 		setPickingDir(true);
 		try {
 			const dir = await pickExportDirectory();
@@ -210,6 +223,25 @@ export function ExportScreen({
 		},
 	});
 
+	// 設定で「書き出し完了後にフォルダを開く」が有効なとき、バッチ内の全 clip が
+	// 成功(done)で完了したタイミングで一度だけ出力先フォルダを自動で開く。
+	// 「未完了 → 全完了」への遷移でのみ発火させる(autoOpenedRef で二重発火を防ぐ。
+	// 失敗中の clip がある間は donePaths が clips.length に届かないため発火しない)。
+	const autoOpenedRef = useRef(false);
+	useEffect(() => {
+		const dir = outputDirRef.current;
+		const allDone =
+			started && !!dir && clips.length > 0 && donePaths.length === clips.length;
+		if (!allDone) {
+			autoOpenedRef.current = false;
+			return;
+		}
+		if (autoOpenedRef.current) return;
+		autoOpenedRef.current = true;
+		if (!settings.openFolderAfterExport) return;
+		void openPath(dir);
+	}, [started, clips.length, donePaths.length, settings.openFolderAfterExport]);
+
 	// 選択中 clip が clips から消えたとき(または未選択のとき)は先頭 clip を選択する。
 	useEffect(() => {
 		setSelectedClipId((prev) => {
@@ -277,6 +309,14 @@ export function ExportScreen({
 						{/* 右: 一括DL + clip 一覧 */}
 						<div className="flex min-h-0 w-60 shrink-0 flex-col gap-3 border-l border-line pl-4">
 							<div className="flex flex-col gap-1.5">
+								{/* 既定の書き出し先が設定されている場合、ダイアログをスキップして
+								ここへ直接書き出すため、実際の出力先パスを常に見える形にしておく。 */}
+								<span
+									className="truncate font-mono text-[10px] text-neutral-500"
+									title={outputDirRef.current ?? undefined}
+								>
+									{outputDirRef.current}
+								</span>
 								<Button
 									size="sm"
 									variant="secondary"
@@ -321,6 +361,8 @@ export function ExportScreen({
 				{!started && (
 					<p className="max-w-xs truncate text-xs text-neutral-400">
 						{clips.length} 本を書き出します(順次レンダリング)。
+						{settings.defaultExportDir &&
+							` 書き出し先: ${settings.defaultExportDir}`}
 					</p>
 				)}
 				{!started && (

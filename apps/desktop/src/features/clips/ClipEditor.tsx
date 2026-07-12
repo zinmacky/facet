@@ -210,7 +210,7 @@ export const ClipEditor = forwardRef<ClipEditorHandle, ClipEditorProps>(
 	return (
 		<div className="flex min-h-0 flex-col gap-3">
 			{/* プレビュー + クロップ枠 */}
-			<div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-line bg-black/60 p-2">
+			<div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-line bg-black/10 p-2 dark:bg-black/60">
 				<div className="relative inline-block max-h-full max-w-full">
 					{/* biome-ignore lint/a11y/useMediaCaption: ユーザー生成動画のプレビューで字幕データが存在しない */}
 					<video
@@ -250,7 +250,7 @@ export const ClipEditor = forwardRef<ClipEditorHandle, ClipEditorProps>(
 						snap={snap}
 					/>
 					{videoError && (
-						<div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/70 px-4 text-center text-xs text-danger">
+						<div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/70 px-4 text-center text-xs text-red-300 dark:text-danger">
 							{videoError}
 						</div>
 					)}
