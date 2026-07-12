@@ -124,26 +124,41 @@ jobs:
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
 
-      # --- 8. 成果物検査: NSIS の updater 用 zip を展開し、LGPL DLL のみが
+      # --- 8. 成果物検査: NSIS インストーラ(setup.exe)を 7z で展開し、LGPL DLL のみが
       #     同梱されていること(GPL 実行ファイルの混入がないこと)を機械検証する。
       #     これは「配布物そのもの」に対する検査であり、5 のビルド前ゲートとは
-      #     独立した二重防御。 ---
+      #     独立した二重防御。
+      #     注: Tauri v2 の createUpdaterArtifacts は setup.exe 自体に .sig を添える
+      #     形式で、v1 の *.nsis.zip は生成されない(v0.1.0 の3回目ビルドで確認)。
+      #     また cargo workspace のルートは apps/desktop のため、バンドル出力は
+      #     apps/desktop/target/(src-tauri/target/ ではない)。 ---
       - name: Inspect release artifacts (bundled DLLs)
         run: |
           $ErrorActionPreference = "Stop"
-          $nsisDir = "apps/desktop/src-tauri/target/release/bundle/nsis"
-          $zip = Get-ChildItem -Path $nsisDir -Filter "*.nsis.zip" -File | Select-Object -First 1
-          if (-not $zip) {
-            Write-Error "NSIS updater zip (*.nsis.zip) が見つかりません: $nsisDir"
+          $bundleDir = "apps/desktop/target/release/bundle/nsis"
+          $setup = Get-ChildItem -Path $bundleDir -Filter "*-setup.exe" -File | Select-Object -First 1
+          if (-not $setup) {
+            Write-Error "NSIS インストーラ (*-setup.exe) が見つかりません: $bundleDir"
             exit 1
           }
-          Write-Host "検査対象: $($zip.FullName)"
+          Write-Host "検査対象: $($setup.FullName)"
+
+          # updater 署名(.sig)が生成されていることを確認(createUpdaterArtifacts)。
+          if (-not (Test-Path "$($setup.FullName).sig")) {
+            Write-Error "updater 署名 (.sig) が見つかりません: $($setup.FullName).sig"
+            exit 1
+          }
 
           $extractDir = Join-Path $env:RUNNER_TEMP "release-artifact-inspect"
           if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
-          Expand-Archive -Path $zip.FullName -DestinationPath $extractDir -Force
+          # 7z(windows-latest に同梱)で NSIS インストーラのペイロードを展開する。
+          7z x $setup.FullName "-o$extractDir" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "7z による setup.exe の展開に失敗しました (exit code $LASTEXITCODE)"
+            exit 1
+          }
 
-          # NSIS zip はネストしたディレクトリを含みうるため exe の隣を機械的に探す。
+          # インストーラは入れ子ディレクトリ($PLUGINSDIR 等)を含むため exe を機械的に探す。
           $exe = Get-ChildItem -Path $extractDir -Recurse -Filter "facet-desktop.exe" -File | Select-Object -First 1
           if (-not $exe) {
             Write-Error "展開後に facet-desktop.exe が見つかりません: $extractDir"
