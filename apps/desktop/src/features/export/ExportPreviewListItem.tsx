@@ -2,6 +2,7 @@ import type { Clip } from "../../types";
 import type { PreviewState } from "../../lib/usePreview";
 import { formatTime } from "../../lib/format";
 import { cn } from "../../components/ui/cn";
+import { StatusPill, type StatusTone } from "../../components/ui/StatusPill";
 
 /** 右側一覧の 1 行(clip 名 + プレビュー生成状態)。「書き出しを開始」前の画面用。 */
 export function ExportPreviewListItem({
@@ -18,6 +19,7 @@ export function ExportPreviewListItem({
 	const rendering = state?.rendering ?? false;
 	const done = state?.outputPath !== undefined && !rendering;
 	const length = Math.max(0, clip.trim.end - clip.trim.start);
+	const tone: StatusTone = state?.error ? "danger" : done ? "ok" : "neutral";
 
 	return (
 		<button
@@ -37,14 +39,7 @@ export function ExportPreviewListItem({
 				>
 					{clip.name}.mp4
 				</span>
-				<span
-					className={cn(
-						"shrink-0 text-[11px]",
-						state?.error && "text-danger",
-						!state?.error && done && "text-ok",
-						!state?.error && !done && "text-neutral-400",
-					)}
-				>
+				<StatusPill tone={tone} className="shrink-0">
 					{state?.error
 						? "失敗"
 						: rendering
@@ -52,7 +47,7 @@ export function ExportPreviewListItem({
 							: done
 								? "プレビュー済み"
 								: "未生成"}
-				</span>
+				</StatusPill>
 			</span>
 			<span className="flex items-center gap-2 text-[11px] text-neutral-400">
 				<span className="rounded bg-panel px-1.5 py-0.5 font-medium text-neutral-300">

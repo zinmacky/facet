@@ -2,6 +2,7 @@ import type { Clip } from "../../types";
 import type { ReframeTaskState } from "../../lib/useReframeQueue";
 import { formatTime } from "../../lib/format";
 import { cn } from "../../components/ui/cn";
+import { StatusPill, type StatusTone } from "../../components/ui/StatusPill";
 
 /** 右側一覧の 1 行(clip 名 + ステータス)。 */
 export function ExportListItem({
@@ -22,6 +23,8 @@ export function ExportListItem({
 	const status = task?.status ?? "running";
 	const ratio = task?.ratio ?? 0;
 	const length = Math.max(0, clip.trim.end - clip.trim.start);
+	const tone: StatusTone =
+		status === "done" ? "ok" : status === "error" ? "danger" : "neutral";
 
 	return (
 		<button
@@ -50,14 +53,7 @@ export function ExportListItem({
 							SW
 						</span>
 					)}
-					<span
-						className={cn(
-							"text-[11px]",
-							status === "done" && "text-ok",
-							status === "error" && "text-danger",
-							status === "running" && "text-neutral-400",
-						)}
-					>
+					<StatusPill tone={tone}>
 						{pending
 							? "待機中"
 							: status === "done"
@@ -65,7 +61,7 @@ export function ExportListItem({
 								: status === "error"
 									? "失敗"
 									: `${Math.round(ratio * 100)}%`}
-					</span>
+					</StatusPill>
 				</span>
 			</span>
 			<span className="flex items-center gap-2 text-[11px] text-neutral-400">
