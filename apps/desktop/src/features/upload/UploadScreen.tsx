@@ -1,5 +1,5 @@
 import type { EditSpec, FitMode } from "@facet/core";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { join } from "@tauri-apps/api/path";
 import { useMutation } from "@tanstack/react-query";
 import type { Source } from "../../App";
@@ -103,6 +103,13 @@ export function UploadScreen({
 	// 非アクティブになった瞬間に配下の <video> を pause する。
 	const rootRef = usePauseVideosOnHide(active);
 
+	// 下の「clip 追加への追従」effect が既に認識した clip id の集合。「どの post の
+	// clipId からも参照されていない clip」を新規 clip の判定に使うと、ユーザーが
+	// 「削除」で意図的に取り除いた post(対象 clip 自体は残っている)が、無関係な
+	// clip 編集(trim/crop 等)による clips 配列の再生成のたびに復活してしまう。
+	// そのため post ではなく「過去に一度でも clips に現れた id か」で新規追加を判定する。
+	const knownClipIdsRef = useRef<Set<string>>(new Set());
+
 	// 新しい元動画選択(App からの resetToken 増加)時のみ、全状態を明示的に破棄する
 	// (最重要: 旧実装の「!open で破棄」を削除し、この明示トリガのみへ置き換えた。
 	// 通常の画面往復(戻る/進む)では posts・プレビュー・スケジュール設定は保持される)。
@@ -122,18 +129,30 @@ export function UploadScreen({
 		setScheduleSettingsOpen(false);
 		// 実行中の一括書き出しジョブを止めてから状態をクリアする。
 		bulkExportQueue.reset();
+		// 既知 clip id も合わせてクリアする(新しい元動画の clip はすべて「新規」扱い)。
+		knownClipIdsRef.current = new Set();
 	}, [resetToken]);
 
-	// clips が揃っていて posts が空のときのみ初期化する(active/open には依存しない)。
-	// 画面を離れて戻ってきても既存の posts はそのまま保持する。
+	// 初期化(posts が空): clips 全件から Post を生成し、先頭を選択する。
+	// 追加(posts が既にある): 過去に認識していない(＝新規に増えた)clip
+	// (編集画面での「切り抜きを追加」)に対してのみ Post を追加生成する。
+	// 既存 posts の内容・順序・selectedPostId は変えない(下の孤児 post 除去 effect と
+	// 対になる「追加」側の同期。これが無いと ClipEditor で clip を増やしても右一覧の
+	// 投稿一覧に反映されなかった)。画面を離れて戻ってきても既存の posts は保持される。
 	useEffect(() => {
 		if (clips.length === 0) return;
+		const currentClipIds = new Set(clips.map((c) => c.id));
+		const newClips = clips.filter((clip) => !knownClipIdsRef.current.has(clip.id));
+		knownClipIdsRef.current = currentClipIds;
 		setPosts((prev) => {
-			if (prev.length > 0) return prev;
-			const created = clips.map((clip) => createPost(clip.id));
-			// 初期化直後は先頭 Post を選択する。
-			setSelectedPostId(created[0]?.id ?? null);
-			return created;
+			if (prev.length === 0) {
+				const created = clips.map((clip) => createPost(clip.id));
+				// 初期化直後は先頭 Post を選択する。
+				setSelectedPostId(created[0]?.id ?? null);
+				return created;
+			}
+			if (newClips.length === 0) return prev;
+			return [...prev, ...newClips.map((clip) => createPost(clip.id))];
 		});
 	}, [clips]);
 
