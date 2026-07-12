@@ -4,9 +4,12 @@
 //! 非常に少なく、多数の書き出しを同時起動すると "Error while opening encoder"
 //! (err=-12903) で失敗する。`apps/studio/server/src/services/encode.ts` はこれを
 //! 「同時実行数を `MAX_CONCURRENT`(既定 2、env で変更可)に制限するセマフォ」で
-//! 防いでいる。Windows の AMF/MF についても同時実行挙動は実機未検証
-//! (docs/desktop-migration-plan.md の既知リスク)のため、media-core でも同じ既定値
-//! 2 を踏襲し、保守的に振る舞う。
+//! 防いでいる。
+//!
+//! **2026-07-12 実測(RX 9070 XT)**: AMF/MF ともハードなセッション上限なし(N=8 まで
+//! 成功)、ただし video codec engine は N=2〜4 で飽和しスループットは N=2 で頭打ちの
+//! ため既定値 2 を維持する(macOS VideoToolbox のようなハード上限による失敗こそ
+//! 起きないが、それ以上並列度を上げてもスループット向上に寄与しない)。
 //!
 //! ## セマフォ([`EncodeSlots`])
 //!
@@ -92,8 +95,9 @@ const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// 同時エンコード数上限の既定値。
 ///
 /// `apps/studio/server/src/services/encode.ts` の `MAX_CONCURRENT`(既定 2)と揃えて
-/// いる。Windows の AMF/MF は同時実行挙動が実機未検証のため、既定は保守的にこの値を
-/// そのまま採用する(モジュール冒頭コメント参照)。
+/// いる。2026-07-12 実測(RX 9070 XT)では Windows の AMF/MF ともハードなセッション
+/// 上限は無いが、video codec engine が N=2〜4 で飽和しスループットは N=2 で頭打ちの
+/// ため、この値をそのまま採用する(モジュール冒頭コメント参照)。
 pub const DEFAULT_MAX_CONCURRENT_ENCODES: usize = 2;
 
 /// 上限を上書きする環境変数名。
