@@ -70,13 +70,24 @@ export function Timeline({
 						: { start, end: clamp(secs, start + 0.05, duration) };
 				onChange(lastTrim);
 			};
+			// pointerup 以外にも pointercancel(ブラウザ/OS のジェスチャ割り込み等)・
+			// lostpointercapture(setPointerCapture が明示的解除以外の理由で失われた場合)
+			// でも必ず片付ける。up を pointerup のみに束縛していると、これらのイベントで
+			// move リスナーが外れずに残り続け(リスナーリーク)、以後の座標のマウス移動が
+			// すべてトリム更新を発火し続けてしまう。いずれの経路でも、直近の move で
+			// 確定した lastTrim を release として親へ渡す(ドラッグ中断でも見た目の位置と
+			// 確定値がずれないようにする)。
 			const up = () => {
 				window.removeEventListener("pointermove", move);
 				window.removeEventListener("pointerup", up);
+				window.removeEventListener("pointercancel", up);
+				window.removeEventListener("lostpointercapture", up);
 				onHandleRelease?.(handle, lastTrim);
 			};
 			window.addEventListener("pointermove", move);
 			window.addEventListener("pointerup", up);
+			window.addEventListener("pointercancel", up);
+			window.addEventListener("lostpointercapture", up);
 		},
 		[disabled, duration, end, start, onChange, onHandleRelease, pxToSeconds],
 	);

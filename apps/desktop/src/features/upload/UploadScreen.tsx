@@ -26,6 +26,8 @@ import {
 } from "../../lib/schedule";
 import { type PreviewState, usePreview } from "../../lib/usePreview";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
+import { clipPreviewSig } from "../../lib/clipSig";
+import { uniqueBaseNames } from "../../lib/uniqueBaseName";
 import { Modal } from "../../components/ui/Modal";
 import { Button } from "../../components/ui/Button";
 import { IconButton } from "../../components/ui/IconButton";
@@ -91,9 +93,21 @@ interface PubStatus {
 	message?: string;
 }
 
-/** Output の設定シグネチャ。これが変わったらレンダリングは古い(要更新)。 */
-function outputSig(post: UploadPost, output: UploadOutput): string {
-	return `${post.clipId}|${output.targetId}|${output.fit}`;
+/**
+ * Output の設定シグネチャ。これが変わったらレンダリングは古い(要更新)。
+ * `finalSpec` に効く clip.trim/crop/aspect(`clipPreviewSig`)も含める — clip 側の
+ * 編集(トリム/クロップ/アスペクト変更)後にプレビューが古いままになる P1 バグの修正
+ * (ExportScreen の clipPreviewSig と同じ考え方)。clip が見つからない場合(参照先
+ * clip が削除された等)は "missing" を返し、いずれにせよ再レンダリングが必要になる
+ * ようにする。
+ */
+function outputSig(
+	clip: Clip | undefined,
+	post: UploadPost,
+	output: UploadOutput,
+): string {
+	const clipSig = clip ? clipPreviewSig(clip) : "missing";
+	return `${post.clipId}|${clipSig}|${output.targetId}|${output.fit}`;
 }
 
 /**
@@ -243,6 +257,29 @@ export function UploadScreen({
 			return created;
 		});
 	}, [clips]);
+
+	// 孤児 post の無効化: clips から消えた clipId を参照する post を除去する
+	// (ExportScreen.tsx の clip 単位の細粒度無効化 effect が手本)。ClipEditor 側で
+	// clip を削除しても、UploadScreen 側は resetToken が増分されないため posts に
+	// 参照切れの post が残り続けていた(存在しない clip を指す post が「対象 clip
+	// 不明」のまま操作可能に見えてしまう P1 バグ)。除去する post の Output に紐づく
+	// プレビュー・投稿ステータスも合わせて破棄する。
+	useEffect(() => {
+		const validClipIds = new Set(clips.map((c) => c.id));
+		const orphanOutputIds = posts
+			.filter((p) => !validClipIds.has(p.clipId))
+			.flatMap((p) => p.outputs.map((o) => o.id));
+		if (orphanOutputIds.length === 0) return;
+
+		setPosts((prev) => prev.filter((p) => validClipIds.has(p.clipId)));
+		for (const outputId of orphanOutputIds) preview.remove(outputId);
+		setPubStatuses((prev) => {
+			const next = new Map(prev);
+			for (const outputId of orphanOutputIds) next.delete(outputId);
+			return next;
+		});
+		// 選択中 post が除去されていたら、selectedPostId 側は下の effect で補正される。
+	}, [clips, posts, preview.remove]);
 
 	// 選択中 id が posts に無い場合は先頭へ補正する(削除・並び替え時の担保)。
 	useEffect(() => {
@@ -508,7 +545,7 @@ export function UploadScreen({
 			output.id,
 			source.inputPath,
 			spec,
-			outputSig(post, output),
+			outputSig(clip, post, output),
 		);
 	};
 
@@ -671,13 +708,12 @@ export function UploadScreen({
 			}
 
 			// ファイル名の重複を避ける(同一 clip に同一ターゲット+フィットの
-			// Output を複数追加した場合など)。
-			const used = new Map<string, number>();
-			const uniqueBaseName = (base: string): string => {
-				const count = (used.get(base) ?? 0) + 1;
-				used.set(base, count);
-				return count === 1 ? base : `${base}-${count}`;
-			};
+			// Output を複数追加した場合など)。ExportScreen の書き出しと同じ採番
+			// ロジックを共有する。
+			const uniqueNames = uniqueBaseNames(
+				tasks,
+				(t) => `${sanitizeFileName(t.clip.name)}_${t.target.id}_${t.output.fit}`,
+			);
 
 			setBulkExports(() => {
 				const next = new Map<string, BulkExportTask>();
@@ -688,9 +724,9 @@ export function UploadScreen({
 
 			const outcomes = await Promise.all(
 				tasks.map(async (t) => {
-					const base = uniqueBaseName(
-						`${sanitizeFileName(t.clip.name)}_${t.target.id}_${t.output.fit}`,
-					);
+					const base =
+						uniqueNames.get(t) ??
+						`${sanitizeFileName(t.clip.name)}_${t.target.id}_${t.output.fit}`;
 					try {
 						const outputPath = await join(dir, `${base}.mp4`);
 						await new Promise<void>((resolve, reject) => {
@@ -762,9 +798,21 @@ export function UploadScreen({
 		[bulkExports],
 	);
 
-	// プレビュー生成(現在設定でレンダリング)。エラーは renders.error に反映。
+	// プレビュー生成(現在設定でレンダリング)。
+	// ensureRendered は preview.ensure 呼び出し前にガード節で早期 throw することがある
+	// (元動画未選択・対象クリップ不明・出力ターゲット無効)。この場合 preview 側の
+	// states には何も反映されないため render.error は出ず、以前は catch(() => undefined)
+	// で握りつぶしてユーザーに一切見えなくなっていた(P1 バグ)。preview.ensure 到達後の
+	// 失敗は引き続き renders.error にも反映されるが、ここでは早期 throw を含む
+	// あらゆる失敗を既存の pubStatuses(StatusBadge、折りたたみを開かなくても常時
+	// 見える trailing 表示)へも反映し、必ずユーザーに見える形にする。
 	const previewOutput = (post: UploadPost, output: UploadOutput) => {
-		void ensureRendered(post, output).catch(() => undefined);
+		void ensureRendered(post, output).catch((err: unknown) => {
+			setPubStatus(output.id, {
+				kind: "error",
+				message: err instanceof Error ? err.message : String(err),
+			});
+		});
 	};
 
 	// 中央詳細に表示する選択中の Post。
@@ -1354,6 +1402,7 @@ function PostDetail(props: PostDetailProps) {
 					<OutputCard
 						key={output.id}
 						post={post}
+						clip={postClip}
 						output={output}
 						clipAspectLabel={clipAspectLabel}
 						canRemove={post.outputs.length > 1}
@@ -1378,6 +1427,8 @@ function PostDetail(props: PostDetailProps) {
 
 interface OutputCardProps {
 	post: UploadPost;
+	/** post.clipId の解決済み clip(finalSpec/outputSig に効く trim/crop/aspect を持つ)。 */
+	clip: Clip | undefined;
 	output: UploadOutput;
 	/** 元画面で決めたクロップ比のラベル(由来表示用)。 */
 	clipAspectLabel: string;
@@ -1392,7 +1443,7 @@ interface OutputCardProps {
 }
 
 function OutputCard(props: OutputCardProps) {
-	const { post, output, render, status, busy } = props;
+	const { post, clip, output, render, status, busy } = props;
 	const [postSettingsOpen, setPostSettingsOpen] = useState(false);
 	const target = useMemo(() => targetById(output.targetId), [output.targetId]);
 	const platform = target?.platform;
@@ -1402,7 +1453,7 @@ function OutputCard(props: OutputCardProps) {
 	// 現在設定と生成済みファイルの整合。fresh=最新、stale=設定変更後で要更新。
 	const rendering = render?.rendering ?? false;
 	const outputPath = render?.outputPath;
-	const sig = outputSig(post, output);
+	const sig = outputSig(clip, post, output);
 	const fresh = outputPath !== undefined && render?.sig === sig;
 	const stale = outputPath !== undefined && render?.sig !== sig;
 

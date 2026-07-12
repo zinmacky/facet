@@ -71,8 +71,15 @@ export function usePreview(): UsePreviewResult {
 			if (cached?.outputPath && cached.sig === sig && !cached.rendering) {
 				return Promise.resolve(cached.outputPath);
 			}
+			// 進行中の ensure() があれば無条件に合流する。以前は `cached?.rendering` も
+			// 条件に含めていたが、cached は state の ref ミラーで render commit 後にしか
+			// 更新されないため、同一 tick 内で連続 ensure() すると 1 回目の rendering:true
+			// がまだ cached へ反映されておらず合流に失敗し、pending 中にもかかわらず
+			// preview_start が二重発火する P1 バグがあった(usePreview.ensure の重複ガード
+			// 競合)。pendingRef は setState と異なり同期的に更新されるため、これだけを
+			// 条件にすれば tick を跨がず確実に合流する。
 			const pending = pendingRef.current.get(key);
-			if (pending && cached?.rendering) return pending;
+			if (pending) return pending;
 
 			const promise = new Promise<string>((resolve, reject) => {
 				patch(key, { rendering: true, error: undefined });
