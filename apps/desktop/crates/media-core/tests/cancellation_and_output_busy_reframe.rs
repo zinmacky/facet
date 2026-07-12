@@ -96,6 +96,7 @@ fn slot_wait_cancellation_and_output_path_collision_via_real_reframe() {
 			bit_rate: encode::DEFAULT_BITRATE,
 			cancel: &holder_cancel,
 			on_progress: &on_progress,
+			staging_dir: None,
 		};
 		reframe(&holder_input, &holder_output_for_thread, options)
 	});
@@ -136,6 +137,7 @@ fn slot_wait_cancellation_and_output_path_collision_via_real_reframe() {
 			bit_rate: encode::DEFAULT_BITRATE,
 			cancel: &waiter_cancel_for_thread,
 			on_progress: &on_progress,
+			staging_dir: None,
 		};
 		reframe(&waiter_input, &waiter_output_for_thread, options)
 	});
@@ -203,6 +205,7 @@ fn slot_wait_cancellation_and_output_path_collision_via_real_reframe() {
 			bit_rate: encode::DEFAULT_BITRATE,
 			cancel: &first_cancel,
 			on_progress: &on_progress,
+			staging_dir: None,
 		};
 		reframe(&first_input, &first_output, options)
 	});
@@ -235,6 +238,7 @@ fn slot_wait_cancellation_and_output_path_collision_via_real_reframe() {
 		bit_rate: encode::DEFAULT_BITRATE,
 		cancel: &second_cancel,
 		on_progress: &on_progress,
+		staging_dir: None,
 	};
 	let second_result = reframe(&input, &shared_output, options);
 	assert!(
@@ -265,6 +269,7 @@ fn slot_wait_cancellation_and_output_path_collision_via_real_reframe() {
 		bit_rate: encode::DEFAULT_BITRATE,
 		cancel: &third_cancel,
 		on_progress: &on_progress,
+		staging_dir: None,
 	};
 	let third_result = reframe(&input, &shared_output, options);
 	let _ = std::fs::remove_file(&shared_output);

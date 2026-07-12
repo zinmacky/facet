@@ -90,6 +90,7 @@ fn three_concurrent_reframes_are_capped_at_configured_limit_and_all_complete() {
 					bit_rate: encode::DEFAULT_BITRATE,
 					cancel: &cancel,
 					on_progress: &on_progress,
+					staging_dir: None,
 				};
 				let result = reframe(&input, &output, options);
 				let _ = std::fs::remove_file(&output);

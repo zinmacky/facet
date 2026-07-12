@@ -152,6 +152,7 @@ fn run() -> Result<(), MediaError> {
 		bit_rate: encode::DEFAULT_BITRATE,
 		cancel: &cancel_token,
 		on_progress: &on_progress,
+		staging_dir: None,
 	};
 
 	let encoder_used = reframe(&input, &output, options)?;

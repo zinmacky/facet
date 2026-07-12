@@ -176,6 +176,7 @@ fn run_reframe(input: &Path, output: &Path, trim: Option<Trim>) -> Result<String
 		bit_rate: encode::DEFAULT_BITRATE,
 		cancel: &cancel,
 		on_progress: &on_progress,
+		staging_dir: None,
 	};
 	reframe(input, output, options).map_err(|err| err.to_string())
 }
