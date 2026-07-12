@@ -2,6 +2,7 @@ import type { EditSpec } from "@facet/core";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import type { EncoderPreference } from "./settings";
 
 /**
  * `apps/desktop/src-tauri/src/commands/{probe,reframe,preview}.rs` の invoke 境界に
@@ -118,14 +119,22 @@ export interface JobHandle {
  * `input` を `spec` の指定形状へ再フレーミングして `output`(絶対パス)へ書き出す。
  * `output` の親ディレクトリは呼び出し側が事前に存在させておく必要がある
  * (`media_core::reframe` は出力ディレクトリを作成しない)。
+ * `encoder` は省略または `"auto"` なら Rust 側の自動選択に委ねる(invoke へは渡さない —
+ * `undefined` もそのまま渡してよいが、キー自体を省略した方が意図が明確なため省く)。
  */
 export async function startReframe(
 	input: string,
 	output: string,
 	spec: EditSpec,
 	handlers: ReframeHandlers,
+	encoder?: EncoderPreference,
 ): Promise<JobHandle> {
-	const jobId = await invoke<JobId>("reframe_start", { input, output, spec });
+	const jobId = await invoke<JobId>("reframe_start", {
+		input,
+		output,
+		spec,
+		...(encoder && encoder !== "auto" ? { encoder } : {}),
+	});
 	const unlisteners: UnlistenFn[] = await Promise.all([
 		listen<Progress>(`reframe://progress/${jobId}`, (event) => {
 			handlers.onProgress?.(event.payload);
@@ -184,6 +193,13 @@ export async function startPreview(
 		},
 		cancel: () => cancelJob(jobId),
 	};
+}
+
+// ---- エンコード設定 ---------------------------------------------------------
+
+/** 同時実行できるエンコードジョブ数の上限(1〜4)を設定する。 */
+export function setMaxConcurrentEncodes(max: number): Promise<void> {
+	return invoke<void>("set_max_concurrent_encodes", { max });
 }
 
 // ---- ユーティリティ --------------------------------------------------------

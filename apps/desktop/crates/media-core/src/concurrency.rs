@@ -22,6 +22,10 @@
 //! - [`EncodeSlots::global`] でプロセス全体共有のインスタンスを取得できる
 //!   (`OnceLock`)。Tauri コマンドが複数ジョブを並行起動する場合、ジョブ間で
 //!   同じ上限を共有するために使う想定。
+//! - デスクトップアプリは設定画面から [`EncodeSlots::set_max`] で実行時に上限を
+//!   上書きする(Tauri コマンド `set_max_concurrent_encodes`)。その場合、env
+//!   ([`MAX_CONCURRENT_ENCODES_ENV`])より UI 設定が優先される(`set_max` が
+//!   `from_env` 構築後の値を上書きするだけなので、呼び出し順の問題は起きない)。
 //!
 //! ## リトライ([`retry_on_encoder_open`])
 //!
@@ -77,6 +81,7 @@
 //! ```
 
 use std::env;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -111,8 +116,12 @@ pub const MAX_CONCURRENT_ENCODES_ENV: &str = "MAX_CONCURRENT_ENCODES";
 /// `std::sync::{Mutex, Condvar}` による最小実装(tokio は導入しない。モジュール
 /// 冒頭コメント参照)。`acquire`/`try_acquire` が返す [`SlotGuard`] が drop される
 /// と自動的にスロットが解放される。
+///
+/// `max` は `AtomicUsize` で持つ([`set_max`](Self::set_max)による実行時変更に対応する
+/// ため。設定画面からの上書きはジョブ実行中にも起こりうるので、`Mutex<usize>` のような
+/// 排他ではなく独立したアトミック変数にしている)。
 pub struct EncodeSlots {
-	max: usize,
+	max: AtomicUsize,
 	active: Mutex<usize>,
 	available: Condvar,
 }
@@ -126,7 +135,7 @@ impl EncodeSlots {
 	/// [`acquire`]: EncodeSlots::acquire
 	pub fn new(max: usize) -> Self {
 		EncodeSlots {
-			max: max.max(1),
+			max: AtomicUsize::new(max.max(1)),
 			active: Mutex::new(0),
 			available: Condvar::new(),
 		}
@@ -158,7 +167,21 @@ impl EncodeSlots {
 
 	/// このセマフォの上限。
 	pub fn max(&self) -> usize {
-		self.max
+		self.max.load(Ordering::SeqCst)
+	}
+
+	/// 上限を実行時に変更する(デスクトップアプリの設定画面 → Tauri コマンド
+	/// `set_max_concurrent_encodes` から呼ばれる想定。モジュール冒頭コメント参照)。
+	///
+	/// `max == 0` は [`new`](Self::new) と同じ理由で 1 に切り上げる。上限を増やした
+	/// 場合、既に [`acquire`](Self::acquire) 等で待機中のスレッドがいれば
+	/// `notify_all` で全員を起こし、新しい上限で再判定させる(`release` は
+	/// `notify_one` だが、ここでは複数スレッドが同時に取得可能になりうるため
+	/// `notify_all` にしている)。上限を減らした場合、既に取得済みのスロットを
+	/// 奪うことはしない(以後の新規取得のみ新しい上限で制限される)。
+	pub fn set_max(&self, max: usize) {
+		self.max.store(max.max(1), Ordering::SeqCst);
+		self.available.notify_all();
 	}
 
 	/// 現在アクティブなスロット数(テスト・診断用)。
@@ -171,7 +194,7 @@ impl EncodeSlots {
 	/// 戻り値の [`SlotGuard`] が drop されると自動的に解放される(RAII)。
 	pub fn acquire(&self) -> SlotGuard<'_> {
 		let mut active = lock_or_recover(&self.active);
-		while *active >= self.max {
+		while *active >= self.max() {
 			active = wait_or_recover(&self.available, active);
 		}
 		*active += 1;
@@ -196,7 +219,7 @@ impl EncodeSlots {
 		}
 		let mut active = lock_or_recover(&self.active);
 		loop {
-			if *active < self.max {
+			if *active < self.max() {
 				*active += 1;
 				return Some(SlotGuard { slots: self });
 			}
@@ -210,7 +233,7 @@ impl EncodeSlots {
 	/// ブロックせずに取得を試みる。空きがなければ `None` を返す。
 	pub fn try_acquire(&self) -> Option<SlotGuard<'_>> {
 		let mut active = lock_or_recover(&self.active);
-		if *active >= self.max {
+		if *active >= self.max() {
 			return None;
 		}
 		*active += 1;
@@ -488,6 +511,76 @@ mod tests {
 	fn new_clamps_zero_to_one() {
 		let slots = EncodeSlots::new(0);
 		assert_eq!(slots.max(), 1);
+	}
+
+	#[test]
+	fn set_max_clamps_zero_to_one() {
+		let slots = EncodeSlots::new(2);
+		slots.set_max(0);
+		assert_eq!(slots.max(), 1);
+	}
+
+	#[test]
+	fn set_max_wakes_waiter_blocked_on_old_limit() {
+		// max=1 で 1 つ取得して満杯にし、後続の acquire が待機せざるを得ない状態にする。
+		// set_max(2) で上限を上げると、待機中の acquire が起きて取得できるはず。
+		let slots = Arc::new(EncodeSlots::new(1));
+		let _held = slots.acquire();
+		assert_eq!(slots.active_count(), 1);
+
+		let (waiting_tx, waiting_rx) = mpsc::channel::<()>();
+		let (acquired_tx, acquired_rx) = mpsc::channel::<()>();
+		let waiter = {
+			let slots = Arc::clone(&slots);
+			thread::spawn(move || {
+				waiting_tx.send(()).expect("send waiting");
+				let _guard = slots.acquire();
+				acquired_tx.send(()).expect("send acquired");
+				// メインスレッドが active_count を確認し終えるまでガードを保持する。
+				thread::sleep(Duration::from_millis(200));
+			})
+		};
+
+		waiting_rx.recv().expect("waiter started");
+		// waiter が acquire のブロックに入るのを軽く待つ(third_acquire_blocks_...と同じ意図)。
+		thread::sleep(Duration::from_millis(120));
+		let still_blocked = acquired_rx.recv_timeout(Duration::from_millis(200));
+		assert!(still_blocked.is_err(), "max=1 の間は待機し続けるはず");
+
+		slots.set_max(2);
+
+		acquired_rx
+			.recv_timeout(Duration::from_secs(5))
+			.expect("set_max(2) 後は待機中の acquire が取得できるはず");
+
+		waiter.join().expect("join waiter");
+	}
+
+	#[test]
+	fn set_max_lowering_limits_only_future_acquires() {
+		// max=2 で 2 つ取得済みの状態から set_max(1) しても、既得の 2 スロットは
+		// 奪われない(active_count はそのまま)。以後の新規取得だけが新上限(1)で
+		// 制限されることを、2 つとも解放したあとの try_acquire で確認する。
+		let slots = EncodeSlots::new(2);
+		let guard_a = slots.try_acquire().expect("first acquire should succeed");
+		let guard_b = slots.try_acquire().expect("second acquire should succeed");
+		assert_eq!(slots.active_count(), 2);
+
+		slots.set_max(1);
+		assert_eq!(slots.active_count(), 2, "既得スロットは奪われない");
+
+		drop(guard_a);
+		drop(guard_b);
+		assert_eq!(slots.active_count(), 0);
+
+		let guard_c = slots
+			.try_acquire()
+			.expect("new limit allows at least one acquire");
+		assert!(
+			slots.try_acquire().is_none(),
+			"新上限 1 なので 2 つ目は取得できない"
+		);
+		drop(guard_c);
 	}
 
 	#[test]

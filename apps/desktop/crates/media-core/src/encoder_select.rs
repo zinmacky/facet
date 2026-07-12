@@ -134,6 +134,20 @@ pub fn candidate_table(platform: Platform) -> &'static [EncoderChoice] {
 	}
 }
 
+/// `platform` の候補テーブルから `name` に一致する候補を 1 つ返す(UI からの手動選択用)。
+///
+/// [`candidate_table`] をそのまま検索するだけなので、`h264_mf` を指定した場合も
+/// テーブル定義の `hw_encoding=1` オプションが確実に付いた [`EncoderChoice`] が返る
+/// (呼び出し側でオプションを手動再構築する必要がない。モジュール冒頭コメント §候補
+/// テーブル参照)。`name` がテーブルに存在しない(未知の名前、または `platform` に
+/// 候補がない)場合は `None` を返す。
+pub fn find_choice(platform: Platform, name: &str) -> Option<EncoderChoice> {
+	candidate_table(platform)
+		.iter()
+		.find(|choice| choice.name == name)
+		.copied()
+}
+
 /// 現在のプラットフォーム向けの候補テーブルを優先順位順で返す
 /// ([`Platform::current`] を使う)。
 ///
@@ -282,6 +296,36 @@ mod tests {
 			}
 			other => panic!("unexpected error variant: {other:?}"),
 		}
+	}
+
+	#[test]
+	fn find_choice_resolves_windows_amf_and_mf() {
+		let amf = find_choice(Platform::Windows, "h264_amf").expect("h264_amf must resolve");
+		assert_eq!(amf.name, "h264_amf");
+		assert!(amf.options.is_empty());
+
+		let mf = find_choice(Platform::Windows, "h264_mf").expect("h264_mf must resolve");
+		assert_eq!(mf.name, "h264_mf");
+		assert_eq!(mf.options, &[("hw_encoding", "1")]);
+	}
+
+	#[test]
+	fn find_choice_returns_none_for_unknown_name() {
+		assert!(find_choice(Platform::Windows, "libx264").is_none());
+	}
+
+	#[test]
+	fn find_choice_resolves_macos_videotoolbox() {
+		let choice =
+			find_choice(Platform::MacOs, "h264_videotoolbox").expect("must resolve on macOS");
+		assert_eq!(choice.name, "h264_videotoolbox");
+		assert!(choice.options.is_empty());
+	}
+
+	#[test]
+	fn find_choice_always_none_on_other_platform() {
+		assert!(find_choice(Platform::Other, "h264_amf").is_none());
+		assert!(find_choice(Platform::Other, "h264_videotoolbox").is_none());
 	}
 
 	#[test]

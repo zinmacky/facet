@@ -17,6 +17,7 @@ import { UploadScreen } from "./features/upload/UploadScreen";
 import { WizardShell } from "./features/wizard/WizardShell";
 import { type ExportSummary, StepIndicator } from "./features/wizard/StepIndicator";
 import { SettingsDialog } from "./features/settings/SettingsDialog";
+import { useEncodeSettingsSync } from "./lib/useEncodeSettingsSync";
 import { Card } from "./components/ui/Card";
 import { Button } from "./components/ui/Button";
 import { IconButton } from "./components/ui/IconButton";
@@ -70,6 +71,9 @@ export function App() {
 	// 元動画プレーヤー(ClipEditor)を命令的に操作するための参照。
 	// 編集画面から離れるときに再生を止めるために使う。
 	const clipEditorRef = useRef<ClipEditorHandle>(null);
+	// 設定の同時エンコード数を Rust 側(`set_max_concurrent_encodes`)へ同期する
+	// (初回マウント時・変更時の双方)。
+	useEncodeSettingsSync();
 
 	const pickMutation = useMutation({
 		mutationFn: async (): Promise<Source | null> => {
