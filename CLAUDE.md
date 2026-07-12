@@ -20,8 +20,9 @@
 
 - fmt: `cargo fmt --check` / clippy: `cargo clippy --workspace -- -D warnings`
   / テスト: `cargo test --workspace`(CI と同一ゲート)
-- ローカルの FFmpeg は Homebrew + pkg-config で解決される。CI のみ FFMPEG_DIR を
-  明示設定(.github/workflows/ci.yml 参照)
+- ローカルの FFmpeg 解決は OS で異なる: mac は Homebrew + pkg-config、
+  **Windows は環境変数 `FFMPEG_DIR`(+ `LIBCLANG_PATH`、PATH に `ffmpeg\bin`)**。
+  CI は FFMPEG_DIR を明示設定(.github/workflows/ci.yml 参照)
 - `cargo deny` / `cargo audit` は CI のみ(ローカル未インストール)
 
 コミット前に `pnpm -r typecheck` と `pnpm test` を実行する(フックは per-file lint のみ)。

@@ -11,6 +11,13 @@ import {
 /** テーマの選択値。"system" は OS 設定(prefers-color-scheme)に追従する。 */
 export type ThemePreference = "system" | "light" | "dark";
 
+/**
+ * エンコーダの選択値。"auto" は Rust 側(media-core)の候補テーブルによる自動選択に
+ * 委ねる。明示指定は Windows の候補テーブル(h264_amf → h264_mf)と整合する値のみ
+ * (libx264 による SW フォールバックには media-core が対応しない方針のため含めない)。
+ */
+export type EncoderPreference = "auto" | "h264_amf" | "h264_mf";
+
 /** アプリ全体の設定。localStorage へ JSON で永続化する。 */
 export type AppSettings = {
 	theme: ThemePreference;
@@ -20,6 +27,10 @@ export type AppSettings = {
 	openFolderAfterExport: boolean;
 	/** 書き出し完了時に OS のデスクトップ通知を送る */
 	notifyOnExportComplete: boolean;
+	/** `reframe_start` へ渡すエンコーダ指定。"auto" は自動選択。 */
+	encoder: EncoderPreference;
+	/** `set_max_concurrent_encodes` へ渡す同時エンコード数(1〜4の整数)。 */
+	maxConcurrentEncodes: number;
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -27,6 +38,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	defaultExportDir: null,
 	openFolderAfterExport: false,
 	notifyOnExportComplete: false,
+	encoder: "auto",
+	maxConcurrentEncodes: 2,
 };
 
 export const SETTINGS_STORAGE_KEY = "facet.desktop.settings";
@@ -45,6 +58,20 @@ export function resolveTheme(
 
 function isThemePreference(value: unknown): value is ThemePreference {
 	return value === "system" || value === "light" || value === "dark";
+}
+
+function isEncoderPreference(value: unknown): value is EncoderPreference {
+	return value === "auto" || value === "h264_amf" || value === "h264_mf";
+}
+
+/** 1〜4 の整数のみ許可する(小数・範囲外・非数値はすべて不正扱い)。 */
+function isValidMaxConcurrentEncodes(value: unknown): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isInteger(value) &&
+		value >= 1 &&
+		value <= 4
+	);
 }
 
 /**
@@ -74,6 +101,12 @@ export function loadSettings(): AppSettings {
 				typeof obj.notifyOnExportComplete === "boolean"
 					? obj.notifyOnExportComplete
 					: DEFAULT_SETTINGS.notifyOnExportComplete,
+			encoder: isEncoderPreference(obj.encoder)
+				? obj.encoder
+				: DEFAULT_SETTINGS.encoder,
+			maxConcurrentEncodes: isValidMaxConcurrentEncodes(obj.maxConcurrentEncodes)
+				? obj.maxConcurrentEncodes
+				: DEFAULT_SETTINGS.maxConcurrentEncodes,
 		};
 	} catch {
 		// JSON.parse 失敗や localStorage アクセス不可はすべて既定値扱い

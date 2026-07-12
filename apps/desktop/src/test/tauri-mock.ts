@@ -37,6 +37,7 @@ async function defaultInvokeImpl(cmd: string, _args?: unknown): Promise<unknown>
 			jobCounter += 1;
 			return `job-${jobCounter}`;
 		case "reframe_cancel":
+		case "set_max_concurrent_encodes":
 			return undefined;
 		default:
 			throw new Error(`invoke not mocked for command: ${cmd}`);

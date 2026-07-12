@@ -2,6 +2,7 @@ import type { EditSpec } from "@facet/core";
 import type { MutableRefObject } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getErrorMessage } from "./getErrorMessage";
+import type { EncoderPreference } from "./settings";
 import { startReframe } from "./tauri";
 
 /**
@@ -52,6 +53,7 @@ export interface UseReframeQueueResult {
 		input: string,
 		outputPath: string,
 		spec: EditSpec,
+		encoder?: EncoderPreference,
 	) => Promise<void>;
 	/** `run` 到達前の失敗(出力パス解決の失敗など)を key の状態へ反映する。 */
 	fail: (key: string, err: unknown) => void;
@@ -111,30 +113,37 @@ export function useReframeQueue(): UseReframeQueueResult {
 			input: string,
 			outputPath: string,
 			spec: EditSpec,
+			encoder?: EncoderPreference,
 		): Promise<void> => {
 			return new Promise<void>((resolve, reject) => {
 				let handle: { unsubscribe: () => void } | undefined;
-				startReframe(input, outputPath, spec, {
-					onProgress: (progress) => {
-						update(key, {
-							status: "running",
-							ratio: (progress.percent ?? 0) / 100,
-							fps: progress.fps,
-						});
+				startReframe(
+					input,
+					outputPath,
+					spec,
+					{
+						onProgress: (progress) => {
+							update(key, {
+								status: "running",
+								ratio: (progress.percent ?? 0) / 100,
+								fps: progress.fps,
+							});
+						},
+						onDone: () => {
+							handle?.unsubscribe();
+							unsubsRef.current.delete(key);
+							update(key, { status: "done", ratio: 1, outputPath });
+							resolve();
+						},
+						onError: (message) => {
+							handle?.unsubscribe();
+							unsubsRef.current.delete(key);
+							update(key, { status: "error", error: message });
+							reject(new Error(message));
+						},
 					},
-					onDone: () => {
-						handle?.unsubscribe();
-						unsubsRef.current.delete(key);
-						update(key, { status: "done", ratio: 1, outputPath });
-						resolve();
-					},
-					onError: (message) => {
-						handle?.unsubscribe();
-						unsubsRef.current.delete(key);
-						update(key, { status: "error", error: message });
-						reject(new Error(message));
-					},
-				})
+					encoder,
+				)
 					.then((h) => {
 						handle = h;
 						unsubsRef.current.set(key, h.unsubscribe);

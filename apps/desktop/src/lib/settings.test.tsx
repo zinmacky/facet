@@ -159,6 +159,8 @@ describe("SettingsProvider", () => {
 			// 型が不正なフィールドも既定値へフォールバック
 			openFolderAfterExport: false,
 			notifyOnExportComplete: false,
+			encoder: "auto",
+			maxConcurrentEncodes: 2,
 		});
 		expect(hasDarkClass()).toBe(false);
 	});
@@ -173,5 +175,62 @@ describe("SettingsProvider", () => {
 
 		expect(result.current.settings.theme).toBe("dark");
 		expect(hasDarkClass()).toBe(true);
+	});
+
+	describe("encoder / maxConcurrentEncodes のバリデーション", () => {
+		it("不正な encoder 値は既定の auto へフォールバックする", () => {
+			window.localStorage.setItem(
+				SETTINGS_STORAGE_KEY,
+				JSON.stringify({ encoder: "libx264" }),
+			);
+			installMatchMedia(false);
+			const { result } = renderSettings();
+
+			expect(result.current.settings.encoder).toBe("auto");
+		});
+
+		it("正常な encoder 値(h264_amf / h264_mf)はそのまま保持される", () => {
+			window.localStorage.setItem(
+				SETTINGS_STORAGE_KEY,
+				JSON.stringify({ encoder: "h264_amf" }),
+			);
+			installMatchMedia(false);
+			const { result: resultAmf } = renderSettings();
+			expect(resultAmf.current.settings.encoder).toBe("h264_amf");
+
+			window.localStorage.setItem(
+				SETTINGS_STORAGE_KEY,
+				JSON.stringify({ encoder: "h264_mf" }),
+			);
+			installMatchMedia(false);
+			const { result: resultMf } = renderSettings();
+			expect(resultMf.current.settings.encoder).toBe("h264_mf");
+		});
+
+		it.each([0, 5, 1.5, "2"])(
+			"不正な maxConcurrentEncodes 値(%s)は既定の 2 へフォールバックする",
+			(value) => {
+				window.localStorage.setItem(
+					SETTINGS_STORAGE_KEY,
+					JSON.stringify({ maxConcurrentEncodes: value }),
+				);
+				installMatchMedia(false);
+				const { result } = renderSettings();
+
+				expect(result.current.settings.maxConcurrentEncodes).toBe(2);
+			},
+		);
+
+		it("1〜4 の整数の maxConcurrentEncodes はそのまま保持される", () => {
+			for (const value of [1, 2, 3, 4]) {
+				window.localStorage.setItem(
+					SETTINGS_STORAGE_KEY,
+					JSON.stringify({ maxConcurrentEncodes: value }),
+				);
+				installMatchMedia(false);
+				const { result } = renderSettings();
+				expect(result.current.settings.maxConcurrentEncodes).toBe(value);
+			}
+		});
 	});
 });

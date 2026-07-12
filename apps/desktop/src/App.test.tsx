@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
@@ -131,6 +131,42 @@ describe("App: ステップ遷移時のフォーカス移動(a11y)", () => {
 
 		await goToStep(user, "編集");
 		expect(screen.getByRole("heading", { name: "編集" })).toHaveFocus();
+	});
+});
+
+describe("App: 同時エンコード数の同期(useEncodeSettingsSync)", () => {
+	beforeEach(() => {
+		window.localStorage.clear();
+	});
+
+	it("初回マウント時に既定値(2)で set_max_concurrent_encodes が invoke される", async () => {
+		renderWithProviders(<App />);
+
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith("set_max_concurrent_encodes", {
+				max: 2,
+			}),
+		);
+	});
+
+	it("設定ダイアログで同時エンコード数を変更すると set_max_concurrent_encodes が再 invoke される", async () => {
+		const user = userEvent.setup();
+		renderWithProviders(<App />);
+
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith("set_max_concurrent_encodes", {
+				max: 2,
+			}),
+		);
+
+		await user.click(screen.getByRole("button", { name: "設定" }));
+		await user.click(screen.getByRole("button", { name: "4" }));
+
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith("set_max_concurrent_encodes", {
+				max: 4,
+			}),
+		);
 	});
 });
 

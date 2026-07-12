@@ -1,5 +1,9 @@
 import { useState } from "react";
-import { useSettings, type ThemePreference } from "../../lib/settings";
+import {
+	useSettings,
+	type EncoderPreference,
+	type ThemePreference,
+} from "../../lib/settings";
 import { pickExportDirectory } from "../../lib/tauri";
 import { Modal } from "../../components/ui/Modal";
 import { Button } from "../../components/ui/Button";
@@ -16,10 +20,19 @@ const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
 	{ value: "dark", label: "ダーク" },
 ];
 
+const ENCODER_OPTIONS: { value: EncoderPreference; label: string }[] = [
+	{ value: "auto", label: "自動(推奨)" },
+	{ value: "h264_amf", label: "h264_amf(AMD HW)" },
+	{ value: "h264_mf", label: "h264_mf(Media Foundation)" },
+];
+
+const MAX_CONCURRENT_ENCODES_OPTIONS = [1, 2, 3, 4] as const;
+
 /**
  * アプリ設定ダイアログ。ヘッダの歯車ボタン(App.tsx)から開く。
- * 「外観(テーマ)」と「書き出し(既定の書き出し先・完了後にフォルダを開く・
- * 完了時に通知する)」の 2 セクションを持つ。すべて `useSettings().updateSettings` で即時反映・永続化される
+ * 「外観(テーマ)」「書き出し(既定の書き出し先・完了後にフォルダを開く・
+ * 完了時に通知する)」「エンコード(エンコーダ選択・同時エンコード数)」の
+ * 3 セクションを持つ。すべて `useSettings().updateSettings` で即時反映・永続化される
  * (保存ボタンは無い — 設定変更に「適用」を挟まない方針)。
  */
 export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
@@ -126,6 +139,68 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
 						/>
 						書き出し完了時に通知する
 					</label>
+				</section>
+
+				<section className="flex flex-col gap-3">
+					<h3 className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
+						エンコード
+					</h3>
+
+					<div className="flex flex-col gap-1.5">
+						<span className="text-[11px] text-neutral-400">エンコーダ</span>
+						{/* セグメント風ボタン群(外観のテーマ選択と同じ aria-pressed パターン)。 */}
+						<div className="flex items-center gap-1">
+							{ENCODER_OPTIONS.map((opt) => {
+								const checked = settings.encoder === opt.value;
+								return (
+									<button
+										key={opt.value}
+										type="button"
+										aria-pressed={checked}
+										onClick={() => updateSettings({ encoder: opt.value })}
+										className={cn(
+											"rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+											"focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
+											checked
+												? "bg-accent text-white"
+												: "border border-line bg-elevated text-neutral-300 hover:border-accent",
+										)}
+									>
+										{opt.label}
+									</button>
+								);
+							})}
+						</div>
+					</div>
+
+					<div className="flex flex-col gap-1.5">
+						<span className="text-[11px] text-neutral-400">同時エンコード数</span>
+						<div className="flex items-center gap-1">
+							{MAX_CONCURRENT_ENCODES_OPTIONS.map((n) => {
+								const checked = settings.maxConcurrentEncodes === n;
+								return (
+									<button
+										key={n}
+										type="button"
+										aria-pressed={checked}
+										onClick={() => updateSettings({ maxConcurrentEncodes: n })}
+										className={cn(
+											"rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+											"focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60",
+											checked
+												? "bg-accent text-white"
+												: "border border-line bg-elevated text-neutral-300 hover:border-accent",
+										)}
+									>
+										{n}
+									</button>
+								);
+							})}
+						</div>
+						<span className="text-[11px] text-neutral-400">
+							既定 2。上げてもスループットが頭打ちになる場合があります。
+						</span>
+					</div>
 				</section>
 			</div>
 		</Modal>

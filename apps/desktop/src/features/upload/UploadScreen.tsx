@@ -7,6 +7,7 @@ import type { Clip, OutputTarget } from "../../types";
 import { finalSpec, targetById } from "../../types";
 import { cancelJob, pickExportDirectory, sanitizeFileName } from "../../lib/tauri";
 import { generateSchedule } from "../../lib/schedule";
+import { useSettings } from "../../lib/settings";
 import { usePreview } from "../../lib/usePreview";
 import { useReframeQueue } from "../../lib/useReframeQueue";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
@@ -79,6 +80,7 @@ export function UploadScreen({
 	// ExportScreen の書き出しと共通のため `useReframeQueue` に集約している。
 	const bulkExportQueue = useReframeQueue();
 	const confirm = useConfirm();
+	const { settings } = useSettings();
 
 	// 一括予約スケジュールの入力状態。
 	const [startDate, setStartDate] = useState("");
@@ -589,7 +591,13 @@ export function UploadScreen({
 						`${sanitizeFileName(t.clip.name)}_${t.target.id}_${t.output.fit}`;
 					try {
 						const outputPath = await join(dir, `${base}.mp4`);
-						await bulkExportQueue.run(t.output.id, source.inputPath, outputPath, t.spec);
+						await bulkExportQueue.run(
+							t.output.id,
+							source.inputPath,
+							outputPath,
+							t.spec,
+							settings.encoder,
+						);
 						return true;
 					} catch {
 						// 個別の失敗は bulkExportQueue.tasks の error に反映済み。スキップして続行。

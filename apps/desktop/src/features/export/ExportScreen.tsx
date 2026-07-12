@@ -177,14 +177,23 @@ export function ExportScreen({
 				try {
 					const base = uniqueNames.get(clip) ?? sanitizeFileName(clip.name);
 					const outputPath = await join(dir, `${base}.mp4`);
-					await queue.run(clip.id, input, outputPath, spec);
+					await queue.run(clip.id, input, outputPath, spec, settings.encoder);
 				} catch (err) {
 					// join() 失敗、または queue.run() の起動/実行失敗(状態には反映済み)。
 					queue.fail(clip.id, err);
 				}
 			})();
 		}
-	}, [started, source, clips, queue.tasksRef, queue.reserve, queue.run, queue.fail]);
+	}, [
+		started,
+		source,
+		clips,
+		queue.tasksRef,
+		queue.reserve,
+		queue.run,
+		queue.fail,
+		settings.encoder,
+	]);
 
 	const donePaths = useMemo(() => {
 		const paths: string[] = [];

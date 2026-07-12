@@ -42,6 +42,7 @@ pub fn run() {
 			commands::probe::probe,
 			commands::reframe::reframe_start,
 			commands::reframe::reframe_cancel,
+			commands::reframe::set_max_concurrent_encodes,
 			commands::preview::preview_start,
 		])
 		.run(tauri::generate_context!())
