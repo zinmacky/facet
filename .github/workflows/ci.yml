@@ -216,3 +216,50 @@ jobs:
 
       - name: cargo check --workspace
         run: cargo check --workspace
+
+  # macOS ランナーでのビルド回帰チェック専用ジョブ(docs/mac-handover.md §4-1)。
+  # Mac が開発の主系になったため、Homebrew FFmpeg + pkg-config 経由のリンクで
+  # media-core(および src-tauri)が Mac 上でも build/test できることを CI で守る。
+  # HW エンコード(videotoolbox)の実機検証(docs/mac-handover.md §4-2)は CI VM では
+  # できないため対象外 — ここでは cfg(target_os = "macos") 経路も含めた
+  # ビルド・リンク・非 ignored テストの回帰のみを見る。
+  # TS 側(pnpm test 等)は OS 非依存(§2 の検証状態マトリクス参照)なので ubuntu の
+  # check job と重複させず省く。fmt/clippy/deny/audit も Rust レベルのチェックで
+  # OS 非依存なため ubuntu の rust job に委ね、ここでは重複させない。
+  rust-macos-check:
+    name: rust (macos cargo test)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop -> target
+
+      # Mac では FFMPEG_DIR は不要 — Homebrew の ffmpeg は pkg-config 経由で自動的に
+      # リンクされる(docs/mac-handover.md §3)。
+      - name: Install FFmpeg (Homebrew)
+        run: brew install ffmpeg
+
+      # ffmpeg-next 8.1 は FFmpeg 8.x のヘッダを要求する。macos-latest ランナーの
+      # Homebrew ffmpeg フォーミュラが常に 8.x を配っているとは限らないため明示的に
+      # 検証する(フォーミュラが古い/新しい場合はここで早期に気づける)。
+      - name: Verify FFmpeg version
+        run: |
+          set -eu
+          ffmpeg -version
+          major="$(ffmpeg -version | head -n1 | sed -nE 's/^ffmpeg version ([0-9]+)\..*/\1/p')"
+          if [ "$major" != "8" ]; then
+            echo "::error::Homebrew ffmpeg is ${major:-unknown}.x, but ffmpeg-next 8.1 requires FFmpeg 8.x headers. Pin/update the Homebrew formula (or this check) accordingly."
+            exit 1
+          fi
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
