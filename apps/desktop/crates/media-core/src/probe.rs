@@ -1,6 +1,6 @@
 //! ffprobe 相当のメディア情報取得。
 //!
-//! 移植元(真実の源): `packages/ffmpeg-runner/src/probe.ts`。TS 版は `ffprobe` を
+//! 移植元(真実の源、削除済み): `packages/ffmpeg-runner/src/probe.ts`。TS 版は `ffprobe` を
 //! spawn し JSON 出力をパースするが、こちらは libav (`format::input`) から直接
 //! メタデータを読む。返す構造体([`MediaInfo`])のフィールド名は TS 版
 //! `ProbeResult`(camelCase)に合わせてあり、将来 Tauri コマンドから
@@ -143,7 +143,7 @@ fn ratio_to_string(num: i32, den: i32) -> String {
 }
 
 /// "30000/1001" や "30/1" 形式の分数文字列を fps に評価する。0 除算・不正時は 0。
-/// TS 版 `parseFrameRate`(`packages/ffmpeg-runner/src/probe.ts`)と同値。
+/// TS 版 `parseFrameRate`(`packages/ffmpeg-runner/src/probe.ts`、削除済み)と同値。
 fn parse_frame_rate(value: Option<&str>) -> f64 {
 	let Some(value) = value else {
 		return 0.0;

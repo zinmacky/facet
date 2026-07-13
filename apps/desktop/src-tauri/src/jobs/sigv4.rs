@@ -1,7 +1,7 @@
 //! R2(Cloudflare, S3 互換)への署名付き PUT URL 生成。`rusty-s3` に委ねる
 //! (クレート選定理由は `crate::jobs` モジュール冒頭コメント参照)。
 //!
-//! 旧 TS 実装(`apps/studio/server/src/services/scheduler-client.ts`)は
+//! 旧 TS 実装(削除済み、`apps/studio/server/src/services/scheduler-client.ts`)は
 //! `aws4fetch` の `AwsClient` で Authorization ヘッダ方式の署名付き PUT を都度計算していた
 //! (`service: "s3", region: "auto"`)。Rust 版は **presigned URL 方式**(署名をクエリ
 //! パラメータに載せる)に変更した — 呼び出し側(`jobs::r2_upload`)が reqwest で素の

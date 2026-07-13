@@ -2,18 +2,6 @@
 	"version": "0.0.1",
 	"configurations": [
 		{
-			"name": "studio-server",
-			"runtimeExecutable": "pnpm",
-			"runtimeArgs": ["--filter", "@facet/studio-server", "dev"],
-			"port": 5178
-		},
-		{
-			"name": "studio-web",
-			"runtimeExecutable": "pnpm",
-			"runtimeArgs": ["--filter", "@facet/studio-web", "dev"],
-			"port": 5179
-		},
-		{
 			"name": "desktop-mock",
 			"runtimeExecutable": "pnpm",
 			"runtimeArgs": [

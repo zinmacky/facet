@@ -2,7 +2,8 @@
 //!
 //! macOS の VideoToolbox は同時に開けるハードウェアエンコードセッション数が
 //! 非常に少なく、多数の書き出しを同時起動すると "Error while opening encoder"
-//! (err=-12903) で失敗する。`apps/studio/server/src/services/encode.ts` はこれを
+//! (err=-12903) で失敗する。旧 studio 実装(削除済み)の
+//! `apps/studio/server/src/services/encode.ts` はこれを
 //! 「同時実行数を `MAX_CONCURRENT`(既定 2、env で変更可)に制限するセマフォ」で
 //! 防いでいる。
 //!
@@ -22,9 +23,9 @@
 //! - `std::sync::{Mutex, Condvar}` ベースのカウンティングセマフォ。media-core は
 //!   同期クレートであり、tokio は導入しない。
 //! - 上限は既定 [`DEFAULT_MAX_CONCURRENT_ENCODES`](= 2)。環境変数
-//!   [`MAX_CONCURRENT_ENCODES_ENV`] で上書きできる。この env 名は
-//!   `apps/studio/server/src/services/encode.ts` の `MAX_CONCURRENT_ENCODES` と
-//!   意図的に揃えている(`FACET_` プレフィックスなし)。
+//!   [`MAX_CONCURRENT_ENCODES_ENV`] で上書きできる。この env 名は旧 studio 実装
+//!   (削除済み)の `apps/studio/server/src/services/encode.ts` の
+//!   `MAX_CONCURRENT_ENCODES` と意図的に揃えている(`FACET_` プレフィックスなし)。
 //! - [`EncodeSlots::global`] でプロセス全体共有のインスタンスを取得できる
 //!   (`OnceLock`)。Tauri コマンドが複数ジョブを並行起動する場合、ジョブ間で
 //!   同じ上限を共有するために使う想定。
