@@ -20,7 +20,7 @@
 .PARAMETER OutDir
     DLL のステージング先(既定: apps/desktop/src-tauri/ffmpeg-dist)。
     Tauri の bundle resources がここから exe 隣接へコピーする
-    (tauri.release.conf.json)。
+    (tauri.win-release.conf.json)。
 
 .PARAMETER ExtractRoot
     zip の展開先(既定: リポジトリ直下 .cache/ffmpeg-lgpl、Git 管理外)。
