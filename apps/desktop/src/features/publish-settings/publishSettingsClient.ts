@@ -77,3 +77,52 @@ export function hasR2Credentials(): Promise<boolean> {
 export function deleteR2Credentials(): Promise<void> {
 	return invoke<void>("delete_r2_credentials");
 }
+
+/**
+ * Rust 側 `YoutubeOauthStatus`(serde の internally-tagged enum)と同形。
+ * - `not_configured`: クライアントID/シークレット未設定。
+ * - `configured`: クライアント設定済みだが未接続(トークン未取得)。
+ * - `connected`: 接続済み(トークンキャッシュあり)。
+ */
+export type YoutubeOauthStatus =
+	| { status: "not_configured" }
+	| { status: "configured" }
+	| { status: "connected" };
+
+/**
+ * YouTube の OAuth クライアント(ユーザー自身の Google Cloud アプリの
+ * client_id/client_secret)をキーチェーンへ保存する(既存値は上書き)。
+ */
+export function setYoutubeOauthClient(
+	clientId: string,
+	clientSecret: string,
+): Promise<void> {
+	return invoke<void>("set_youtube_oauth_client", { clientId, clientSecret });
+}
+
+/**
+ * 保存済みの OAuth クライアントを削除する(キャッシュ済みトークンも道連れで削除される、
+ * §src-tauri/src/commands/publish/youtube_oauth.rs)。
+ */
+export function deleteYoutubeOauthClient(): Promise<void> {
+	return invoke<void>("delete_youtube_oauth_client");
+}
+
+/** 現在の YouTube 接続状態を返す(トークン値そのものは返らない)。 */
+export function youtubeOauthStatus(): Promise<YoutubeOauthStatus> {
+	return invoke<YoutubeOauthStatus>("youtube_oauth_status");
+}
+
+/**
+ * 「Google と接続」の本体。ブラウザで OAuth 同意フローを行い、成功すればトークンが
+ * キーチェーンへ保存される(値は renderer へ一切渡らない)。ユーザーがブラウザを
+ * 放置した場合は Rust 側のタイムアウト(5分)で reject される。
+ */
+export function youtubeOauthConnect(): Promise<void> {
+	return invoke<void>("youtube_oauth_connect");
+}
+
+/** 接続を切断する(トークンキャッシュのみ削除。クライアント設定は保持)。 */
+export function youtubeOauthDisconnect(): Promise<void> {
+	return invoke<void>("youtube_oauth_disconnect");
+}

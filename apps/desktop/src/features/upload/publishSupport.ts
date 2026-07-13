@@ -27,11 +27,11 @@ export interface PubStatus {
  *   scheduler 疎通 OK かつ R2 資格情報保存済み)も満たす必要がある
  *   (`isPlatformPublishSupported` はコード対応状況のみを表し、ゲートは呼び出し側で
  *   別途組み合わせる、`usePublishExtras.ts` 参照)。
- * - YouTube: 今回のスコープ外(Phase 3 の別作業として今後 OAuth + アップロードを実装する)。
- *   ボタン群は studio 版と UI 構造を保つため残しつつ disabled のままにする。
+ * - YouTube: OAuth(Installed App フロー)+ resumable upload + publishAt を Rust で
+ *   実装済み(§6.5)。実行時ゲートは `PublishGateContext.ytReady`(Google 接続済み)。
  */
 export const INSTAGRAM_PUBLISH_SUPPORTED = true;
-export const YOUTUBE_PUBLISH_SUPPORTED = false;
+export const YOUTUBE_PUBLISH_SUPPORTED = true;
 
 /** `target.platform` のコード対応状況(実行時ゲートは含まない)。 */
 export function isPlatformPublishSupported(

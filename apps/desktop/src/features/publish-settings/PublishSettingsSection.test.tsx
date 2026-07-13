@@ -161,3 +161,119 @@ describe("PublishSettingsSection: 疎通チェック", () => {
 		);
 	});
 });
+
+/** OAuth クライアント(client_id/secret)を入力して保存する。 */
+async function saveYoutubeClient(user: ReturnType<typeof userEvent.setup>) {
+	await user.type(screen.getByLabelText("YouTubeクライアントID"), "client-id");
+	await user.type(
+		screen.getByLabelText("YouTubeクライアントシークレット"),
+		"client-secret",
+	);
+	await user.click(
+		screen.getByRole("button", { name: "YouTubeクライアントを保存" }),
+	);
+	await waitFor(() => expect(screen.getByText("未接続")).toBeInTheDocument());
+}
+
+describe("PublishSettingsSection: YouTube(Google OAuth)", () => {
+	it("初期状態は未設定(クライアント入力欄が表示される)", () => {
+		render(<PublishSettingsSection />);
+		expect(screen.getByLabelText("YouTubeクライアントID")).toBeInTheDocument();
+		expect(
+			screen.getByLabelText("YouTubeクライアントシークレット"),
+		).toBeInTheDocument();
+	});
+
+	it("クライアントを保存すると set_youtube_oauth_client が呼ばれ、値を再表示せず「未接続」+接続ボタン表示になる", async () => {
+		const user = userEvent.setup();
+		render(<PublishSettingsSection />);
+
+		await saveYoutubeClient(user);
+
+		expect(mockInvoke).toHaveBeenCalledWith("set_youtube_oauth_client", {
+			clientId: "client-id",
+			clientSecret: "client-secret",
+		});
+		// 値そのものは画面上どこにも再表示されない。
+		expect(screen.queryByDisplayValue("client-secret")).not.toBeInTheDocument();
+		expect(
+			screen.queryByLabelText("YouTubeクライアントID"),
+		).not.toBeInTheDocument();
+		expect(
+			screen.getByRole("button", { name: "Google と接続" }),
+		).toBeInTheDocument();
+	});
+
+	it("「Google と接続」で youtube_oauth_connect が呼ばれ、成功すると「接続済み」+切断ボタンになる", async () => {
+		const user = userEvent.setup();
+		render(<PublishSettingsSection />);
+
+		await saveYoutubeClient(user);
+		await user.click(screen.getByRole("button", { name: "Google と接続" }));
+
+		await waitFor(() =>
+			expect(screen.getByText("接続済み")).toBeInTheDocument(),
+		);
+		expect(mockInvoke).toHaveBeenCalledWith("youtube_oauth_connect");
+		expect(screen.getByRole("button", { name: "切断" })).toBeInTheDocument();
+		// ゲート表示も有効になる。
+		expect(screen.getByText("有効", { selector: "span" })).toBeInTheDocument();
+	});
+
+	it("「切断」で youtube_oauth_disconnect が呼ばれ、「未接続」に戻る(クライアントは保持)", async () => {
+		const user = userEvent.setup();
+		render(<PublishSettingsSection />);
+
+		await saveYoutubeClient(user);
+		await user.click(screen.getByRole("button", { name: "Google と接続" }));
+		await waitFor(() =>
+			expect(screen.getByText("接続済み")).toBeInTheDocument(),
+		);
+
+		await user.click(screen.getByRole("button", { name: "切断" }));
+
+		await waitFor(() => expect(screen.getByText("未接続")).toBeInTheDocument());
+		expect(mockInvoke).toHaveBeenCalledWith("youtube_oauth_disconnect");
+		// クライアントは保持されるため入力欄には戻らない。
+		expect(
+			screen.queryByLabelText("YouTubeクライアントID"),
+		).not.toBeInTheDocument();
+	});
+
+	it("「クライアント削除」で delete_youtube_oauth_client が呼ばれ、入力欄に戻る", async () => {
+		const user = userEvent.setup();
+		render(<PublishSettingsSection />);
+
+		await saveYoutubeClient(user);
+		await user.click(screen.getByRole("button", { name: "クライアント削除" }));
+
+		await waitFor(() =>
+			expect(screen.getByLabelText("YouTubeクライアントID")).toBeInTheDocument(),
+		);
+		expect(mockInvoke).toHaveBeenCalledWith("delete_youtube_oauth_client");
+	});
+
+	it("接続に失敗するとエラーメッセージを表示する", async () => {
+		const user = userEvent.setup();
+		render(<PublishSettingsSection />);
+
+		await saveYoutubeClient(user);
+		const defaultImpl = mockInvoke.getMockImplementation();
+		mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+			if (cmd === "youtube_oauth_connect") {
+				throw new Error("認可がタイムアウトしました(5分)。もう一度お試しください。");
+			}
+			return defaultImpl?.(cmd, args);
+		});
+
+		await user.click(screen.getByRole("button", { name: "Google と接続" }));
+
+		await waitFor(() =>
+			expect(
+				screen.getByText(/認可がタイムアウトしました/),
+			).toBeInTheDocument(),
+		);
+		// 失敗後も「未接続」のまま。
+		expect(screen.getByText("未接続")).toBeInTheDocument();
+	});
+});

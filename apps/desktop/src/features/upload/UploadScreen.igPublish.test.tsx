@@ -93,9 +93,9 @@ describe("UploadScreen: IG 投稿のゲート活性化", () => {
 
 		const publishButton = await openIgPublishButton(user);
 		expect(publishButton).toBeDisabled();
-		// 案内バナーも表示される。
+		// 案内バナーも表示される(YouTube 未設定バナーも並ぶため IG 側を特定する)。
 		expect(
-			screen.getByText(/への投稿には設定(.*)が必要です/),
+			screen.getByText(/Instagram\s*への投稿には設定(.*)が必要です/),
 		).toBeInTheDocument();
 	});
 

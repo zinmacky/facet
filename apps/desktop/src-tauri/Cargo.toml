@@ -23,6 +23,9 @@ name = "facet_desktop_lib"
 # Phase 3 本体(IG 連携、§6.4): R2 アップロード(rusty-s3 の presigned PUT + reqwest の
 # ストリーミング body)・POST /jobs・r2Key/idempotencyKey 採番(uuid)・エラー型(thiserror)・
 # アップロードの select! ベースのキャンセル(tokio time/fs)を同じ feature 限定で追加する。
+# Phase 3 本体(YouTube 連携、§6.5・§11-4): OAuth(Installed App フロー)+ resumable
+# upload + publishAt 予約を `google-youtube3` + `yup-oauth2` に委ねる(手書きしない、
+# §6.5・commands/publish/youtube_oauth.rs 冒頭コメント)。
 publish = [
 	"dep:keyring",
 	"dep:reqwest",
@@ -33,6 +36,11 @@ publish = [
 	"dep:tokio",
 	"dep:futures-util",
 	"dep:tokio-util",
+	"dep:google-youtube3",
+	"dep:yup-oauth2",
+	"dep:chrono",
+	"dep:mime",
+	"dep:async-trait",
 ]
 
 [build-dependencies]
@@ -91,6 +99,36 @@ futures-util = { version = "0.3", default-features = false, features = [
 tokio-util = { version = "0.7.9", default-features = false, features = [
 	"io",
 ], optional = true }
+# YouTube Data API v3(OAuth + resumable upload + publishAt 予約、§6.5・§11-4)。
+# 手書きの OAuth/resumable アップロードは避け、保守継続中のこのクレートに委ねる方針
+# (docs/desktop-migration-plan.md §6.5 で確定済み)。既定 feature("yup-oauth2" + "ring")
+# は yup-oauth2(OAuth 実装本体)と rustls の ring バックエンドを含み、reqwest 側
+# ("rustls" feature、既定で ring バックエンド)と同じ TLS 実装系統になる
+# (aws-lc-rs 等の別バックエンドを混在させない。§commands/publish/youtube_oauth.rs
+# 冒頭コメントの設計判断)。
+google-youtube3 = { version = "7", optional = true }
+# google-youtube3 は yup-oauth2 を `default-features = false` で引き込むため、
+# `InstalledFlowAuthenticator::builder`(yup-oauth2 側の "hyper-rustls" feature 限定)が
+# 有効にならない。同一クレートを直接依存としても宣言し、Cargo のフィーチャー統合
+# (同一バージョンの依存は要求元をまたいで feature の和集合になる)で "hyper-rustls" を
+# 有効化する。`default-features = false` で "service-account"(本アプリは Installed App
+# フローのみで不要)を含めない。
+yup-oauth2 = { version = "12", default-features = false, features = [
+	"hyper-rustls",
+], optional = true }
+# `VideoStatus::publish_at`/`VideoSnippet::published_at` が `chrono::DateTime<Utc>` を
+# 要求するため必要(google-youtube3 は chrono を再エクスポートしない)。IG 側
+# (jobs/manifest.rs)は依存を増やさないため自前のカレンダー計算を使っているが、
+# ここでは google-youtube3 の公開 API 型そのものが chrono を要求するため回避できない。
+chrono = { version = "0.4", default-features = false, features = [
+	"std",
+], optional = true }
+# `upload_resumable`/`upload` の MIME 型引数用("video/mp4" を静的にパースするだけの
+# ごく薄い用途)。
+mime = { version = "0.3", optional = true }
+# yup-oauth2 の `TokenStorage` トレイト(async fn を含む)を実装するために必要
+# (§commands/publish/youtube_oauth.rs の `KeychainTokenStorage`)。
+async-trait = { version = "0.1", optional = true }
 # `protocol-asset`: renderer が `convertFileSrc`(元動画/プレビュー/書き出し結果の
 # <video src> に使う asset:// プロトコル)で任意パスのローカルファイルを読むために必要。
 # この機能フラグが無いと asset プロトコルのハンドラ自体がビルドに含まれず、
