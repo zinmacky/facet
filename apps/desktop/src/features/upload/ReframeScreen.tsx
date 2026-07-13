@@ -164,6 +164,12 @@ export function ReframeScreen({
 	// そのため post ではなく「過去に一度でも clips に現れた id か」で新規追加を判定する。
 	const knownClipIdsRef = useRef<Set<string>>(new Set());
 
+	// 一度でも Post 初期化(下の追従 effect の「初回」パス)を実行したか。`prev.length
+	// === 0` だけを初回判定に使うと、ユーザーが全 Post を手動削除して空になった状態を
+	// 「初回」と誤認し、無関係な clip 編集(clips 配列の再生成)を契機に削除済み Post が
+	// 丸ごと復活してしまう。初回と全削除を区別するためのフラグ(resetToken でのみ戻す)。
+	const hasInitializedRef = useRef(false);
+
 	// 新しい元動画選択(App からの resetToken 増加)時のみ、全状態を明示的に破棄する
 	// (最重要: 旧実装の「!open で破棄」を削除し、この明示トリガのみへ置き換えた。
 	// 通常の画面往復(戻る/進む)では posts・プレビュー・一括設定は保持される)。
@@ -180,6 +186,8 @@ export function ReframeScreen({
 		bulkExportQueue.reset();
 		// 既知 clip id も合わせてクリアする(新しい元動画の clip はすべて「新規」扱い)。
 		knownClipIdsRef.current = new Set();
+		// 次の clips で初回初期化を再度許可する。
+		hasInitializedRef.current = false;
 	}, [resetToken]);
 
 	// 初期化(posts が空): clips 全件から Post を生成し、先頭を選択する。
@@ -193,16 +201,19 @@ export function ReframeScreen({
 		const currentClipIds = new Set(clips.map((c) => c.id));
 		const newClips = clips.filter((clip) => !knownClipIdsRef.current.has(clip.id));
 		knownClipIdsRef.current = currentClipIds;
-		setPosts((prev) => {
-			if (prev.length === 0) {
-				const created = clips.map((clip) => createPost(clip.id));
-				// 初期化直後は先頭 Post を選択する。
-				setSelectedPostId(created[0]?.id ?? null);
-				return created;
-			}
-			if (newClips.length === 0) return prev;
-			return [...prev, ...newClips.map((clip) => createPost(clip.id))];
-		});
+		// 初回のみ全 clip から Post を生成する。`prev.length === 0` だけで判定すると
+		// ユーザーの全削除後の空状態を初回と誤認し復活させてしまうため、明示フラグで gate
+		// する(判定を setPosts の updater 外で行い、二重呼び出しでも選択 id がずれないようにする)。
+		if (!hasInitializedRef.current) {
+			hasInitializedRef.current = true;
+			const created = clips.map((clip) => createPost(clip.id));
+			setPosts(created);
+			// 初期化直後は先頭 Post を選択する。
+			setSelectedPostId(created[0]?.id ?? null);
+			return;
+		}
+		if (newClips.length === 0) return;
+		setPosts((prev) => [...prev, ...newClips.map((clip) => createPost(clip.id))]);
 	}, [clips]);
 
 	// 孤児 post の無効化: clips から消えた clipId を参照する post を除去する

@@ -320,6 +320,46 @@ describe("UploadScreen: 追加された clip に post が追従する", () => {
 		expect(screen.queryByRole("button", { name: /ClipTwo/ })).not.toBeInTheDocument();
 		expect(screen.getByRole("button", { name: /ClipOne/ })).toBeInTheDocument();
 	});
+
+	it("全 post を手動削除した後、無関係な clip 編集をしても復活しない", async () => {
+		const user = userEvent.setup();
+		const clipA: Clip = {
+			id: "clip-1",
+			name: "ClipOne",
+			trim: { start: 0, end: 5 },
+			aspect: "free",
+		};
+		const clipB: Clip = {
+			id: "clip-b",
+			name: "ClipTwo",
+			trim: { start: 0, end: 5 },
+			aspect: "free",
+		};
+		renderWithProviders(<Harness initialClips={[clipA, clipB]} />);
+
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /ClipTwo/ })).toBeInTheDocument(),
+		);
+
+		// 2 つの post を「削除」で 1 つずつ手動除去し、post を空にする(clip 自体は残る)。
+		for (const name of [/ClipTwo/, /ClipOne/]) {
+			const row = screen.getByRole("button", { name });
+			await user.click(within(row).getByRole("button", { name: "削除" }));
+			const dialog = screen.getByRole("dialog");
+			await user.click(within(dialog).getByRole("button", { name: "削除" }));
+			await waitFor(() =>
+				expect(screen.queryByRole("button", { name })).not.toBeInTheDocument(),
+			);
+		}
+
+		// post が空(prev.length === 0)の状態で、無関係な clip-1 の trim を編集する。
+		await user.click(screen.getByRole("button", { name: "mutate-clip-1-trim" }));
+
+		// 空状態を「初回」と誤認すると全 post が復活してしまう(H-2 回帰)。
+		// hasInitialized フラグで初回と全削除を区別し、いずれも復活させない。
+		expect(screen.queryByRole("button", { name: /ClipOne/ })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: /ClipTwo/ })).not.toBeInTheDocument();
+	});
 });
 
 /**
