@@ -94,7 +94,35 @@ jobs:
       - name: Build workspace dependencies (@facet/contract, @facet/core)
         run: pnpm --filter "@facet/desktop^..." build
 
-      # --- 7. tauri-action(署名付きビルド + GitHub Release draft 作成) ---
+      # --- 7. エディション分離ゲート(tauri build より前。fail で全停止) ---
+      # public(配布版)フロントビルドに投稿系コードが含まれないことを検査する
+      # (edition-split, docs/desktop-migration-plan.md §6.6)。win-release は
+      # tauri.conf.json の既定 beforeBuildCommand(`vite build --mode public`)を
+      # そのまま使う(§tauri.conf.json)ため、ここで独立に同じ `--mode public` で
+      # ビルドした dist/ を検査すれば、直後の tauri-action(手順8)が生成する
+      # 実際のバンドルの中身と同一の内容を事前に確認できる。マーカーには
+      # features/upload/ 配下(PostDetail.tsx / Disclosure.tsx)でのみ使われる
+      # UI 文字列「一括投稿」を使う(JS 識別子は minify で読み替えられるため使わない)。
+      - name: Verify public frontend excludes upload-feature markers
+        run: |
+          $ErrorActionPreference = "Stop"
+          pnpm --filter @facet/desktop exec vite build --mode public --outDir dist-edition-check
+          $assetsDir = "apps/desktop/dist-edition-check/assets"
+          $jsFiles = Get-ChildItem -Path $assetsDir -Filter "*.js" -File -ErrorAction SilentlyContinue
+          # assets/*.js が1つも無い(ビルド構成が変わり生成先がずれた等)場合、直後の
+          # Select-String が単に「一致無し」と区別できず誤って合格扱いになるのを防ぐ。
+          if (-not $jsFiles) {
+            Write-Error "$assetsDir に *.js が見つかりません(vite build の出力構成を確認してください)"
+            exit 1
+          }
+          if (Select-String -Path "$assetsDir/*.js" -Pattern "一括投稿" -SimpleMatch -Quiet) {
+            Write-Error "public ビルドの成果物に投稿系マーカー(「一括投稿」)が含まれています"
+            exit 1
+          }
+          Write-Host "OK: public フロントビルドに投稿系マーカーは含まれていない"
+          Remove-Item -Recurse -Force "apps/desktop/dist-edition-check"
+
+      # --- 8. tauri-action(署名付きビルド + GitHub Release draft 作成) ---
       # tauri.win-release.conf.json をオーバーレイし、LGPL FFmpeg の DLL と
       # LICENSES/COPYING.LGPLv3 を exe 隣接にバンドルする(Wave A/B)。
       # TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) が未設定だとこのステップで失敗する
@@ -124,7 +152,7 @@ jobs:
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
 
-      # --- 8. 成果物検査: NSIS インストーラ(setup.exe)を 7z で展開し、LGPL DLL のみが
+      # --- 9. 成果物検査: NSIS インストーラ(setup.exe)を 7z で展開し、LGPL DLL のみが
       #     同梱されていること(GPL 実行ファイルの混入がないこと)を機械検証する。
       #     これは「配布物そのもの」に対する検査であり、5 のビルド前ゲートとは
       #     独立した二重防御。

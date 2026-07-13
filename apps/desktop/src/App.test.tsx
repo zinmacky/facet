@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
@@ -185,5 +185,29 @@ describe("App: 設定ダイアログ", () => {
 		// 曖昧さを避けて Esc(Modal 共通のクローズ手段)で閉じる。
 		await user.keyboard("{Escape}");
 		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+	});
+});
+
+/**
+ * private 版は updater の更新チェックを実行しない(edition 出し分け。別 identifier で
+ * 共存インストールされ作者が手動リビルドで更新する運用、docs/desktop-migration-plan.md
+ * §6.6)。public 版で実行することは App.public-edition.test.tsx で確認している。
+ */
+describe("App: private エディション(既定)は updater を起動しない", () => {
+	it("マウント後もしばらく待って updater 関連の invoke/エラーログが一切発生しない", async () => {
+		const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+		renderWithProviders(<App />);
+
+		// 「呼ばれない」ことの確認なので一定時間経過を待ってから判定する。
+		await new Promise((resolve) => setTimeout(resolve, 50));
+
+		expect(consoleError).not.toHaveBeenCalledWith(
+			"[updater] check() failed (ignored):",
+			expect.anything(),
+		);
+		expect(
+			mockInvoke.mock.calls.some(([cmd]) => cmd.startsWith("plugin:updater")),
+		).toBe(false);
+		consoleError.mockRestore();
 	});
 });

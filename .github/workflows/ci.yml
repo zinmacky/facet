@@ -47,13 +47,45 @@ jobs:
         if: matrix.task == 'build'
         run: git diff --exit-code -- packages/contract/schema/
 
+      # public(配布版)フロントビルドに投稿系コードが含まれないことを検査する
+      # (edition-split, docs/desktop-migration-plan.md §6.6)。マーカーには
+      # features/upload/ 配下(PostDetail.tsx / Disclosure.tsx)でのみ使われる
+      # UI 文字列「一括投稿」を使う — JS の関数/変数名は minify で読み替えられるため
+      # 識別子は使わず、minify されても保持される文字列リテラルを見る
+      # (単に "アップロード" だけだと StepIndicator の共有ラベル辞書等、edition に
+      # 関わらず常時コンパイルされる無害な文字列にもヒットし false positive になる)。
+      - name: Build public frontend and check for upload-feature markers
+        if: matrix.task == 'build'
+        run: |
+          set -eu
+          # `pnpm --filter exec` はカレントディレクトリを apps/desktop に変えて実行するため、
+          # --outDir は apps/desktop からの相対パスで指定する(リポジトリルート相対で
+          # 書くと apps/desktop/apps/desktop/... に二重にネストしてしまう)。
+          pnpm --filter @facet/desktop exec vite build --mode public --outDir dist-public-check
+          assets_dir="apps/desktop/dist-public-check/assets"
+          # assets/ が無い(ビルド構成が変わり生成先がずれた等)場合、直後の grep が
+          # 単に「一致無し」と区別できず誤って合格扱いになるのを防ぐ。
+          if [ ! -d "$assets_dir" ]; then
+            echo "::error::$assets_dir が生成されていません(vite build の出力構成を確認してください)"
+            exit 1
+          fi
+          if grep -rl "一括投稿" "$assets_dir"; then
+            echo "::error::public ビルドの成果物に投稿系マーカー(「一括投稿」)が含まれています"
+            exit 1
+          fi
+          rm -rf apps/desktop/dist-public-check
+
   # apps/desktop (Tauri v2 + crates/*) の Rust 品質ゲート。
   # 対象は apps/desktop workspace(crates/media-core, crates/contract-rs, src-tauri)。
   # Phase 2 Wave 1 で media-core に ffmpeg-next(ffmpeg-sys-next 経由で bindgen が
-  # libclang を要求)を追加したため、clippy/test タスクは事前に FFmpeg(shared)を
-  # 取得して FFMPEG_DIR を設定する(docs/phase2-0-windows-setup.md §2 参照。GPL shared
-  # ビルドは検証専用。配布ビルドは Phase 4 で LGPL 構成に切り替える、deny.toml 冒頭
-  # コメント参照)。fmt/deny/audit はコンパイルを伴わないため FFmpeg 取得をスキップする。
+  # libclang を要求)を追加したため、clippy/test/check-publish タスクは事前に
+  # FFmpeg(shared)を取得して FFMPEG_DIR を設定する(docs/phase2-0-windows-setup.md
+  # §2 参照。GPL shared ビルドは検証専用。配布ビルドは Phase 4 で LGPL 構成に切り替える、
+  # deny.toml 冒頭コメント参照)。fmt/deny/audit はコンパイルを伴わないため FFmpeg
+  # 取得をスキップする。
+  # check-publish(v2.4 エディション分離): `publish` cargo feature を有効化しても
+  # コンパイルが通ることを見る(private ビルド build:mac-private 相当のコンパイル
+  # 回帰チェック。§src-tauri/Cargo.toml [features]、docs/desktop-migration-plan.md §6.6)。
   rust:
     name: rust (${{ matrix.task }})
     runs-on: ubuntu-latest
@@ -63,7 +95,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        task: [fmt, clippy, test, deny, audit]
+        task: [fmt, clippy, check-publish, test, deny, audit]
     steps:
       - uses: actions/checkout@v7
 
@@ -81,7 +113,7 @@ jobs:
       # BtbN の FFmpeg n8.1 linux64-gpl-shared を取得してキャッシュする(検証専用の
       # GPL shared ビルド。配布は対象外、deny.toml 冒頭コメント参照)。
       - name: Cache FFmpeg (linux64 gpl shared)
-        if: matrix.task == 'clippy' || matrix.task == 'test'
+        if: matrix.task == 'clippy' || matrix.task == 'test' || matrix.task == 'check-publish'
         id: cache-ffmpeg-linux
         uses: actions/cache@v4
         with:
@@ -89,7 +121,7 @@ jobs:
           key: ffmpeg-n8.1-linux64-gpl-shared-8.1
 
       - name: Download FFmpeg (linux64 gpl shared)
-        if: (matrix.task == 'clippy' || matrix.task == 'test') && steps.cache-ffmpeg-linux.outputs.cache-hit != 'true'
+        if: (matrix.task == 'clippy' || matrix.task == 'test' || matrix.task == 'check-publish') && steps.cache-ffmpeg-linux.outputs.cache-hit != 'true'
         run: |
           set -eu
           mkdir -p .ffmpeg-tmp
@@ -105,7 +137,7 @@ jobs:
       # wget / file はランナーに導入済み)。
       # https://v2.tauri.app/start/prerequisites/#linux
       - name: Install libclang (bindgen 用) + Tauri Linux dependencies
-        if: matrix.task == 'clippy' || matrix.task == 'test'
+        if: matrix.task == 'clippy' || matrix.task == 'test' || matrix.task == 'check-publish'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -119,7 +151,7 @@ jobs:
             libssl-dev
 
       - name: Set FFMPEG_DIR / LIBCLANG_PATH / LD_LIBRARY_PATH
-        if: matrix.task == 'clippy' || matrix.task == 'test'
+        if: matrix.task == 'clippy' || matrix.task == 'test' || matrix.task == 'check-publish'
         run: |
           set -eu
           ffmpeg_dir="$(pwd)/.ffmpeg"
@@ -149,6 +181,10 @@ jobs:
       - name: cargo test --workspace
         if: matrix.task == 'test'
         run: cargo test --workspace
+
+      - name: cargo check --workspace --features publish
+        if: matrix.task == 'check-publish'
+        run: cargo check --workspace --features publish
 
       # ライセンス検査: GPL/AGPL 系は allow リストに含めないことで既定 deny になる
       # (apps/desktop/deny.toml 参照)。

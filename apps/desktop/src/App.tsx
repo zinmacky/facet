@@ -13,12 +13,18 @@ import { sourceBaseName } from "./types";
 import { ClipList } from "./features/clips/ClipList";
 import { ClipEditor, type ClipEditorHandle } from "./features/clips/ClipEditor";
 import { ExportScreen } from "./features/export/ExportScreen";
-import { UploadScreen } from "./features/upload/UploadScreen";
-import { WizardShell } from "./features/wizard/WizardShell";
+import { UploadScreen } from "virtual:upload-entry";
+import {
+	WizardShell,
+	WIZARD_STEPS_PRIVATE,
+	WIZARD_STEPS_PUBLIC,
+	type WizardStep,
+} from "./features/wizard/WizardShell";
 import { type ExportSummary, StepIndicator } from "./features/wizard/StepIndicator";
 import { SettingsDialog } from "./features/settings/SettingsDialog";
 import { UpdateNotification } from "./features/update/UpdateNotification";
 import { useEncodeSettingsSync } from "./lib/useEncodeSettingsSync";
+import { EDITION } from "./lib/edition";
 import { Card } from "./components/ui/Card";
 import { Button } from "./components/ui/Button";
 import { IconButton } from "./components/ui/IconButton";
@@ -33,7 +39,10 @@ export interface Source {
 	videoSrc: string;
 }
 
-type Step = "edit" | "export" | "upload";
+type Step = WizardStep;
+
+/** edition に応じたウィザードのステップ構成(§lib/edition.ts)。 */
+const WIZARD_STEPS = EDITION === "private" ? WIZARD_STEPS_PRIVATE : WIZARD_STEPS_PUBLIC;
 
 /** ソースから新しい Clip を作る(連番付き)。 */
 function createClip(source: Source, index: number): Clip {
@@ -204,6 +213,7 @@ export function App() {
 
 				<div className="flex justify-center">
 					<StepIndicator
+						steps={WIZARD_STEPS}
 						step={step}
 						canGoExport={canGoExport}
 						canGoUpload={canGoUpload}
@@ -238,6 +248,7 @@ export function App() {
 			)}
 
 			<WizardShell
+				steps={WIZARD_STEPS}
 				step={step}
 				panels={{
 					edit: (
@@ -310,25 +321,36 @@ export function App() {
 							clips={clips}
 							resetToken={resetToken}
 							onGoToEdit={() => goToStep("edit")}
-							onGoToUpload={() => goToStep("upload")}
+							onGoToUpload={
+								EDITION === "private" ? () => goToStep("upload") : undefined
+							}
 							onProgressSummary={setExportSummary}
 						/>
 					),
-					upload: (
-						<UploadScreen
-							active={step === "upload"}
-							source={source}
-							clips={clips}
-							resetToken={resetToken}
-							onGoToExport={() => goToStep("export")}
-							onBusyChange={setUploadBusy}
-						/>
-					),
+					// public 版は投稿(アップロード)ステップ自体を持たない(WIZARD_STEPS 参照)。
+					// UploadScreen(virtual:upload-entry)は public ビルドではスタブに
+					// 差し替わるため参照自体は無害だが、意図を明示するため edition で分岐する。
+					...(EDITION === "private"
+						? {
+								upload: (
+									<UploadScreen
+										active={step === "upload"}
+										source={source}
+										clips={clips}
+										resetToken={resetToken}
+										onGoToExport={() => goToStep("export")}
+										onBusyChange={setUploadBusy}
+									/>
+								),
+							}
+						: {}),
 				}}
 			/>
 
 			<SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-			<UpdateNotification />
+			{/* private 版は updater を無効化する(別 identifier で共存インストールされ、
+			    作者が手動リビルドで更新する運用。docs/desktop-migration-plan.md §6.6)。 */}
+			{EDITION === "public" && <UpdateNotification />}
 		</div>
 	);
 }

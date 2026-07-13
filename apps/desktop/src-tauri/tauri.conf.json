@@ -4,8 +4,8 @@
 	"version": "0.1.0",
 	"identifier": "com.facet.desktop",
 	"build": {
-		"beforeDevCommand": "pnpm exec vite",
-		"beforeBuildCommand": "pnpm exec vite build",
+		"beforeDevCommand": "pnpm exec vite --mode private",
+		"beforeBuildCommand": "pnpm exec vite build --mode public",
 		"devUrl": "http://localhost:5180",
 		"frontendDist": "../dist"
 	},

@@ -42,7 +42,8 @@ import {
  * 本体(このファイル)は状態管理と画面合成のみを担う。
  */
 
-interface UploadScreenProps {
+/** entry.ts / entry.public.ts(edition による差し替え先)の型を揃えるため export する。 */
+export interface UploadScreenProps {
 	/** true のとき現在表示中の画面(ウィザードのアクティブステップ)。 */
 	active: boolean;
 	/** App.tsx の Source から videoSrc(元動画プレビュー用 URL)を除いたもの。アップロードでは使わない。 */
