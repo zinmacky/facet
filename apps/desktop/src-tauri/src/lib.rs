@@ -72,6 +72,11 @@ pub fn run() {
 	#[cfg(feature = "publish")]
 	let builder = builder.manage(commands::publish::IgJobsState::default());
 
+	// YouTube 公開ジョブの CancelToken を保持する State(IG とは別のジョブ ID 空間、
+	// §commands/publish/youtube.rs 冒頭コメント参照)。
+	#[cfg(feature = "publish")]
+	let builder = builder.manage(commands::publish::YoutubeJobsState::default());
+
 	builder
 		.invoke_handler(tauri::generate_handler![
 			ping,
@@ -99,11 +104,26 @@ pub fn run() {
 			#[cfg(feature = "publish")]
 			commands::publish::delete_r2_credentials,
 			// IG(Instagram)本体: R2 アップロード + POST /jobs(§6.4・§8 Phase 3)。
-			// YouTube 本体のコマンドは今回のスコープ外(Phase 3 の別作業)。
 			#[cfg(feature = "publish")]
 			commands::publish::ig_publish_start,
 			#[cfg(feature = "publish")]
 			commands::publish::ig_publish_cancel,
+			// YouTube OAuth(Installed App フロー、§6.5・§11-4)。
+			#[cfg(feature = "publish")]
+			commands::publish::set_youtube_oauth_client,
+			#[cfg(feature = "publish")]
+			commands::publish::delete_youtube_oauth_client,
+			#[cfg(feature = "publish")]
+			commands::publish::youtube_oauth_status,
+			#[cfg(feature = "publish")]
+			commands::publish::youtube_oauth_connect,
+			#[cfg(feature = "publish")]
+			commands::publish::youtube_oauth_disconnect,
+			// YouTube 本体: resumable upload + publishAt 予約(§6.5・§8 Phase 3)。
+			#[cfg(feature = "publish")]
+			commands::publish::youtube_publish_start,
+			#[cfg(feature = "publish")]
+			commands::publish::youtube_publish_cancel,
 		])
 		.run(tauri::generate_context!())
 		.expect("error while running tauri application");

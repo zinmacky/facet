@@ -23,7 +23,7 @@ interface OutputPublishSectionProps {
  * ステータス)。private エディション専用(§usePublishExtras.ts の
  * `renderOutputSection`)。OutputCard.tsx 本体から抽出した
  * (旧: OutputCard.tsx の同名 Disclosure、§docs/desktop-migration-plan.md の
- * wizard 再構成メモ)。Phase 3 まで投稿自体が無効なため、既定で折りたたむ。
+ * wizard 再構成メモ)。リフレーム画面の主目的(書き出し)を妨げないよう、既定で折りたたむ。
  */
 export function OutputPublishSection(props: OutputPublishSectionProps) {
 	const { output, platform, status, busy } = props;
@@ -81,7 +81,7 @@ export function OutputPublishSection(props: OutputPublishSectionProps) {
 							? undefined
 							: platform === "instagram"
 								? "設定(scheduler + R2)が必要です"
-								: "デスクトップ版では未対応(今後のアップデートで対応予定)"
+								: "設定(Google との接続)が必要です"
 					}
 				>
 					投稿

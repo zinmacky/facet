@@ -7,9 +7,10 @@
 //! - [`r2_credentials`]: R2(S3 互換)資格情報のキーチェーン連携(§6.4)。
 //! - [`ig`]: IG(Instagram)本体のコマンド(`ig_publish_start`/`ig_publish_cancel`。
 //!   R2 アップロード + POST /jobs、§6.4・§8 Phase 3)。
-//!
-//! YouTube(OAuth + アップロード)本体のコマンドは Phase 3 の別作業として今後ここに
-//! 追加する(今回は IG のみ実装、§実装指示のスコープ)。
+//! - [`youtube_oauth`]: YouTube OAuth(Installed App フロー)+ トークンのキーチェーン連携
+//!   (§6.5・§11-4)。
+//! - [`youtube`]: YouTube 本体のコマンド(`youtube_publish_start`/`youtube_publish_cancel`。
+//!   resumable upload + publishAt 予約、§6.5・§8 Phase 3)。
 //!
 //! トークン・資格情報そのものを返す invoke コマンドは存在しない(get 系は「保存済みか」の
 //! boolean のみを返す。§実装方針)。set は値を受け取るが、ログ・エラーメッセージに
@@ -19,12 +20,16 @@ mod credential_store;
 mod ig;
 mod r2_credentials;
 mod scheduler_check;
+mod youtube;
+mod youtube_oauth;
 
 use credential_store::{CredentialStore, KeyringStore};
 use scheduler_check::perform_check;
 
 pub use ig::IgJobsState;
 pub use scheduler_check::ConnectionCheckResult;
+pub use youtube::YoutubeJobsState;
+pub use youtube_oauth::YoutubeOauthStatus;
 
 /// キーチェーンのサービス名前空間。private エディション専用の識別子を使い、他アプリ
 /// (や将来の public エディション)の資格情報と衝突しないようにする(§11-3)。
@@ -36,10 +41,17 @@ const KEY_SCHEDULER_API_TOKEN: &str = "scheduler_api_token";
 /// R2(S3 互換)資格情報一式(JSON)のキーチェーン内 username(§r2_credentials.rs)。
 const KEY_R2_CREDENTIALS: &str = "r2_credentials";
 
-// YouTube OAuth 実装(Phase 3 の別作業)で使う予定のキー名。今はまだ未使用のため
-// 定数だけ予約し、実際の set/get コマンドは追加しない。
-#[allow(dead_code)]
-const KEY_YOUTUBE_OAUTH_REFRESH_TOKEN: &str = "youtube_oauth_refresh_token";
+/// YouTube OAuth クライアント(client_id/client_secret, JSON)のキーチェーン内 username
+/// (§youtube_oauth.rs)。
+const KEY_YOUTUBE_OAUTH_CLIENT: &str = "youtube_oauth_client";
+
+/// YouTube OAuth トークンキャッシュ(`yup_oauth2::storage::TokenInfo` の JSON。
+/// access_token/refresh_token/expires_at を含む)のキーチェーン内 username。
+/// PR #85 で予約されたキー名(`youtube_oauth_refresh_token`)をそのまま再利用する
+/// (当初は「refresh_token 文字列のみ」を想定した名前だったが、yup-oauth2 の
+/// `TokenStorage` に委ねる設計上、実際は `TokenInfo` 一式を保存する。
+/// §youtube_oauth.rs 冒頭コメントの設計判断)。
+const KEY_YOUTUBE_OAUTH_TOKEN: &str = "youtube_oauth_refresh_token";
 
 // ---- コマンドロジック本体(CredentialStore 抽象越し。テストは MemoryStore で行う) ----
 
@@ -156,6 +168,79 @@ pub fn ig_publish_cancel(
 	jobs: tauri::State<'_, IgJobsState>,
 ) -> Result<(), String> {
 	ig::cancel_impl(job_id, jobs)
+}
+
+/// YouTube の OAuth クライアント(ユーザー自身の Google Cloud アプリの
+/// client_id/client_secret)をキーチェーンへ保存する(既存値は上書き)。
+/// 値そのものはログ・エラーメッセージに含めない。
+#[tauri::command]
+pub fn set_youtube_oauth_client(client_id: String, client_secret: String) -> Result<(), String> {
+	youtube_oauth::set_client_impl(&KeyringStore, &client_id, &client_secret)
+}
+
+/// 保存済みの OAuth クライアントを削除する(キャッシュ済みトークンも道連れで削除する、
+/// §youtube_oauth.rs `delete_client_impl` 冒頭コメント)。
+#[tauri::command]
+pub fn delete_youtube_oauth_client() -> Result<(), String> {
+	youtube_oauth::delete_client_impl(&KeyringStore)
+}
+
+/// 現在の YouTube 接続状態(未設定/設定済み未接続/接続済み)を返す。
+#[tauri::command]
+pub fn youtube_oauth_status() -> Result<YoutubeOauthStatus, String> {
+	youtube_oauth::status_impl(&KeyringStore)
+}
+
+/// 「Google と接続」ボタンの本体。ブラウザで OAuth 同意フローを行い、成功すれば
+/// トークンをキーチェーンへ保存する(§youtube_oauth.rs `connect_impl`)。
+#[tauri::command]
+pub async fn youtube_oauth_connect() -> Result<(), String> {
+	youtube_oauth::connect_impl(&KeyringStore).await
+}
+
+/// 接続を切断する(トークンキャッシュのみ削除。OAuth クライアントの設定は保持する)。
+#[tauri::command]
+pub fn youtube_oauth_disconnect() -> Result<(), String> {
+	youtube_oauth::disconnect_impl(&KeyringStore)
+}
+
+/// YouTube への動画アップロード + `publishAt` 予約公開を開始する(ロジック本体は
+/// `youtube::start_impl`、§youtube.rs `start_impl` 冒頭コメント参照)。
+/// 引数の多さは invoke 境界(renderer からの引数列)をそのまま写しているため許容する
+/// (`ig_publish_start` と同じ constraint。まとめ用の struct を挟むと tauri の
+/// camelCase 変換と二重になるため採らない)。
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn youtube_publish_start(
+	app: tauri::AppHandle,
+	jobs: tauri::State<'_, YoutubeJobsState>,
+	job_id: youtube::JobId,
+	input_path: String,
+	title: String,
+	description: String,
+	publish_at: Option<i64>,
+	privacy_status: Option<String>,
+) -> Result<(), String> {
+	youtube::start_impl(
+		app,
+		jobs,
+		job_id,
+		input_path,
+		title,
+		description,
+		publish_at,
+		privacy_status,
+	)
+	.await
+}
+
+/// YouTube 公開ジョブをキャンセルする(ロジック本体は `youtube::cancel_impl`)。
+#[tauri::command]
+pub fn youtube_publish_cancel(
+	job_id: youtube::JobId,
+	jobs: tauri::State<'_, YoutubeJobsState>,
+) -> Result<(), String> {
+	youtube::cancel_impl(job_id, jobs)
 }
 
 #[cfg(test)]

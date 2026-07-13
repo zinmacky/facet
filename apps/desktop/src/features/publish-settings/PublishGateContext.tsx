@@ -6,12 +6,16 @@ import {
 	useState,
 	type ReactNode,
 } from "react";
-import { hasR2Credentials } from "./publishSettingsClient";
+import {
+	hasR2Credentials,
+	youtubeOauthStatus,
+	type YoutubeOauthStatus,
+} from "./publishSettingsClient";
 import { usePublishGate, type PublishGateState } from "./usePublishGate";
 
 /**
  * `usePublishGate`(scheduler URL + API トークンの疎通ゲート)+ R2 資格情報の
- * 保存状態を1つのインスタンスに集約して共有する Context。
+ * 保存状態 + YouTube OAuth の接続状態を1つのインスタンスに集約して共有する Context。
  *
  * **前 PR(#85)からの申し送り事項の解消**: 以前は `PublishSettingsSection` と
  * `UploadScreen` がそれぞれ独立に `usePublishGate()` を呼んでおり、両方が
@@ -22,6 +26,8 @@ import { usePublishGate, type PublishGateState } from "./usePublishGate";
  *
  * R2 資格情報の状態もここに集約する(IG 投稿の実行時ゲートは
  * 「scheduler 疎通 OK **かつ** R2 資格情報が保存済み」の両方が必要なため、§igReady)。
+ * YouTube の実行時ゲート(§6.6: 設定 = OAuth 資格情報の有無)は「Google 接続済み
+ * (トークンキャッシュあり)」で判定する(§ytReady)。
  */
 export interface PublishGateContextValue extends PublishGateState {
 	/** R2 資格情報がキーチェーンに保存済みか。 */
@@ -35,6 +41,15 @@ export interface PublishGateContextValue extends PublishGateState {
 	 * 投稿ボタンの活性化条件に使う)。
 	 */
 	igReady: boolean;
+	/** YouTube OAuth の接続状態(未確認の間は "not_configured" 扱い)。 */
+	youtubeStatus: YoutubeOauthStatus["status"];
+	/** YouTube の接続状態を再チェックする(設定画面で接続/切断した直後に呼ぶ)。 */
+	recheckYoutube: () => Promise<void>;
+	/**
+	 * YouTube 投稿の実行時ゲート。「Google 接続済み(トークンキャッシュあり)」のときのみ
+	 * true(トークンの実効性はアップロード時に 401 として顕在化する、§youtube.rs)。
+	 */
+	ytReady: boolean;
 }
 
 const PublishGateContext = createContext<PublishGateContextValue | null>(null);
@@ -42,6 +57,8 @@ const PublishGateContext = createContext<PublishGateContextValue | null>(null);
 export function PublishGateProvider({ children }: { children: ReactNode }) {
 	const gate = usePublishGate();
 	const [hasR2, setHasR2] = useState(false);
+	const [ytStatus, setYtStatus] =
+		useState<YoutubeOauthStatus["status"]>("not_configured");
 
 	const recheckR2Credentials = useCallback(async () => {
 		try {
@@ -52,15 +69,28 @@ export function PublishGateProvider({ children }: { children: ReactNode }) {
 		}
 	}, []);
 
+	const recheckYoutube = useCallback(async () => {
+		try {
+			setYtStatus((await youtubeOauthStatus()).status);
+		} catch {
+			// invoke 自体が失敗した場合も安全側(未設定扱い)に倒す。
+			setYtStatus("not_configured");
+		}
+	}, []);
+
 	useEffect(() => {
 		void recheckR2Credentials();
-	}, [recheckR2Credentials]);
+		void recheckYoutube();
+	}, [recheckR2Credentials, recheckYoutube]);
 
 	const value: PublishGateContextValue = {
 		...gate,
 		hasR2Credentials: hasR2,
 		recheckR2Credentials,
 		igReady: gate.ready && hasR2,
+		youtubeStatus: ytStatus,
+		recheckYoutube,
+		ytReady: ytStatus === "connected",
 	};
 
 	return (

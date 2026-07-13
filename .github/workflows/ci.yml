@@ -59,6 +59,10 @@ jobs:
       # edition に関わらず常時コンパイルされる無害な文字列にもヒットし false positive になる)。
       # 資格情報設定 UI(features/publish-settings/、§11-3)についても同様に、
       # PublishSettingsSection.tsx でのみ使われる UI 文字列「APIトークン」を見る。
+      # YouTube 連携(§6.5)についても同様に、設定 UI(PublishSettingsSection.tsx の
+      # YouTube セクション)でのみ使われる「クライアントID」と、投稿フロー
+      # (features/upload/youtubePublish.ts のエラーメッセージ)でのみ使われる
+      # 「YouTube の認可が無効」を見る。
       - name: Build public frontend and check for upload-feature markers
         if: matrix.task == 'build'
         run: |
@@ -74,8 +78,8 @@ jobs:
             echo "::error::$assets_dir が生成されていません(vite build の出力構成を確認してください)"
             exit 1
           fi
-          if grep -rlE "一括投稿|APIトークン" "$assets_dir"; then
-            echo "::error::public ビルドの成果物に投稿系マーカー(「一括投稿」/「APIトークン」)が含まれています"
+          if grep -rlE "一括投稿|APIトークン|クライアントID|YouTube の認可が無効" "$assets_dir"; then
+            echo "::error::public ビルドの成果物に投稿系マーカー(「一括投稿」/「APIトークン」/「クライアントID」/「YouTube の認可が無効」)が含まれています"
             exit 1
           fi
           rm -rf apps/desktop/dist-public-check
