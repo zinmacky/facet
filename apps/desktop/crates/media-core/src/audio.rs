@@ -1,7 +1,7 @@
 //! 音声パイプライン: 検出 → デコード → trim 適用 → リサンプル → AAC エンコード → mux。
 //!
 //! 参照: docs/desktop-migration-plan.md §12.1/§12.3(出力仕様: AAC ≤48kHz)、
-//! `packages/ffmpeg-runner/src/runner.ts`(TS 側の真実の源。`-map 0:a?` +
+//! `packages/ffmpeg-runner/src/runner.ts`(TS 側の真実の源、削除済み。`-map 0:a?` +
 //! `-c:a aac -b:a 128k` — 音声があれば必ず AAC へ再エンコードして通す、
 //! 無ければ何もしない)。
 //!
@@ -51,10 +51,11 @@ use crate::error::{is_again_or_eof, MediaError, Result};
 use crate::spec::Trim;
 use crate::trim::{TrimDecision, TrimWindow};
 
-/// AAC エンコーダ名(libav 内蔵のネイティブ実装。`packages/ffmpeg-runner` と同じ `aac`)。
+/// AAC エンコーダ名(libav 内蔵のネイティブ実装。旧 `packages/ffmpeg-runner`(削除済み)
+/// と同じ `aac`)。
 pub const AAC_ENCODER_NAME: &str = "aac";
 
-/// AAC の既定ビットレート。`packages/ffmpeg-runner/src/runner.ts` の
+/// AAC の既定ビットレート。旧 `packages/ffmpeg-runner/src/runner.ts`(削除済み)の
 /// `DEFAULT_AUDIO_BITRATE = "128k"` と同一。
 pub const DEFAULT_AUDIO_BITRATE: usize = 128_000;
 
@@ -83,7 +84,8 @@ pub struct AudioSource {
 }
 
 /// 入力に音声ストリームがあれば開く。無ければ `Ok(None)`
-/// (`packages/ffmpeg-runner` の `-map 0:a?` と同じ「あれば通す・無ければ何もしない」)。
+/// (旧 `packages/ffmpeg-runner`(削除済み)の `-map 0:a?` と同じ
+/// 「あれば通す・無ければ何もしない」)。
 pub fn open_audio_decoder(input: &format::context::Input) -> Result<Option<AudioSource>> {
 	let Some(stream) = input.streams().best(media::Type::Audio) else {
 		return Ok(None);

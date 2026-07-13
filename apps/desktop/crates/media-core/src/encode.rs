@@ -18,7 +18,7 @@ use ffmpeg_next::{codec, encoder, format, Codec, Dictionary, Rational};
 
 use crate::error::{MediaError, Result};
 
-/// 既定ビットレート(8Mbps)。現行 CLI runner(`packages/ffmpeg-runner`)の既定と同一で、
+/// 既定ビットレート(8Mbps)。旧 CLI runner(`packages/ffmpeg-runner`、削除済み)の既定と同一で、
 /// Instagram の映像 VBR 上限(25Mbps, docs/desktop-migration-plan.md §12.3)に十分収まる。
 pub const DEFAULT_BITRATE: usize = 8_000_000;
 

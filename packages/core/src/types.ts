@@ -42,7 +42,8 @@ export interface EditSpec {
 }
 
 /**
- * core の出力。ffmpeg-runner がこれを実コマンドに組み立てる。
+ * core の出力。旧 ffmpeg-runner(削除済み)が実コマンドに組み立てていた型。
+ * 現在は生成元(filtergraph/compose)が削除され未使用だが、型としては残す。
  * 純データなのでスナップショットテストが容易。
  */
 export interface FilterPlan {

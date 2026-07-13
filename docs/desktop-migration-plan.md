@@ -601,6 +601,11 @@ TS 側ツーリング(Biome / turbo)と干渉させない。
 
 ### Phase 5 — 旧 studio 撤去
 
+> **完了(2026-07-13)**: 未移行機能ゼロ・`apps/studio` への逆依存ゼロを確認の上、
+> `apps/studio`(server + web)・`packages/ffmpeg-runner`・`core/filtergraph`・
+> `core/presets` を削除。付随してドキュメント・`pnpm-workspace.yaml`・
+> `.claude/launch.json` を更新済み。
+
 - 目的: desktop が全機能(IG + YouTube + 全ターゲット形状)をカバーしたことを確認し
   旧実装を削除する。
 - 作業: `apps/studio`(server + web)、`packages/ffmpeg-runner`、`core/filtergraph`・

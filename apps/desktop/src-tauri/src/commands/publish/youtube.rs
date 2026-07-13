@@ -1,6 +1,7 @@
 //! `youtube_publish_start` / `youtube_publish_cancel` コマンド: YouTube への動画
 //! アップロード + `publishAt` 予約公開(docs/desktop-migration-plan.md §6.5・§8 Phase 3・
-//! §12.2)。旧 `apps/studio/server/src/services/youtube.ts` の `uploadWithSchedule` を
+//! §12.2)。旧 studio 実装(削除済み)の `apps/studio/server/src/services/youtube.ts` の
+//! `uploadWithSchedule` を
 //! Rust へ移植する(§6.5・§11-4 で確定済みの案 A: `google-youtube3` + `yup-oauth2`)。
 //!
 //! ## 旧 TS 実装との対応

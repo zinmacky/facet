@@ -1,5 +1,6 @@
 //! IG(Instagram)予約公開の Rust 実装(Phase 3 本体、docs/desktop-migration-plan.md
-//! §6.4・§8 Phase 3・§12.1)。旧 `apps/studio/server/src/services/scheduler-client.ts` +
+//! §6.4・§8 Phase 3・§12.1)。旧 studio 実装(削除済み)の
+//! `apps/studio/server/src/services/scheduler-client.ts` +
 //! `apps/studio/server/src/routes/publish.ts` の instagram 経路を Rust へ移植する。
 //!
 //! - [`manifest`]: `packages/contract` の `JobManifest`/`mediaType` に対応する

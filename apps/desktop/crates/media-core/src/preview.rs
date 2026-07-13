@@ -13,7 +13,7 @@
 //! 両者は同一の実装([`render_cached`])を共有し、ビットレートとキャッシュ上限のみが
 //! 異なる。
 //!
-//! 移植元(真実の源): `apps/studio/server/src/routes/preview.ts`。TS 版は
+//! 移植元(真実の源、旧 studio 実装は削除済み): `apps/studio/server/src/routes/preview.ts`。TS 版は
 //! `{ spec, input: resolve(input) }` を JSON 化して sha1 の先頭 16 桁を
 //! キャッシュキーにし、`WORK_DIR/preview-<hash>.mp4` が既に存在すればそのまま返す
 //! (無ければ `bitrate: "2M"` の低ビットレートで `encode()` して書き出す)。

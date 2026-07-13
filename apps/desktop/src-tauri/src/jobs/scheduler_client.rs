@@ -1,4 +1,4 @@
-//! `POST /jobs`(scheduler へのジョブ登録)。旧 TS 実装
+//! `POST /jobs`(scheduler へのジョブ登録)。旧 TS 実装(削除済み)
 //! (`apps/studio/server/src/services/scheduler-client.ts` の後半)+
 //! `packages/contract` の `jobManifest`/`jobCreateResponse` に対応する。
 //!

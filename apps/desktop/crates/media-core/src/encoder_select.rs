@@ -10,8 +10,9 @@
 //! (呼び出し側)の責務であり、本モジュールでは open を一切行わない。
 //! HW エンコーダは `ffmpeg_next::encoder::find_by_name` が成功しても、実際に
 //! open するとドライバ初期化失敗やセッション枯渇(VideoToolbox の -12903 相当)で
-//! 失敗しうる(参考: `apps/studio/server/src/services/encode.ts` の
-//! `isEncoderOpenError` 検知)。そのため [`candidates`] は候補を**順序付きリスト**
+//! 失敗しうる(参考: 旧 studio 実装(削除済み)の
+//! `apps/studio/server/src/services/encode.ts` の `isEncoderOpenError` 検知)。
+//! そのため [`candidates`] は候補を**順序付きリスト**
 //! として返し、呼び出し側(pipeline.rs / 統合担当)が先頭から
 //! `encode::open_encoder` を試し、`MediaError::EncoderOpen` /
 //! `MediaError::EncoderNotFound` を捕捉して次候補へ進むループを組む想定である。

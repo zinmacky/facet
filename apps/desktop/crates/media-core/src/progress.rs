@@ -1,8 +1,8 @@
 //! パイプラインの進捗集計とスロットリング通知。
 //!
 //! `Progress` はもともと `pipeline.rs` にあったフレーム数ベースの最小構造体
-//! (Wave 1)を本モジュールへ移し、`packages/ffmpeg-runner/src/runner.ts` の
-//! `Progress`(`-progress` パース結果)相当のフィールドへ拡張したもの。
+//! (Wave 1)を本モジュールへ移し、旧 `packages/ffmpeg-runner/src/runner.ts`
+//! (削除済み)の `Progress`(`-progress` パース結果)相当のフィールドへ拡張したもの。
 //! Tauri イベントとして UI(desktop の renderer)へそのまま JSON 化して渡す前提のため
 //! `Serialize` を実装し、フィールド名は runner.ts の JSON 形(camelCase)に合わせている。
 //!

@@ -13,8 +13,7 @@
   単一ファイル: `pnpm --filter @facet/contract exec vitest run src/job-manifest.test.ts`
 - 型チェック: `pnpm -r typecheck`(全体で約6秒)
 - lint: `pnpm lint`(= `biome lint .`)。整形: `pnpm format`(= `biome format --write .`)
-- dev: `pnpm --filter @facet/studio-server dev` / `pnpm --filter @facet/studio-web dev`
-  / `pnpm --filter @facet/scheduler dev`(wrangler)
+- dev: `pnpm --filter @facet/desktop dev` / `pnpm --filter @facet/scheduler dev`(wrangler)
 
 ### Rust(apps/desktop 内で実行)
 
@@ -30,13 +29,10 @@ apps/desktop の Rust を変更した場合は上記 fmt / clippy / テストも
 
 ## 構成
 
-- `packages/contract` — studio と scheduler 間のジョブ契約(job-manifest)。共有の型/スキーマ。
-- `packages/core` — 再フレーミングのコアロジック(filtergraph 生成、プリセット、型)。
-- `packages/ffmpeg-runner` — ffmpeg/ffprobe の実行ラッパ(probe, runner)。
-- `apps/studio/server` — ローカル編集アプリのサーバ(Hono @ localhost)。routes/ + services/。
-- `apps/studio/web` — 編集 UI(React/Vite)。features/ 単位で機能を分割。
+- `packages/contract` — desktop と scheduler 間のジョブ契約(job-manifest)。共有の型/スキーマ。
+- `packages/core` — 再フレーミングの型(`EditSpec`/`CropRect`/`FitMode`/`Trim` 等)。
 - `apps/scheduler` — Cloudflare Workers 上の予約公開スケジューラ(D1 + Durable Object + KV + Cron)。
-- `apps/desktop` — Tauri v2 デスクトップアプリ(studio の後継として移行中、
+- `apps/desktop` — Tauri v2 デスクトップアプリ(現在の主力、
   docs/desktop-migration-plan.md 参照)。React/Vite の `src/` +
   Rust workspace(`crates/media-core`, `crates/contract-rs`, `src-tauri`)。
 
