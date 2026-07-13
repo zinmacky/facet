@@ -1,0 +1,16 @@
+{
+	"$schema": "https://schema.tauri.app/config/2",
+	"productName": "Facet desktop Private",
+	"identifier": "com.facet.desktop.private",
+	"build": {
+		"beforeBuildCommand": "pnpm exec vite build --mode private"
+	},
+	"bundle": {
+		"targets": ["nsis"],
+		"createUpdaterArtifacts": false,
+		"resources": {
+			"ffmpeg-dist/*.dll": "./",
+			"../../../LICENSES/COPYING.LGPLv3": "./COPYING.LGPLv3"
+		}
+	}
+}
