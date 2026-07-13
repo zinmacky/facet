@@ -18,14 +18,28 @@ name = "facet_desktop_lib"
 # 無効 — public(配布版)ビルドはこの feature を有効化せず、投稿系コマンドを
 # バイナリから物理的に除外する。private ビルド(build:mac-private 等)でのみ
 # `--features publish` で有効化する(docs/desktop-migration-plan.md §6.6)。
-# 現時点ではまだ実コマンドが無いため `commands::publish` は空モジュールの
-# ひな形のみ(§src/commands/mod.rs, src/commands/publish.rs)。
-publish = []
+# 資格情報の OS キーチェーン連携(keyring)+ scheduler 疎通チェック(reqwest)を
+# この feature 限定の optional dependency として追加する(§11-3、下記 [dependencies])。
+publish = ["dep:keyring", "dep:reqwest"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# 資格情報の OS キーチェーン連携(macOS Keychain / Windows Credential Manager)。
+# `publish` feature 限定(配布版 = public ビルドの依存には入れない、§11-3)。
+# デフォルト機能(feature "v1")で Keychain Services / Credential Manager / Secret
+# Service の3プラットフォームが揃うため features は既定のままでよい。
+keyring = { version = "4", optional = true }
+# scheduler への疎通チェック(GET /health, Bearer 認証付き GET /)用 HTTP クライアント。
+# `publish` feature 限定。reqwest は tauri-plugin-updater 経由で既に依存木に存在する
+# ため(Cargo.lock 参照)、新規に tauri-plugin-http を導入するより依存を増やさずに済む。
+# TLS は Windows での OpenSSL ネイティブビルド要件を避けるため rustls を明示する
+# (reqwest 0.13 の feature 名は "rustls-tls" ではなく "rustls")。
+reqwest = { version = "0.13", default-features = false, features = [
+	"json",
+	"rustls",
+], optional = true }
 # `protocol-asset`: renderer が `convertFileSrc`(元動画/プレビュー/書き出し結果の
 # <video src> に使う asset:// プロトコル)で任意パスのローカルファイルを読むために必要。
 # この機能フラグが無いと asset プロトコルのハンドラ自体がビルドに含まれず、
@@ -56,3 +70,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # reframe/probe コマンドの実処理(Wave 5: コマンド境界の配線)。
 media-core = { path = "../crates/media-core" }
+
+[dev-dependencies]
+# `commands::publish::scheduler_check` のテスト(`#[tokio::test]`)用の非同期ランタイム。
+# dev-dependency なので `publish` feature の有無に関わらず常に取得されるが、実行時
+# コードには一切含まれない(release バイナリのサイズ・依存に影響しない)。
+tokio = { version = "1", features = ["rt", "macros"] }

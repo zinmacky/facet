@@ -8,6 +8,7 @@ import { pickExportDirectory } from "../../lib/tauri";
 import { Modal } from "../../components/ui/Modal";
 import { Button } from "../../components/ui/Button";
 import { cn } from "../../components/ui/cn";
+import { PublishSettingsSection } from "virtual:publish-settings-entry";
 
 interface SettingsDialogProps {
 	open: boolean;
@@ -207,6 +208,13 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
 						</span>
 					</div>
 				</section>
+
+				{/*
+					公開連携(scheduler URL / API トークン / 疎通チェック)。private エディション
+					限定 — virtual:publish-settings-entry が public では何も描画しないスタブに
+					差し替わる(§lib/edition.ts、docs/desktop-migration-plan.md §11-3)。
+				*/}
+				<PublishSettingsSection />
 			</div>
 		</Modal>
 	);

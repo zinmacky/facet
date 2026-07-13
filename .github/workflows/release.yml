@@ -103,6 +103,8 @@ jobs:
       # 実際のバンドルの中身と同一の内容を事前に確認できる。マーカーには
       # features/upload/ 配下(PostDetail.tsx / Disclosure.tsx)でのみ使われる
       # UI 文字列「一括投稿」を使う(JS 識別子は minify で読み替えられるため使わない)。
+      # 資格情報設定 UI(features/publish-settings/、§11-3)も同様に、
+      # PublishSettingsSection.tsx でのみ使われる UI 文字列「APIトークン」を見る。
       - name: Verify public frontend excludes upload-feature markers
         run: |
           $ErrorActionPreference = "Stop"
@@ -115,8 +117,8 @@ jobs:
             Write-Error "$assetsDir に *.js が見つかりません(vite build の出力構成を確認してください)"
             exit 1
           }
-          if (Select-String -Path "$assetsDir/*.js" -Pattern "一括投稿" -SimpleMatch -Quiet) {
-            Write-Error "public ビルドの成果物に投稿系マーカー(「一括投稿」)が含まれています"
+          if (Select-String -Path "$assetsDir/*.js" -Pattern "一括投稿", "APIトークン" -SimpleMatch -Quiet) {
+            Write-Error "public ビルドの成果物に投稿系マーカー(「一括投稿」/「APIトークン」)が含まれています"
             exit 1
           }
           Write-Host "OK: public フロントビルドに投稿系マーカーは含まれていない"

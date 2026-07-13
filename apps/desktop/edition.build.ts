@@ -38,3 +38,28 @@ export function uploadEntryAlias(
 		"virtual:upload-entry": fileURLToPath(new URL(target, configFileUrl)),
 	};
 }
+
+/**
+ * `virtual:publish-settings-entry` の差し替え先(§src/vite-env.d.ts)。
+ * 設定ダイアログ(SettingsDialog.tsx)に差し込む「公開連携」設定セクション
+ * (scheduler URL / API トークン / 疎通チェック、Phase 3 の土台、§11-3)を
+ * public/private で出し分ける。public は投稿系コードを一切含まないスタブ
+ * (entry.public.ts)、private は実体(entry.ts)を指す。
+ * SettingsDialog.tsx 自体は edition に関わらず常に描画されるため、
+ * `virtual:upload-entry` と同様にエントリ側の alias 差し替えで物理的に除外する
+ * (SettingsDialog.tsx 本体に edition 分岐を持ち込まない)。
+ */
+export function publishSettingsEntryAlias(
+	edition: Edition,
+	configFileUrl: string,
+): Record<string, string> {
+	const target =
+		edition === "public"
+			? "./src/features/publish-settings/entry.public.ts"
+			: "./src/features/publish-settings/entry.ts";
+	return {
+		"virtual:publish-settings-entry": fileURLToPath(
+			new URL(target, configFileUrl),
+		),
+	};
+}

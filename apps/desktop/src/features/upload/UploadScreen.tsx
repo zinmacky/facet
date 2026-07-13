@@ -15,6 +15,7 @@ import { uniqueBaseNames } from "../../lib/uniqueBaseName";
 import { getErrorMessage } from "../../lib/getErrorMessage";
 import { Button } from "../../components/ui/Button";
 import { useConfirm } from "../../components/ui/confirm";
+import { usePublishGate } from "../publish-settings/usePublishGate";
 import { PostDetail } from "./PostDetail";
 import { PostRow } from "./PostRow";
 import { BulkPresetsModal } from "./BulkPresetsModal";
@@ -82,6 +83,13 @@ export function UploadScreen({
 	const bulkExportQueue = useReframeQueue();
 	const confirm = useConfirm();
 	const { settings, updateSettings } = useSettings();
+	// 実行時ゲート(§features/publish-settings/usePublishGate.ts、
+	// docs/desktop-migration-plan.md §6.6・§11-3)。実際の投稿機能(IG/YouTube)は
+	// Phase 3 本体(後続 PR)で実装するため、PUBLISH_SUPPORTED 自体は当面 false のまま
+	// 据え置き、投稿ボタンの disabled 判定はまだこのゲートと組み合わせない
+	// (ゲートが true でも「未対応」表示のままで良い、§実装指示)。ここでは設定状況を
+	// 案内バナーに反映するだけの土台として配線する。
+	const publishGate = usePublishGate();
 
 	// 一括予約スケジュールの入力状態。
 	const [startDate, setStartDate] = useState("");
@@ -698,6 +706,13 @@ export function UploadScreen({
 						<div className="shrink-0 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-300">
 							投稿(YouTube / Instagram)はデスクトップ版では未対応です(Phase 3
 							で対応予定)。書き出し済みファイルは右の「フォルダへ一括書き出し」で取得してください。
+							{publishGate.ready && (
+								<>
+									{" "}
+									公開連携の設定は完了しています(疎通チェック済み) —
+									投稿機能の実装後、自動的に有効になります。
+								</>
+							)}
 						</div>
 					)}
 					<div className="flex min-h-0 flex-1 items-start gap-3">

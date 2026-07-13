@@ -13,8 +13,9 @@
 //! エディション分離(v2.4, docs/desktop-migration-plan.md §6.6): `publish` モジュールは
 //! Phase 3(IG/YouTube 公開連携)の土台。`publish` feature が有効なビルド
 //! (private、build:mac-private 等)でのみコンパイルされ、public(配布版)の
-//! バイナリには含まれない。現時点ではまだ実コマンドは無い(空モジュール、
-//! `publish.rs` 冒頭コメント参照)。
+//! バイナリには含まれない。資格情報設定 + OS キーチェーン + scheduler 疎通チェック
+//! (§11-3)を実装済み。IG/YouTube 本体のコマンドは後続 PR で追加する
+//! (`publish/mod.rs` 冒頭コメント参照)。
 
 pub mod preview;
 pub mod probe;
