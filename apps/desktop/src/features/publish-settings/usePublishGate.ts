@@ -30,10 +30,11 @@ export interface PublishGateState {
  * 実行時ゲート(docs/desktop-migration-plan.md §6.6・§11-3)。
  *
  * 「設定(scheduler URL + API トークン)が保存済みかつ疎通チェック成功」の場合のみ
- * `ready: true` を返す。UploadScreen 側の投稿系 UI(現在は `PUBLISH_SUPPORTED`
- * 定数で一律 disabled)の表示条件に配線する土台 — 実際の IG/YouTube 投稿機能は
- * Phase 3 本体(後続 PR)で実装するため、`PUBLISH_SUPPORTED` 自体は当面 false のまま
- * 据え置く(このフックの値と組み合わせる配線は UploadScreen.tsx 側で行う)。
+ * `ready: true` を返す。直接呼ばず `PublishGateContext`(`usePublishGateContext`)経由で
+ * 使うこと — 以前は `PublishSettingsSection` と `UploadScreen` が独立にこのフックを
+ * 呼んでいたため疎通チェックが二重発火していた(§PublishGateContext.tsx 冒頭コメント)。
+ * IG 投稿の実行時ゲートは、これに加えて R2 資格情報の保存状態も必要
+ * (`PublishGateContext.igReady`)。
  *
  * マウント時に自動で一度チェックする(設定 UI を開いていない間もアプリ起動直後の
  * 状態を把握できるようにする)。

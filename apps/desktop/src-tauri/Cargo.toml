@@ -20,7 +20,20 @@ name = "facet_desktop_lib"
 # `--features publish` で有効化する(docs/desktop-migration-plan.md §6.6)。
 # 資格情報の OS キーチェーン連携(keyring)+ scheduler 疎通チェック(reqwest)を
 # この feature 限定の optional dependency として追加する(§11-3、下記 [dependencies])。
-publish = ["dep:keyring", "dep:reqwest"]
+# Phase 3 本体(IG 連携、§6.4): R2 アップロード(rusty-s3 の presigned PUT + reqwest の
+# ストリーミング body)・POST /jobs・r2Key/idempotencyKey 採番(uuid)・エラー型(thiserror)・
+# アップロードの select! ベースのキャンセル(tokio time/fs)を同じ feature 限定で追加する。
+publish = [
+	"dep:keyring",
+	"dep:reqwest",
+	"dep:rusty-s3",
+	"dep:url",
+	"dep:uuid",
+	"dep:thiserror",
+	"dep:tokio",
+	"dep:futures-util",
+	"dep:tokio-util",
+]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -39,6 +52,44 @@ keyring = { version = "4", optional = true }
 reqwest = { version = "0.13", default-features = false, features = [
 	"json",
 	"rustls",
+	# R2 アップロードを `Body::wrap_stream` でストリーミングする(300MB のファイルを
+	# 丸ごとメモリに読み込まない)ために必要(§jobs/r2_upload.rs)。
+	"stream",
+], optional = true }
+# R2(S3 互換)への署名付き PUT アップロード用。Phase 3(§6.4)は「フル AWS SDK は避け、
+# 署名専用の軽量クレートを使う」方針のため、aws-sigv4(aws-smithy 系一式を伴う)ではなく
+# rusty-s3 を採用した(選定理由は最終報告 / jobs/sigv4.rs 冒頭コメント参照)。
+# Sans-IO(HTTP クライアントを同梱しない)な presigned URL 生成のみのクレートで、
+# 依存は `rustcrypto` feature(hmac + sha2)のみに絞る("full" feature が引き込む
+# XML パーサ/serde/base64/md5 はマルチパート・list-objects 等 today 使わない機能のため不要)。
+rusty-s3 = { version = "0.10", default-features = false, features = [
+	"rustcrypto",
+], optional = true }
+# rusty-s3 の公開 API(`Bucket::new`/署名済み `Url`)が使う型。reqwest も同じ crate を
+# 再エクスポートしているが(`reqwest::Url` == `url::Url`)、`jobs::sigv4` は reqwest に
+# 依存しない層のため明示的に直接依存させる。
+url = { version = "2", optional = true }
+# r2Key(`posts/<date>/<uuid>.mp4`)・idempotencyKey の採番用(旧 TS 実装の
+# `randomUUID()` に対応、§jobs/manifest.rs)。
+uuid = { version = "1", features = ["v4"], optional = true }
+# jobs/ 配下のエラー型(ValidationError 等)の Display 導出用。media-core と同じ
+# クレート(バージョンも合わせる)を使う。
+thiserror = { version = "2", optional = true }
+# R2 アップロードのストリーミング読み取り(`tokio::fs::File`)・キャンセル監視の
+# ポーリング(`tokio::time::sleep`)・`tokio::select!` 用。`rt`/`macros` は
+# dev-dependencies の tokio(下記)と統合されるため実質追加コストはない。
+tokio = { version = "1", features = ["time", "fs", "macros"], optional = true }
+# R2 アップロード進捗イベント用に `ReaderStream` の各チャンクを覗く
+# (`TryStreamExt::inspect_ok`)。reqwest の "stream" feature が既に推移的依存として
+# 引き込むため、直接依存にしても依存木は増えない。
+futures-util = { version = "0.3", default-features = false, features = [
+	"std",
+], optional = true }
+# `ReaderStream`(ファイルをチャンク列へ変換して `reqwest::Body::wrap_stream` に渡す)用。
+# reqwest の "stream" feature が既に同じバージョン・feature("io")で推移的に引き込むため、
+# 直接依存にしても依存木は増えない。
+tokio-util = { version = "0.7.9", default-features = false, features = [
+	"io",
 ], optional = true }
 # `protocol-asset`: renderer が `convertFileSrc`(元動画/プレビュー/書き出し結果の
 # <video src> に使う asset:// プロトコル)で任意パスのローカルファイルを読むために必要。
@@ -72,7 +123,13 @@ serde_json = "1"
 media-core = { path = "../crates/media-core" }
 
 [dev-dependencies]
-# `commands::publish::scheduler_check` のテスト(`#[tokio::test]`)用の非同期ランタイム。
-# dev-dependency なので `publish` feature の有無に関わらず常に取得されるが、実行時
-# コードには一切含まれない(release バイナリのサイズ・依存に影響しない)。
+# `commands::publish::scheduler_check` / `jobs::r2_upload` / `jobs::scheduler_client` の
+# テスト(`#[tokio::test]`)用の非同期ランタイム。dev-dependency なので `publish` feature
+# の有無に関わらず常に取得されるが、実行時コードには一切含まれない
+# (release バイナリのサイズ・依存に影響しない)。
 tokio = { version = "1", features = ["rt", "macros"] }
+# `jobs::sigv4` のテストで AWS 公式の SigV4 テストベクタを固定時刻(2013-05-24)で
+# 再現するために使う(`rusty_s3::S3Action::sign_with_time` の引数型)。本番コードは
+# 現在時刻を使う `sign()` のみを使うため jiff への依存はテストに閉じる。
+# バージョンは rusty-s3 が要求するもの(`0.2`)に合わせる。
+jiff = "0.2"

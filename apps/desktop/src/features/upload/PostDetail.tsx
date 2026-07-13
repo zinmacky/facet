@@ -6,7 +6,6 @@ import { Button } from "../../components/ui/Button";
 import { Disclosure } from "./Disclosure";
 import { OutputCard } from "./OutputCard";
 import {
-	PUBLISH_SUPPORTED,
 	type PubStatus,
 	type UploadOutput,
 	type UploadPost,
@@ -20,6 +19,8 @@ interface PostDetailProps {
 	renders: Map<string, PreviewState>;
 	pubStatuses: Map<string, PubStatus>;
 	busy: boolean;
+	/** `output` への投稿ボタンを有効化してよいか(コード対応 + 実行時ゲート、`UploadScreen.tsx` の `canPublishTarget`)。 */
+	canPublishOutput: (output: UploadOutput) => boolean;
 	onPatchPost: (patch: Partial<UploadPost>) => void;
 	onPatchOutput: (outputId: string, patch: Partial<UploadOutput>) => void;
 	onAddOutput: () => void;
@@ -33,6 +34,8 @@ export function PostDetail(props: PostDetailProps) {
 	const { post, clips, busy } = props;
 	const [scheduleOpen, setScheduleOpen] = useState(false);
 	const postClip = clips.find((c) => c.id === post.clipId);
+	// 「この投稿をすべて投稿」はいずれかの Output が投稿可能なら有効化する。
+	const anyOutputPublishable = post.outputs.some(props.canPublishOutput);
 	// 元画面で決めたクロップ比。出力先アスペクトとの関係を示すために表示する。
 	const clipAspectLabel = postClip
 		? postClip.aspect === "free"
@@ -96,11 +99,11 @@ export function PostDetail(props: PostDetailProps) {
 							variant="primary"
 							size="sm"
 							onClick={props.onPublishPost}
-							disabled={busy || !PUBLISH_SUPPORTED}
+							disabled={busy || !anyOutputPublishable}
 							title={
-								PUBLISH_SUPPORTED
+								anyOutputPublishable
 									? undefined
-									: "デスクトップ版では未対応(Phase 3 で対応予定)"
+									: "投稿可能な出力先がありません"
 							}
 						>
 							この投稿をすべて投稿
@@ -122,6 +125,7 @@ export function PostDetail(props: PostDetailProps) {
 						output={output}
 						clipAspectLabel={clipAspectLabel}
 						canRemove={post.outputs.length > 1}
+						canPublish={props.canPublishOutput(output)}
 						render={props.renders.get(output.id)}
 						status={props.pubStatuses.get(output.id)}
 						busy={busy}

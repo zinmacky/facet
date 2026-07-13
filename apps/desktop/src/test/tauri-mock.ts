@@ -54,6 +54,18 @@ export const mockNewJobId = vi.fn((): string => {
  */
 let mockSchedulerApiToken: string | null = null;
 
+/**
+ * R2(Cloudflare, S3 互換)資格情報のインメモリモック状態(§commands/publish/r2_credentials.rs)。
+ * `mockSchedulerApiToken` と同じ「テストは個別に差し替え可能・既定実装は一貫した
+ * シナリオを提供する」方針。
+ */
+let mockR2Credentials: {
+	accountId: string;
+	accessKeyId: string;
+	secretAccessKey: string;
+	bucket: string;
+} | null = null;
+
 /** invoke コマンドの既定実装。未対応コマンドは reject する(テスト側の見落としに気付けるように)。 */
 async function defaultInvokeImpl(cmd: string, args?: unknown): Promise<unknown> {
 	switch (cmd) {
@@ -83,6 +95,39 @@ async function defaultInvokeImpl(cmd: string, args?: unknown): Promise<unknown> 
 			return mockSchedulerApiToken === null
 				? { status: "no_token" }
 				: { status: "ok" };
+		case "set_r2_credentials": {
+			const { accountId, accessKeyId, secretAccessKey, bucket } = (args ??
+				{}) as {
+				accountId?: string;
+				accessKeyId?: string;
+				secretAccessKey?: string;
+				bucket?: string;
+			};
+			if (!accountId?.trim() || !accessKeyId?.trim() || !secretAccessKey?.trim()) {
+				throw new Error(
+					"R2 のアカウント ID・アクセスキー ID・シークレットアクセスキーは必須です。",
+				);
+			}
+			mockR2Credentials = {
+				accountId,
+				accessKeyId,
+				secretAccessKey,
+				bucket: bucket?.trim() || "facet-media",
+			};
+			return undefined;
+		}
+		case "has_r2_credentials":
+			return mockR2Credentials !== null;
+		case "delete_r2_credentials":
+			mockR2Credentials = null;
+			return undefined;
+		case "ig_publish_start":
+			// jobId は呼び出し側(renderer)が args.jobId として渡す。Rust 側は戻り値を
+			// 返さない(バリデーション/資格情報未設定エラーのみテストが
+			// `mockImplementationOnce` で個別に差し替える)。
+			return undefined;
+		case "ig_publish_cancel":
+			return undefined;
 		default:
 			throw new Error(`invoke not mocked for command: ${cmd}`);
 	}
@@ -163,6 +208,7 @@ export function resetTauriMocks(): void {
 	jobCounter = 0;
 
 	mockSchedulerApiToken = null;
+	mockR2Credentials = null;
 
 	mockListen.mockClear();
 	eventHandlers.clear();

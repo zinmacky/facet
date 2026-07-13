@@ -11,7 +11,6 @@ import { cn } from "../../components/ui/cn";
 import { Disclosure } from "./Disclosure";
 import { StatusBadge } from "./StatusBadge";
 import {
-	PUBLISH_SUPPORTED,
 	type PubStatus,
 	type UploadOutput,
 	type UploadPost,
@@ -29,6 +28,8 @@ interface OutputCardProps {
 	/** 元画面で決めたクロップ比のラベル(由来表示用)。 */
 	clipAspectLabel: string;
 	canRemove: boolean;
+	/** この Output への投稿ボタンを有効化してよいか(`PostDetail.tsx`/`UploadScreen.tsx` の `canPublishTarget`)。 */
+	canPublish: boolean;
 	render: PreviewState | undefined;
 	status: PubStatus | undefined;
 	busy: boolean;
@@ -220,11 +221,13 @@ export function OutputCard(props: OutputCardProps) {
 								variant="primary"
 								size="sm"
 								onClick={props.onPublish}
-								disabled={busy || !PUBLISH_SUPPORTED}
+								disabled={busy || !props.canPublish}
 								title={
-									PUBLISH_SUPPORTED
+									props.canPublish
 										? undefined
-										: "デスクトップ版では未対応(Phase 3 で対応予定)"
+										: platform === "instagram"
+											? "設定(scheduler + R2)が必要です"
+											: "デスクトップ版では未対応(今後のアップデートで対応予定)"
 								}
 							>
 								投稿

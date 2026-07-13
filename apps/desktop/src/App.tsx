@@ -14,13 +14,17 @@ import { ClipList } from "./features/clips/ClipList";
 import { ClipEditor, type ClipEditorHandle } from "./features/clips/ClipEditor";
 import { ExportScreen } from "./features/export/ExportScreen";
 import { UploadScreen } from "virtual:upload-entry";
+import { PublishGateProvider } from "virtual:publish-settings-entry";
 import {
 	WizardShell,
 	WIZARD_STEPS_PRIVATE,
 	WIZARD_STEPS_PUBLIC,
 	type WizardStep,
 } from "./features/wizard/WizardShell";
-import { type ExportSummary, StepIndicator } from "./features/wizard/StepIndicator";
+import {
+	type ExportSummary,
+	StepIndicator,
+} from "./features/wizard/StepIndicator";
 import { SettingsDialog } from "./features/settings/SettingsDialog";
 import { UpdateNotification } from "./features/update/UpdateNotification";
 import { useEncodeSettingsSync } from "./lib/useEncodeSettingsSync";
@@ -42,7 +46,8 @@ export interface Source {
 type Step = WizardStep;
 
 /** edition に応じたウィザードのステップ構成(§lib/edition.ts)。 */
-const WIZARD_STEPS = EDITION === "private" ? WIZARD_STEPS_PRIVATE : WIZARD_STEPS_PUBLIC;
+const WIZARD_STEPS =
+	EDITION === "private" ? WIZARD_STEPS_PRIVATE : WIZARD_STEPS_PUBLIC;
 
 /** ソースから新しい Clip を作る(連番付き)。 */
 function createClip(source: Source, index: number): Clip {
@@ -182,176 +187,188 @@ export function App() {
 	}, [step]);
 
 	return (
-		<div className="flex h-full flex-col bg-panel">
-			{/* トップバー */}
-			<header className="grid h-12 shrink-0 grid-cols-[auto_1fr_auto] items-center gap-3 border-b border-line px-4">
-				<div className="flex items-center gap-3">
-					<div className="flex items-center gap-2">
-						<img src="/facet.svg" alt="" className="h-4 w-4" />
-						<span className="text-sm font-semibold tracking-tight text-neutral-100">
-							Facet <span className="text-neutral-500">desktop</span>
-						</span>
+		// PublishGateProvider: usePublishGate(scheduler 疎通)+ R2 資格情報の状態を
+		// UploadScreen と SettingsDialog(PublishSettingsSection)で共有する
+		// (二重の疎通チェック発火を防ぐ、§PublishGateContext.tsx 冒頭コメント)。
+		// public 版では子要素をそのまま透過するだけの no-op(entry.public.tsx)。
+		<PublishGateProvider>
+			<div className="flex h-full flex-col bg-panel">
+				{/* トップバー */}
+				<header className="grid h-12 shrink-0 grid-cols-[auto_1fr_auto] items-center gap-3 border-b border-line px-4">
+					<div className="flex items-center gap-3">
+						<div className="flex items-center gap-2">
+							<img src="/facet.svg" alt="" className="h-4 w-4" />
+							<span className="text-sm font-semibold tracking-tight text-neutral-100">
+								Facet <span className="text-neutral-500">desktop</span>
+							</span>
+						</div>
+
+						<div className="h-5 w-px bg-line" />
+
+						<Button
+							size="sm"
+							variant="primary"
+							disabled={pickMutation.status === "pending"}
+							onClick={() => pickMutation.mutate()}
+						>
+							{pickMutation.status === "pending"
+								? "読み込み中…"
+								: "元動画を選択"}
+						</Button>
+
+						{source && (
+							<span className="truncate font-mono text-[11px] text-neutral-400">
+								{sourceBaseName(source.inputPath)}
+							</span>
+						)}
 					</div>
 
-					<div className="h-5 w-px bg-line" />
-
-					<Button
-						size="sm"
-						variant="primary"
-						disabled={pickMutation.status === "pending"}
-						onClick={() => pickMutation.mutate()}
-					>
-						{pickMutation.status === "pending" ? "読み込み中…" : "元動画を選択"}
-					</Button>
-
-					{source && (
-						<span className="truncate font-mono text-[11px] text-neutral-400">
-							{sourceBaseName(source.inputPath)}
-						</span>
-					)}
-				</div>
-
-				<div className="flex justify-center">
-					<StepIndicator
-						steps={WIZARD_STEPS}
-						step={step}
-						canGoExport={canGoExport}
-						canGoUpload={canGoUpload}
-						locked={stepLocked}
-						exportSummary={exportSummary}
-						onSelect={goToStep}
-					/>
-				</div>
-
-				<div className="flex items-center justify-end gap-3">
-					{source && (
-						<span className="font-mono text-[11px] text-neutral-500">
-							{source.probe.width}×{source.probe.height} ·{" "}
-							{formatTime(source.probe.duration)}
-							{source.probe.codec ? ` · ${source.probe.codec}` : ""}
-						</span>
-					)}
-					<IconButton
-						aria-label="設定"
-						title="設定"
-						onClick={() => setSettingsOpen(true)}
-					>
-						<SettingsIcon />
-					</IconButton>
-				</div>
-			</header>
-
-			{pickMutation.isError && (
-				<div className="border-b border-danger/30 bg-danger/10 px-4 py-2 text-xs text-danger">
-					読み込み失敗: {getErrorMessage(pickMutation.error)}
-				</div>
-			)}
-
-			<WizardShell
-				steps={WIZARD_STEPS}
-				step={step}
-				panels={{
-					edit: (
-						<div className="grid h-full min-h-0 grid-cols-[1fr_340px]">
-							{/* ステップ遷移時のフォーカス移動先(a11y)。視覚上は非表示。 */}
-							<h2
-								id="wizard-panel-heading-edit"
-								tabIndex={-1}
-								className="sr-only"
-							>
-								編集
-							</h2>
-							<div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto p-3">
-								{!source ? (
-									<Placeholder text="元動画を選択してください。" />
-								) : selectedClip ? (
-									<ClipEditor
-										ref={clipEditorRef}
-										clip={selectedClip}
-										probe={source.probe}
-										videoSrc={source.videoSrc}
-										onChange={changeClip}
-									/>
-								) : (
-									<Placeholder text="右のパネルから切り抜きを追加してください。" />
-								)}
-							</div>
-
-							<aside className="flex min-h-0 flex-col gap-3 border-l border-line p-3">
-								<Card
-									title="Clips"
-									className="min-h-0 flex-1"
-									actions={
-										<IconButton
-											tone="accent"
-											onClick={addClip}
-											disabled={!source}
-											aria-label="切り抜きを追加"
-											title="切り抜きを追加"
-											className="rounded-full"
-										>
-											<PlusIcon />
-										</IconButton>
-									}
-								>
-									<ClipList
-										clips={clips}
-										selectedClipId={selectedClipId}
-										onSelect={setSelectedClipId}
-										onRemove={removeClip}
-										onChange={changeClip}
-									/>
-								</Card>
-
-								<Button
-									variant="primary"
-									disabled={!canGoExport}
-									onClick={() => goToStep("export")}
-									className="w-full shrink-0"
-								>
-									すべて書き出し{clips.length > 0 ? `(${clips.length}本)` : ""}
-								</Button>
-							</aside>
-						</div>
-					),
-					export: (
-						<ExportScreen
-							active={step === "export"}
-							source={source}
-							clips={clips}
-							resetToken={resetToken}
-							onGoToEdit={() => goToStep("edit")}
-							onGoToUpload={
-								EDITION === "private" ? () => goToStep("upload") : undefined
-							}
-							onProgressSummary={setExportSummary}
+					<div className="flex justify-center">
+						<StepIndicator
+							steps={WIZARD_STEPS}
+							step={step}
+							canGoExport={canGoExport}
+							canGoUpload={canGoUpload}
+							locked={stepLocked}
+							exportSummary={exportSummary}
+							onSelect={goToStep}
 						/>
-					),
-					// public 版は投稿(アップロード)ステップ自体を持たない(WIZARD_STEPS 参照)。
-					// UploadScreen(virtual:upload-entry)は public ビルドではスタブに
-					// 差し替わるため参照自体は無害だが、意図を明示するため edition で分岐する。
-					...(EDITION === "private"
-						? {
-								upload: (
-									<UploadScreen
-										active={step === "upload"}
-										source={source}
-										clips={clips}
-										resetToken={resetToken}
-										onGoToExport={() => goToStep("export")}
-										onBusyChange={setUploadBusy}
-									/>
-								),
-							}
-						: {}),
-				}}
-			/>
+					</div>
 
-			<SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-			{/* private 版は updater を無効化する(別 identifier で共存インストールされ、
-			    作者が手動リビルドで更新する運用。docs/desktop-migration-plan.md §6.6)。 */}
-			{EDITION === "public" && <UpdateNotification />}
-		</div>
+					<div className="flex items-center justify-end gap-3">
+						{source && (
+							<span className="font-mono text-[11px] text-neutral-500">
+								{source.probe.width}×{source.probe.height} ·{" "}
+								{formatTime(source.probe.duration)}
+								{source.probe.codec ? ` · ${source.probe.codec}` : ""}
+							</span>
+						)}
+						<IconButton
+							aria-label="設定"
+							title="設定"
+							onClick={() => setSettingsOpen(true)}
+						>
+							<SettingsIcon />
+						</IconButton>
+					</div>
+				</header>
+
+				{pickMutation.isError && (
+					<div className="border-b border-danger/30 bg-danger/10 px-4 py-2 text-xs text-danger">
+						読み込み失敗: {getErrorMessage(pickMutation.error)}
+					</div>
+				)}
+
+				<WizardShell
+					steps={WIZARD_STEPS}
+					step={step}
+					panels={{
+						edit: (
+							<div className="grid h-full min-h-0 grid-cols-[1fr_340px]">
+								{/* ステップ遷移時のフォーカス移動先(a11y)。視覚上は非表示。 */}
+								<h2
+									id="wizard-panel-heading-edit"
+									tabIndex={-1}
+									className="sr-only"
+								>
+									編集
+								</h2>
+								<div className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto p-3">
+									{!source ? (
+										<Placeholder text="元動画を選択してください。" />
+									) : selectedClip ? (
+										<ClipEditor
+											ref={clipEditorRef}
+											clip={selectedClip}
+											probe={source.probe}
+											videoSrc={source.videoSrc}
+											onChange={changeClip}
+										/>
+									) : (
+										<Placeholder text="右のパネルから切り抜きを追加してください。" />
+									)}
+								</div>
+
+								<aside className="flex min-h-0 flex-col gap-3 border-l border-line p-3">
+									<Card
+										title="Clips"
+										className="min-h-0 flex-1"
+										actions={
+											<IconButton
+												tone="accent"
+												onClick={addClip}
+												disabled={!source}
+												aria-label="切り抜きを追加"
+												title="切り抜きを追加"
+												className="rounded-full"
+											>
+												<PlusIcon />
+											</IconButton>
+										}
+									>
+										<ClipList
+											clips={clips}
+											selectedClipId={selectedClipId}
+											onSelect={setSelectedClipId}
+											onRemove={removeClip}
+											onChange={changeClip}
+										/>
+									</Card>
+
+									<Button
+										variant="primary"
+										disabled={!canGoExport}
+										onClick={() => goToStep("export")}
+										className="w-full shrink-0"
+									>
+										すべて書き出し
+										{clips.length > 0 ? `(${clips.length}本)` : ""}
+									</Button>
+								</aside>
+							</div>
+						),
+						export: (
+							<ExportScreen
+								active={step === "export"}
+								source={source}
+								clips={clips}
+								resetToken={resetToken}
+								onGoToEdit={() => goToStep("edit")}
+								onGoToUpload={
+									EDITION === "private" ? () => goToStep("upload") : undefined
+								}
+								onProgressSummary={setExportSummary}
+							/>
+						),
+						// public 版は投稿(アップロード)ステップ自体を持たない(WIZARD_STEPS 参照)。
+						// UploadScreen(virtual:upload-entry)は public ビルドではスタブに
+						// 差し替わるため参照自体は無害だが、意図を明示するため edition で分岐する。
+						...(EDITION === "private"
+							? {
+									upload: (
+										<UploadScreen
+											active={step === "upload"}
+											source={source}
+											clips={clips}
+											resetToken={resetToken}
+											onGoToExport={() => goToStep("export")}
+											onBusyChange={setUploadBusy}
+										/>
+									),
+								}
+							: {}),
+					}}
+				/>
+
+				<SettingsDialog
+					open={settingsOpen}
+					onClose={() => setSettingsOpen(false)}
+				/>
+				{/* private 版は updater を無効化する(別 identifier で共存インストールされ、
+				    作者が手動リビルドで更新する運用。docs/desktop-migration-plan.md §6.6)。 */}
+				{EDITION === "public" && <UpdateNotification />}
+			</div>
+		</PublishGateProvider>
 	);
 }
 

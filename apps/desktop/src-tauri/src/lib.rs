@@ -39,7 +39,14 @@
 // 付けられる(tauri-macros の Handler パーサがそのまま素通しする)ため、下記
 // invoke_handler 内で `#[cfg(feature = "publish")]` を付けて出し分ける
 // (ハンドラ一覧を feature 有無で二重管理せずに済む)。
+//
+// Phase 3 本体(IG 連携、§6.4): `jobs` モジュール(R2 アップロード + POST /jobs の
+// ビジネスロジック層。Tauri 非依存)を追加する。`commands::publish::ig` が invoke 境界
+// (`ig_publish_start`/`ig_publish_cancel`)としてこれを呼ぶ。`jobs` 自体も `publish`
+// feature 限定(§jobs/mod.rs)。
 mod commands;
+#[cfg(feature = "publish")]
+mod jobs;
 
 use commands::reframe::JobsState;
 
@@ -50,13 +57,22 @@ fn ping() -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-	tauri::Builder::default()
+	let builder = tauri::Builder::default()
 		.plugin(tauri_plugin_dialog::init())
 		.plugin(tauri_plugin_opener::init())
 		.plugin(tauri_plugin_notification::init())
 		.plugin(tauri_plugin_updater::Builder::new().build())
 		.plugin(tauri_plugin_process::init())
-		.manage(JobsState::default())
+		.manage(JobsState::default());
+
+	// IG 公開ジョブ(R2 アップロード + POST /jobs)の CancelToken を保持する State
+	// (`commands::reframe::JobsState` とは別のジョブ ID 空間、§commands/publish/ig.rs
+	// 冒頭コメント参照)。`publish` feature 無効(public ビルド)では型自体が存在しないため
+	// `manage` ごと除外する。
+	#[cfg(feature = "publish")]
+	let builder = builder.manage(commands::publish::IgJobsState::default());
+
+	builder
 		.invoke_handler(tauri::generate_handler![
 			ping,
 			commands::probe::probe,
@@ -75,7 +91,19 @@ pub fn run() {
 			commands::publish::delete_scheduler_api_token,
 			#[cfg(feature = "publish")]
 			commands::publish::check_scheduler_connection,
-			// IG/YouTube 本体のコマンドは後続 PR でここに追加する。
+			// R2(S3 互換)資格情報設定(§6.4)。
+			#[cfg(feature = "publish")]
+			commands::publish::set_r2_credentials,
+			#[cfg(feature = "publish")]
+			commands::publish::has_r2_credentials,
+			#[cfg(feature = "publish")]
+			commands::publish::delete_r2_credentials,
+			// IG(Instagram)本体: R2 アップロード + POST /jobs(§6.4・§8 Phase 3)。
+			// YouTube 本体のコマンドは今回のスコープ外(Phase 3 の別作業)。
+			#[cfg(feature = "publish")]
+			commands::publish::ig_publish_start,
+			#[cfg(feature = "publish")]
+			commands::publish::ig_publish_cancel,
 		])
 		.run(tauri::generate_context!())
 		.expect("error while running tauri application");

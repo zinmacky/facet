@@ -10,7 +10,7 @@ import { MOCK_OUTPUT_PATH } from "./fixtures";
  */
 
 interface StartMockJobOptions {
-	namespace: "reframe" | "preview";
+	namespace: "reframe" | "preview" | "ig_publish";
 	jobId: string;
 	/** progress イベントの fps/frame 換算用(見た目のみ、実エンコードは行わない)。 */
 	fps?: number;
@@ -34,22 +34,37 @@ export function startMockJob(opts: StartMockJobOptions): string {
 		const percent = Math.min(100, Math.round((tick / STEPS) * 1000) / 10);
 		const frame = Math.round((percent / 100) * totalFrames);
 
-		mockEmit(`${namespace}://progress/${jobId}`, {
-			frame,
-			totalFrames,
-			percent,
-			outTimeSecs: frame / fps,
-			fps,
-			speed: 1.8,
-		});
+		if (namespace === "ig_publish") {
+			// IG 公開ジョブの進捗形(`IgPublishProgress`、§features/upload/igPublish.ts)。
+			mockEmit(`ig_publish://progress/${jobId}`, {
+				phase: "uploading",
+				bytesSent: Math.round((percent / 100) * 1_000_000),
+				totalBytes: 1_000_000,
+				percent,
+			});
+		} else {
+			mockEmit(`${namespace}://progress/${jobId}`, {
+				frame,
+				totalFrames,
+				percent,
+				outTimeSecs: frame / fps,
+				fps,
+				speed: 1.8,
+			});
+		}
 
 		if (tick >= STEPS) {
 			clearInterval(timer);
 			timers.delete(jobId);
 			if (namespace === "reframe") {
 				mockEmit(`reframe://done/${jobId}`, { encoder: "libx264" });
-			} else {
+			} else if (namespace === "preview") {
 				mockEmit(`preview://done/${jobId}`, { path: MOCK_OUTPUT_PATH });
+			} else {
+				mockEmit(`ig_publish://done/${jobId}`, {
+					schedulerJobId: `mock-scheduler-job-${jobId}`,
+					status: "pending",
+				});
 			}
 		}
 	}, STEP_MS);
