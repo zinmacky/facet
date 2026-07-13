@@ -38,5 +38,7 @@ pub mod trim;
 pub use cancel::CancelToken;
 pub use error::{MediaError, Result};
 pub use pipeline::{reframe, EncoderSelection, ReframeOptions};
-pub use preview::{preview_cache_key, render_preview, PREVIEW_BITRATE};
+pub use preview::{
+	render_cache_key, render_preview, render_publish, PREVIEW_BITRATE, PUBLISH_BITRATE,
+};
 pub use progress::{Progress, ProgressTracker};

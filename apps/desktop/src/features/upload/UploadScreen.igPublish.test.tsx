@@ -140,7 +140,7 @@ describe("UploadScreen: IG 投稿のゲート活性化", () => {
 });
 
 describe("UploadScreen: IG 投稿フロー", () => {
-	it("プレビュー生成 → ig_publish_start → 進捗 → done で「完了」になる", async () => {
+	it("投稿用レンダリング(publish 品質)→ ig_publish_start → 進捗 → done で「完了」になる", async () => {
 		await setUpReadyGate();
 		const user = userEvent.setup();
 		renderScreen();
@@ -149,26 +149,35 @@ describe("UploadScreen: IG 投稿フロー", () => {
 		await waitFor(() => expect(publishButton).toBeEnabled());
 		await user.click(publishButton);
 
-		// 1. レンダリング(preview_start)が走る。
+		// 1. 投稿用レンダリング(preview_start, quality:"publish" = 本書き出しと同一品質
+		//    8Mbps・publish-cache)が走る。プレビュー品質(2Mbps)の動画が投稿される
+		//    P1 問題の修正の固定。
 		await waitFor(() =>
 			expect(mockInvoke).toHaveBeenCalledWith(
 				"preview_start",
-				expect.objectContaining({ input: SOURCE.inputPath }),
+				expect.objectContaining({
+					input: SOURCE.inputPath,
+					quality: "publish",
+				}),
 			),
 		);
 		const previewCallIndex = mockInvoke.mock.calls.findIndex(
 			([cmd]) => cmd === "preview_start",
 		);
 		const previewJobId = invokeJobId(previewCallIndex);
-		emitMockEvent(`preview://done/${previewJobId}`, { path: "/cache/out.mp4" });
+		emitMockEvent(`preview://done/${previewJobId}`, {
+			path: "/publish-cache/out.mp4",
+		});
 
-		// 2. ig_publish_start がプレビュー結果のパス・キャプション・scheduler URL 付きで
-		//    呼ばれる(publishAt 未設定のため即時 = Date.now() ベースの数値)。
+		// 2. ig_publish_start が投稿用レンダリング結果のパス・キャプション・scheduler URL
+		//    付きで呼ばれる(publishAt 未設定のため即時 = Date.now() ベースの数値)。
+		//    バリデーション(≤300MB 等)は Rust 側がこのパス(8Mbps 生成物)に対して
+		//    アップロード前に行う(§commands/publish/ig.rs)。
 		await waitFor(() =>
 			expect(mockInvoke).toHaveBeenCalledWith(
 				"ig_publish_start",
 				expect.objectContaining({
-					inputPath: "/cache/out.mp4",
+					inputPath: "/publish-cache/out.mp4",
 					caption: "",
 					schedulerUrl: SCHEDULER_URL,
 					publishAt: expect.any(Number),

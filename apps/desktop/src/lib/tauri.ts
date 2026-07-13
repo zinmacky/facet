@@ -214,7 +214,7 @@ async function subscribeReframeEvents(
 	return { jobId, unsubscribe, cancel: () => cancelJob(jobId) };
 }
 
-// ---- preview(低ビットレート・キャッシュ付き仮エンコード) -----------------
+// ---- preview(キャッシュ付きレンダリング。既定は低ビットレート) -------------
 
 export interface PreviewHandlers {
 	onProgress?: (progress: Progress) => void;
@@ -224,8 +224,18 @@ export interface PreviewHandlers {
 }
 
 /**
- * `input` を `spec` の指定形状へ低ビットレートでプレビュー生成する
+ * キャッシュ付きレンダリングの品質。
+ * - `"preview"`(既定): 低ビットレート(2Mbps)・`preview-cache`。目視確認用。
+ * - `"publish"`: 本書き出しと同一品質(8Mbps)・`publish-cache`。IG 等への投稿用
+ *   (投稿される実体がプレビュー品質にならないようにする。
+ *   `src-tauri/src/commands/preview.rs` の `RenderQuality` と対応)。
+ */
+export type RenderQuality = "preview" | "publish";
+
+/**
+ * `input` を `spec` の指定形状へキャッシュ付きでレンダリングする
  * (`reframe_start` と同じジョブ ID 空間。キャンセルは `cancelJob` を使う)。
+ * 品質は `quality` で選ぶ(省略時はプレビュー品質)。
  * done イベントの絶対パスは `convertFileSrc` を通してから `<video>` の `src` に使う。
  *
  * jobId 採番・listen-before-invoke の理由は `startReframe` と同じ(取りこぼし対策。
@@ -235,6 +245,7 @@ export async function startPreview(
 	input: string,
 	spec: EditSpec,
 	handlers: PreviewHandlers,
+	quality?: RenderQuality,
 ): Promise<JobHandle> {
 	const jobId: JobId = newJobId();
 	let unlisteners: UnlistenFn[] = [];
@@ -257,7 +268,14 @@ export async function startPreview(
 	]);
 	const handle: JobHandle = { jobId, unsubscribe, cancel: () => cancelJob(jobId) };
 	try {
-		await invoke<void>("preview_start", { jobId, input, spec });
+		// 既定品質("preview")ではキー自体を省略する(Rust 側 Option の既定に委ねる —
+		// 既存呼び出しのペイロード形を変えないため)。
+		await invoke<void>("preview_start", {
+			jobId,
+			input,
+			spec,
+			...(quality && quality !== "preview" ? { quality } : {}),
+		});
 	} catch (err) {
 		unsubscribe();
 		throw err;

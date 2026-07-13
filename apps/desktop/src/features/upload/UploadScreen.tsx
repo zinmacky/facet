@@ -76,9 +76,14 @@ export function UploadScreen({
 	const [pubStatuses, setPubStatuses] = useState<Map<string, PubStatus>>(
 		new Map(),
 	);
-	// output.id → 最終レンダリング結果(プレビュー/DL/投稿で共有)。preview_start ベースの
+	// output.id → 最終プレビュー(目視確認・DL 用、2Mbps)。preview_start ベースの
 	// 共通フック(ExportScreen の「クロップ内容プレビュー」と同じ実装)。
 	const preview = usePreview();
+	// output.id → 投稿用レンダリング結果(本書き出しと同一品質 8Mbps、publish-cache)。
+	// 目視確認は高速な 2Mbps(上の preview)のまま、実際に IG へ投稿される実体のみ
+	// この publish 品質を使う(preview とはキャッシュディレクトリごと分離される —
+	// §src-tauri/src/commands/preview.rs の RenderQuality)。
+	const publishRender = usePreview("publish");
 	// output.id → 「フォルダへ一括書き出し」の進行状態(プレビュー品質の preview とは別軸)。
 	// 「reframe_start 起動 + progress/done/error を Map と購読解除関数に反映」する部分は
 	// ExportScreen の書き出しと共通のため `useReframeQueue` に集約している。
@@ -140,6 +145,7 @@ export function UploadScreen({
 		setSelectedPostId(null);
 		setPubStatuses(new Map());
 		preview.reset();
+		publishRender.reset();
 		setStartDate("");
 		setEndDate("");
 		setWeekdayTimes({});
@@ -191,14 +197,17 @@ export function UploadScreen({
 		if (orphanOutputIds.length === 0) return;
 
 		setPosts((prev) => prev.filter((p) => validClipIds.has(p.clipId)));
-		for (const outputId of orphanOutputIds) preview.remove(outputId);
+		for (const outputId of orphanOutputIds) {
+			preview.remove(outputId);
+			publishRender.remove(outputId);
+		}
 		setPubStatuses((prev) => {
 			const next = new Map(prev);
 			for (const outputId of orphanOutputIds) next.delete(outputId);
 			return next;
 		});
 		// 選択中 post が除去されていたら、selectedPostId 側は下の effect で補正される。
-	}, [clips, posts, preview.remove]);
+	}, [clips, posts, preview.remove, publishRender.remove]);
 
 	// 選択中 id が posts に無い場合は先頭へ補正する(削除・並び替え時の担保)。
 	useEffect(() => {
@@ -317,6 +326,7 @@ export function UploadScreen({
 			return next;
 		});
 		preview.remove(outputId);
+		publishRender.remove(outputId);
 	};
 
 	// ---- 曜日・時刻リスト操作 ------------------------------------------------
@@ -418,6 +428,7 @@ export function UploadScreen({
 		);
 		// 旧 output.id に紐づく生成結果・状態は破棄する。
 		preview.reset();
+		publishRender.reset();
 		setPubStatuses(new Map());
 		setPresetNote(
 			`全 ${posts.length} 投稿に ${outputPresets.length} 出力先を適用しました。`,
@@ -436,18 +447,10 @@ export function UploadScreen({
 	};
 
 	/**
-	 * 現在の設定でレンダリング済みなら再利用し、無い/古い場合のみ `preview_start`
-	 * (低ビットレート・spec ハッシュキャッシュ)で再レンダリングする。
-	 * この画面の「最終プレビュー」欄・DL・投稿はすべてこの結果を再利用する
-	 * (実際の書き出し品質(reframe_start, 8Mbps)は書き出し画面(ExportScreen)側が担う。
-	 * このため DL される実体は投稿確認用のプレビュー品質(2Mbps)である点に注意 —
-	 * Phase 3 で実際の IG/YouTube 投稿を実装する際に、投稿直前の本書き出しへの
-	 * 差し替えを検討する)。
+	 * `output` のレンダリング引数(入力パス・spec・設定シグネチャ)を組み立てる
+	 * (`ensureRendered`/`ensurePublishRendered` 共通のガード節と spec 生成)。
 	 */
-	const ensureRendered = async (
-		post: UploadPost,
-		output: UploadOutput,
-	): Promise<string> => {
+	const buildRenderArgs = (post: UploadPost, output: UploadOutput) => {
 		if (!source) throw new Error("元動画が未選択です。");
 		const clip = clips.find((c) => c.id === post.clipId);
 		if (!clip) throw new Error("対象クリップが見つかりません。");
@@ -460,12 +463,42 @@ export function UploadScreen({
 			target,
 			output.fit,
 		);
-		return preview.ensure(
-			output.id,
-			source.inputPath,
+		return {
+			input: source.inputPath,
 			spec,
-			outputSig(clip, post, output),
-		);
+			sig: outputSig(clip, post, output),
+		};
+	};
+
+	/**
+	 * 現在の設定でレンダリング済みなら再利用し、無い/古い場合のみ `preview_start`
+	 * (低ビットレート 2Mbps・spec ハッシュキャッシュ)で再レンダリングする。
+	 * この画面の「最終プレビュー」欄・DL はこの結果を再利用する(目視確認用なので
+	 * 高速なプレビュー品質でよい。DL される実体もプレビュー品質である点は従来どおり —
+	 * 実書き出し品質が必要なら「フォルダへ一括書き出し」を使う)。
+	 * **投稿はこの結果を使わない** — `ensurePublishRendered`(本書き出しと同一品質)を使う。
+	 */
+	const ensureRendered = async (
+		post: UploadPost,
+		output: UploadOutput,
+	): Promise<string> => {
+		const { input, spec, sig } = buildRenderArgs(post, output);
+		return preview.ensure(output.id, input, spec, sig);
+	};
+
+	/**
+	 * 投稿用レンダリング。`ensureRendered` と同じキャッシュ方式(sig 一致なら再利用)だが、
+	 * 品質は本書き出しと同一(8Mbps)・生成先は `publish-cache`(プレビューと分離)。
+	 * IG へ投稿される実体は必ずこちらを通す(プレビュー品質 2Mbps の動画が投稿される
+	 * 問題の修正)。ファイルサイズ上限(≤300MB)等のバリデーションは、この結果のパスを
+	 * 受け取った `ig_publish_start`(Rust 側)がアップロード前に 8Mbps 生成物へ対して行う。
+	 */
+	const ensurePublishRendered = async (
+		post: UploadPost,
+		output: UploadOutput,
+	): Promise<string> => {
+		const { input, spec, sig } = buildRenderArgs(post, output);
+		return publishRender.ensure(output.id, input, spec, sig);
 	};
 
 	// ---- 投稿処理 ------------------------------------------------------------
@@ -503,9 +536,9 @@ export function UploadScreen({
 		}
 
 		try {
-			// 1. レンダリング(生成済みなら再利用)。
+			// 1. 投稿用レンダリング(本書き出しと同一品質 8Mbps。生成済みなら再利用)。
 			setPubStatus(output.id, { kind: "rendering" });
-			const outputPath = await ensureRendered(post, output);
+			const outputPath = await ensurePublishRendered(post, output);
 
 			// 2. 投稿。
 			setPubStatus(output.id, { kind: "publishing" });
@@ -728,8 +761,8 @@ export function UploadScreen({
 	);
 
 	// プレビュー生成(現在設定でレンダリング)。
-	// ensureRendered は preview.ensure 呼び出し前にガード節で早期 throw することがある
-	// (元動画未選択・対象クリップ不明・出力ターゲット無効)。この場合 preview 側の
+	// ensureRendered は preview.ensure 呼び出し前(buildRenderArgs のガード節)で早期
+	// throw することがある(元動画未選択・対象クリップ不明・出力ターゲット無効)。この場合 preview 側の
 	// states には何も反映されないため render.error は出ず、以前は catch(() => undefined)
 	// で握りつぶしてユーザーに一切見えなくなっていた(P1 バグ)。preview.ensure 到達後の
 	// 失敗は引き続き renders.error にも反映されるが、ここでは早期 throw を含む
