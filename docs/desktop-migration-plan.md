@@ -566,6 +566,9 @@ TS 側ツーリング(Biome / turbo)と干渉させない。
     §12.1)。
   - **セルフホスト手順書**(wrangler deploy + トークン発行 + Meta アプリ作成 +
     R2 バケットの公開読取設定 + YouTube 監査/手動フォールバックの案内)。
+    **作成済み(docs/self-host-guide.md)**。ただし desktop 側の YouTube 接続 UI
+    は本文執筆時点で未実装のため、同文書 §4 は準備作業のみを記載している
+    (IG は実装済みで手順を検証可能)。
 - 受け入れ基準:
   - desktop で編集 → **IG は scheduler 経由で予約公開が発火**(`idempotencyKey`
     二重登録防止機能)/ **YouTube は publishAt で時刻公開**(ステージング/実機)。
