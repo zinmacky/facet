@@ -19,9 +19,10 @@ async function goToStep(user: ReturnType<typeof userEvent.setup>, label: string)
 }
 
 /**
- * OutputCard 内の「投稿設定」折りたたみ(メタデータ入力欄)を開く。
- * PostDetail 側にも同名を含む別の折りたたみ(「投稿設定(予約日時・一括投稿)」)が
- * あるため、"予約日時" を含まない方をこちらの対象として区別する。
+ * OutputCard に差し込まれる OutputPublishSection の「投稿設定」折りたたみ
+ * (メタデータ入力欄)を開く。PostDetail に差し込まれる PostScheduleSection 側にも
+ * 同名を含む別の折りたたみ(「投稿設定(予約日時・一括投稿)」)があるため、
+ * "予約日時" を含まない方をこちらの対象として区別する。
  */
 async function expandOutputSettings(user: ReturnType<typeof userEvent.setup>) {
 	const toggle = await waitFor(() => {
@@ -58,8 +59,8 @@ describe("App: ウィザードの状態保持", () => {
 		await pickSource(user, "/video1.mp4");
 
 		// edit → export(1 clip があるので前進できる)。
-		await user.click(screen.getByRole("button", { name: /すべて書き出し/ }));
-		expect(stepNav().getByRole("button", { name: /書き出し/ })).toHaveAttribute(
+		await user.click(screen.getByRole("button", { name: /確認へ進む/ }));
+		expect(stepNav().getByRole("button", { name: /確認/ })).toHaveAttribute(
 			"aria-current",
 			"step",
 		);
@@ -72,7 +73,7 @@ describe("App: ウィザードの状態保持", () => {
 		await waitFor(() => expect(screen.getByText("完了")).toBeInTheDocument());
 
 		// export → upload。既定 Post(1 出力: yt-shorts/crop)が自動生成される。
-		await goToStep(user, "アップロード");
+		await goToStep(user, "リフレーム");
 		await expandOutputSettings(user);
 		const titleField = await screen.findByLabelText<HTMLInputElement>("タイトル", {
 			selector: "input",
@@ -81,12 +82,12 @@ describe("App: ウィザードの状態保持", () => {
 		expect(titleField).toHaveValue("テストタイトル");
 
 		// upload → export → edit → export → upload と往復しても、結果・入力値は消えない。
-		await goToStep(user, "書き出し");
+		await goToStep(user, "確認");
 		expect(screen.getByText("完了")).toBeInTheDocument();
 		await goToStep(user, "編集");
-		await goToStep(user, "書き出し");
+		await goToStep(user, "確認");
 		expect(screen.getByText("完了")).toBeInTheDocument();
-		await goToStep(user, "アップロード");
+		await goToStep(user, "リフレーム");
 		expect(
 			await screen.findByLabelText<HTMLInputElement>("タイトル", { selector: "input" }),
 		).toHaveValue("テストタイトル");
@@ -98,9 +99,9 @@ describe("App: ウィザードの状態保持", () => {
 		await goToStep(user, "編集");
 		await pickSource(user, "/video2.mp4");
 
-		await goToStep(user, "書き出し");
+		await goToStep(user, "確認");
 		expect(screen.queryByText("完了")).not.toBeInTheDocument();
-		await goToStep(user, "アップロード");
+		await goToStep(user, "リフレーム");
 		// resetToken で posts が作り直されたため Output も新規インスタンス
 		// (折りたたみの開閉状態はリセットされている)。改めて開く。
 		await expandOutputSettings(user);
@@ -123,11 +124,11 @@ describe("App: ステップ遷移時のフォーカス移動(a11y)", () => {
 
 		await pickSource(user, "/video1.mp4");
 
-		await user.click(screen.getByRole("button", { name: /すべて書き出し/ }));
-		expect(screen.getByRole("heading", { name: "書き出し" })).toHaveFocus();
+		await user.click(screen.getByRole("button", { name: /確認へ進む/ }));
+		expect(screen.getByRole("heading", { name: "確認" })).toHaveFocus();
 
-		await goToStep(user, "アップロード");
-		expect(screen.getByRole("heading", { name: "アップロード" })).toHaveFocus();
+		await goToStep(user, "リフレーム");
+		expect(screen.getByRole("heading", { name: "リフレーム" })).toHaveFocus();
 
 		await goToStep(user, "編集");
 		expect(screen.getByRole("heading", { name: "編集" })).toHaveFocus();

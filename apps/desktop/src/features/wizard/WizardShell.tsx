@@ -1,27 +1,25 @@
 import type { ReactNode } from "react";
 import { useEffect, useRef } from "react";
 
-/** ウィザードで使いうる全ステップ。順序はスライドの左→右と一致する。 */
-export const WIZARD_STEPS_PRIVATE = ["edit", "export", "upload"] as const;
-/** public(配布版)のステップ構成: 投稿(アップロード)ステップを持たない2 step。 */
-export const WIZARD_STEPS_PUBLIC = ["edit", "export"] as const;
-export type WizardStep = (typeof WIZARD_STEPS_PRIVATE)[number];
+/**
+ * ウィザードのステップ(編集/確認/リフレーム)。順序はスライドの左→右と一致する。
+ * 両エディション共通(v2.4 時点では public 版がリフレーム=投稿ステップを持たない
+ * 2 step 構成だったが、リフレーム機能自体は両エディション共通のため 3 step に統一した
+ * — 投稿系 UI の有無はステップ数ではなく各画面内の描画で出し分ける、
+ * §features/upload/ReframeScreen.tsx の `PublishSlots`)。
+ */
+export const WIZARD_STEPS = ["edit", "export", "upload"] as const;
+export type WizardStep = (typeof WIZARD_STEPS)[number];
 
 interface WizardShellProps {
-	/** edition に応じたステップ構成(App.tsx が EDITION から選ぶ)。 */
 	steps: readonly WizardStep[];
 	step: WizardStep;
-	/**
-	 * 各ステップの内容。`steps` に含まれるものは常時マウントする(ジョブ購読の
-	 * 生存を維持するため)。`steps` に含まれないキー(例: public 版の "upload")は
-	 * 渡されていてもレンダリングされない。
-	 */
+	/** 各ステップの内容。`steps` に含まれるものは常時マウントする(ジョブ購読の生存を維持するため)。 */
 	panels: Partial<Record<WizardStep, ReactNode>>;
 }
 
 /**
- * ウィザードの複数画面(edition により edit→export の2画面、または
- * edit→export→upload の3画面)を横スライドで切り替える外枠。
+ * ウィザードの3画面(編集/確認/リフレーム)を横スライドで切り替える外枠。
  *
  * `steps` に含まれる画面は常時マウントしたまま(条件付きレンダリングは絶対禁止 —
  * 各画面が持つジョブ購読(unsubsRef 等)がコンポーネント生存に依存しているため、

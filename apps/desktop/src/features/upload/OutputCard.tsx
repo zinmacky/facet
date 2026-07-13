@@ -1,5 +1,6 @@
 import type { FitMode } from "@facet/core";
-import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
+import { useMemo } from "react";
 import type { Clip } from "../../types";
 import { FIT_OPTIONS, OUTPUT_TARGETS, targetById } from "../../types";
 import { convertFileSrc } from "../../lib/tauri";
@@ -8,16 +9,11 @@ import { Button } from "../../components/ui/Button";
 import { IconButton } from "../../components/ui/IconButton";
 import { TrashIcon } from "../../components/ui/icons";
 import { cn } from "../../components/ui/cn";
-import { Disclosure } from "./Disclosure";
-import { StatusBadge } from "./StatusBadge";
 import {
-	type PubStatus,
 	type UploadOutput,
 	type UploadPost,
-	inputClass,
 	outputSig,
 	selectClass,
-	textareaClass,
 } from "./uploadTypes";
 
 interface OutputCardProps {
@@ -28,22 +24,28 @@ interface OutputCardProps {
 	/** 元画面で決めたクロップ比のラベル(由来表示用)。 */
 	clipAspectLabel: string;
 	canRemove: boolean;
-	/** この Output への投稿ボタンを有効化してよいか(`PostDetail.tsx`/`UploadScreen.tsx` の `canPublishTarget`)。 */
-	canPublish: boolean;
 	render: PreviewState | undefined;
-	status: PubStatus | undefined;
+	/**
+	 * プレビュー生成の早期失敗(元動画未選択・対象クリップ不明・出力ターゲット無効)を
+	 * 常に見える形で表示する(`render.error` は `preview.ensure` 到達後の失敗しか
+	 * 拾えないため、ReframeScreen 側で別軸に保持している。両エディション共通)。
+	 */
+	previewError: string | undefined;
 	busy: boolean;
 	onPatch: (patch: Partial<UploadOutput>) => void;
 	onRemove: () => void;
 	onPreview: () => void;
-	onPublish: () => void;
+	/**
+	 * private エディション専用の投稿設定セクション(メタデータ・投稿ボタン・
+	 * ステータス)。ReframeScreen が `publishSlots.renderOutputSection(...)` の結果を
+	 * そのまま渡す(OutputCard 自体は投稿系の型・文言に一切依存しない)。
+	 */
+	postingSlot?: ReactNode;
 }
 
 export function OutputCard(props: OutputCardProps) {
-	const { post, clip, output, render, status, busy } = props;
-	const [postSettingsOpen, setPostSettingsOpen] = useState(false);
+	const { post, clip, output, render, busy } = props;
 	const target = useMemo(() => targetById(output.targetId), [output.targetId]);
-	const platform = target?.platform;
 	// 出力ターゲットのアスペクト比(width/height)。プレビュー枠はこれに追従する。
 	const boxRatio = target ? target.width / target.height : 9 / 16;
 
@@ -81,7 +83,7 @@ export function OutputCard(props: OutputCardProps) {
 							className="flex h-full max-w-full items-center justify-center overflow-hidden rounded-md border border-line bg-black/5 dark:bg-black/40"
 						>
 							{outputPath ? (
-								/* biome-ignore lint/a11y/useMediaCaption: 投稿確認用のプレビューで字幕データが存在しない */
+								/* biome-ignore lint/a11y/useMediaCaption: 内容確認用のプレビューで字幕データが存在しない */
 								<video
 									src={convertFileSrc(outputPath)}
 									controls
@@ -114,9 +116,12 @@ export function OutputCard(props: OutputCardProps) {
 					{render?.error && (
 						<p className="text-[11px] text-danger">{render.error}</p>
 					)}
+					{props.previewError && (
+						<p className="text-[11px] text-danger">エラー: {props.previewError}</p>
+					)}
 				</div>
 
-				{/* 右: 出力ターゲット・フィット + 投稿設定(折りたたみ) */}
+				{/* 右: 出力ターゲット・フィット + private 専用の投稿設定(あれば) */}
 				<div className="flex min-w-0 flex-1 flex-col gap-2">
 					<div className="grid grid-cols-[1fr_1fr_auto] items-end gap-2">
 						<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
@@ -174,66 +179,7 @@ export function OutputCard(props: OutputCardProps) {
 						」で合わせます。
 					</p>
 
-					{/* 投稿専用フィールド(メタデータ・投稿ボタン・ステータス)。
-					    Phase 3 まで投稿自体が無効なため、既定で折りたたむ。 */}
-					<Disclosure
-						title="投稿設定"
-						expanded={postSettingsOpen}
-						onToggle={() => setPostSettingsOpen((v) => !v)}
-						trailing={<StatusBadge status={status} />}
-					>
-						{platform === "youtube" ? (
-							<>
-								<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
-									タイトル
-									<input
-										type="text"
-										className={cn(inputClass, "w-full")}
-										value={output.title}
-										onChange={(e) => props.onPatch({ title: e.target.value })}
-									/>
-								</label>
-								<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
-									説明
-									<textarea
-										className={cn(textareaClass, "min-h-[96px] resize-y")}
-										value={output.description}
-										onChange={(e) =>
-											props.onPatch({ description: e.target.value })
-										}
-									/>
-								</label>
-							</>
-						) : (
-							<label className="flex flex-col gap-1 text-[11px] text-neutral-400">
-								キャプション
-								<textarea
-									className={cn(textareaClass, "min-h-[96px] resize-y")}
-									maxLength={2200}
-									value={output.caption}
-									onChange={(e) => props.onPatch({ caption: e.target.value })}
-								/>
-							</label>
-						)}
-
-						<div className="flex justify-end">
-							<Button
-								variant="primary"
-								size="sm"
-								onClick={props.onPublish}
-								disabled={busy || !props.canPublish}
-								title={
-									props.canPublish
-										? undefined
-										: platform === "instagram"
-											? "設定(scheduler + R2)が必要です"
-											: "デスクトップ版では未対応(今後のアップデートで対応予定)"
-								}
-							>
-								投稿
-							</Button>
-						</div>
-					</Disclosure>
+					{props.postingSlot}
 				</div>
 			</div>
 		</div>

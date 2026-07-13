@@ -22,10 +22,12 @@ interface BulkPresetsModalProps {
 
 /**
  * 「一括設定」モーダル: 出力先(ターゲット×フィット)の組み合わせを編集し、
- * 全 Post の出力先へ一括適用する。適用は破壊的(既存メタデータをリセット)なため、
- * 実際の適用は UploadScreen 側の `applyPresets` 内で `useConfirm` による確認を挟む。
+ * 全 Post の出力先へ一括適用する。両エディション共通(投稿系の文言は使わない —
+ * 「投稿」ではなく「項目」と表記する、docs/desktop-migration-plan.md の
+ * wizard 再構成メモ参照)。適用は破壊的(既存メタデータをリセット)なため、
+ * 実際の適用は ReframeScreen 側の `applyPresets` 内で `useConfirm` による確認を挟む。
  * 確認でキャンセルされた場合はこのモーダルを開いたままにする
- * (UploadScreen 側が applyPresets の戻り値を見て onClose を呼ぶかどうかを決める)。
+ * (ReframeScreen 側が applyPresets の戻り値を見て onClose を呼ぶかどうかを決める)。
  */
 export function BulkPresetsModal(props: BulkPresetsModalProps) {
 	return (
@@ -40,7 +42,7 @@ export function BulkPresetsModal(props: BulkPresetsModalProps) {
 						閉じる
 					</Button>
 					<Button variant="primary" size="sm" onClick={props.onApply}>
-						全ての投稿に出力先を適用
+						全ての項目に出力先を適用
 					</Button>
 				</>
 			}
@@ -105,7 +107,7 @@ export function BulkPresetsModal(props: BulkPresetsModalProps) {
 					)}
 				</div>
 				<p className="text-[11px] text-neutral-400">
-					適用すると各投稿の出力先をこの組み合わせで作り直します(メタデータはリセット)。
+					適用すると各項目の出力先をこの組み合わせで作り直します。
 				</p>
 			</div>
 		</Modal>

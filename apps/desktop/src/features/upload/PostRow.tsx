@@ -1,5 +1,5 @@
+import type { ReactNode } from "react";
 import type { Clip } from "../../types";
-import { msToLocalInput } from "../../lib/schedule";
 import { IconButton } from "../../components/ui/IconButton";
 import { ChevronDownIcon, ChevronUpIcon, TrashIcon } from "../../components/ui/icons";
 import { cn } from "../../components/ui/cn";
@@ -11,6 +11,12 @@ interface PostRowProps {
 	total: number;
 	clips: Clip[];
 	selected: boolean;
+	/**
+	 * private エディション専用の追加表示(予約日時ラベル)。ReframeScreen が
+	 * `publishSlots.renderPostRowExtra(post)` の結果をそのまま渡す
+	 * (PostRow 自体は投稿系の型・文言に一切依存しない)。
+	 */
+	extra?: ReactNode;
 	onSelect: () => void;
 	onMove: (dir: -1 | 1) => void;
 	onRemove: () => void;
@@ -20,10 +26,6 @@ export function PostRow(props: PostRowProps) {
 	const { post, index, total, clips, selected } = props;
 	const clipName =
 		clips.find((c) => c.id === post.clipId)?.name ?? "(不明な clip)";
-	const scheduleLabel =
-		post.publishAt !== undefined
-			? msToLocalInput(post.publishAt).replace("T", " ")
-			: "即時";
 
 	return (
 		// biome-ignore lint/a11y/useSemanticElements: 上へ/下へ/削除ボタンを内包する選択カードのため native button 化できない
@@ -58,12 +60,7 @@ export function PostRow(props: PostRowProps) {
 						</span>
 					</div>
 					<div className="mt-0.5 flex items-center gap-1.5">
-						<span
-							className="truncate text-[11px] text-neutral-400"
-							title={scheduleLabel}
-						>
-							{scheduleLabel}
-						</span>
+						{props.extra}
 						<span className="shrink-0 rounded bg-elevated px-1 text-[11px] text-neutral-300">
 							{post.outputs.length} 出力
 						</span>

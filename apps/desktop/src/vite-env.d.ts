@@ -8,15 +8,18 @@
 declare const __FACET_EDITION__: "public" | "private";
 
 /**
- * アップロード(投稿)機能のエントリポイント。実体は vite.config.ts /
+ * リフレーム画面(ターゲット別アスペクト/フィットの選択・レンダリング・フォルダへの
+ * 保存 + private のみ投稿)のエントリポイント。実体は vite.config.ts /
  * vitest.config.ts の `resolve.alias` で edition ごとに差し替える:
- * - private: `features/upload/entry.ts`(React.lazy 経由の動的 import)
- * - public : `features/upload/entry.public.ts`(投稿系コードを含まないスタブ)
+ * - private: `features/upload/entry.ts`(`ReframeScreen` + 投稿系スロットを埋める
+ *   `UploadScreenPrivate` を re-export)
+ * - public : `features/upload/entry.public.ts`(`ReframeScreen` を投稿系スロット無しで
+ *   re-export — 画面自体は両エディション共通で、投稿系コードだけが含まれない)
  * どちらも同じ型(`UploadScreenProps`)を満たす。
  */
 declare module "virtual:upload-entry" {
 	import type { ComponentType } from "react";
-	import type { UploadScreenProps } from "./features/upload/UploadScreen";
+	import type { UploadScreenProps } from "./features/upload/ReframeScreen";
 
 	export const UploadScreen: ComponentType<UploadScreenProps>;
 }
