@@ -5,8 +5,12 @@ import { usePublishGateContext } from "./PublishGateContext";
 import {
 	deleteR2Credentials,
 	deleteSchedulerApiToken,
+	deleteYoutubeOauthClient,
 	setR2Credentials,
 	setSchedulerApiToken,
+	setYoutubeOauthClient,
+	youtubeOauthConnect,
+	youtubeOauthDisconnect,
 } from "./publishSettingsClient";
 import { loadSchedulerUrl, saveSchedulerUrl } from "./schedulerUrlStore";
 import type { PublishGateResult } from "./usePublishGate";
@@ -22,6 +26,10 @@ const DEFAULT_R2_BUCKET = "facet-media";
  * §publishSettingsClient.ts / src-tauri/src/commands/publish/)を設定し、疎通チェックの
  * 結果を表示する。「scheduler 疎通 OK かつ R2 資格情報保存済み」で IG 投稿が有効になる
  * (`PublishGateContext.igReady`、`features/upload/usePublishExtras.tsx` 参照)。
+ *
+ * YouTube(§6.5)は OAuth クライアント(client_id/secret、OS キーチェーン)を保存 →
+ * 「Google と接続」(ブラウザで同意 → refresh token をキーチェーンへ保管)の2段階。
+ * 「接続済み」で YouTube 投稿が有効になる(`PublishGateContext.ytReady`)。
  *
  * トークン・シークレットは type="password" で入力し、保存後は値を再表示しない
  * (保存済みバッジ + 削除ボタンのみ表示する。§実装方針)。
@@ -42,6 +50,14 @@ export function PublishSettingsSection() {
 	const [savingR2, setSavingR2] = useState(false);
 	const [r2Error, setR2Error] = useState<string | null>(null);
 	const [deletingR2, setDeletingR2] = useState(false);
+
+	// YouTube OAuth クライアント + 接続フォーム(§youtube_oauth.rs)。
+	const [ytClientId, setYtClientId] = useState("");
+	const [ytClientSecret, setYtClientSecret] = useState("");
+	const [savingYtClient, setSavingYtClient] = useState(false);
+	const [ytError, setYtError] = useState<string | null>(null);
+	const [connectingYt, setConnectingYt] = useState(false);
+	const [ytBusy, setYtBusy] = useState(false);
 
 	const handleSaveUrl = () => {
 		saveSchedulerUrl(schedulerUrl.trim());
@@ -112,6 +128,62 @@ export function PublishSettingsSection() {
 		}
 	};
 
+	const handleSaveYtClient = async () => {
+		setSavingYtClient(true);
+		setYtError(null);
+		try {
+			await setYoutubeOauthClient(ytClientId.trim(), ytClientSecret.trim());
+			setYtClientId("");
+			setYtClientSecret("");
+			await gate.recheckYoutube();
+		} catch (err) {
+			setYtError(getErrorMessage(err));
+		} finally {
+			setSavingYtClient(false);
+		}
+	};
+
+	// 「Google と接続」: 既定ブラウザが開き Google の同意画面で承認する。承認完了
+	// (または Rust 側のタイムアウト 5 分)まで resolve しない(§youtube_oauth.rs)。
+	const handleConnectYt = async () => {
+		setConnectingYt(true);
+		setYtError(null);
+		try {
+			await youtubeOauthConnect();
+			await gate.recheckYoutube();
+		} catch (err) {
+			setYtError(getErrorMessage(err));
+		} finally {
+			setConnectingYt(false);
+		}
+	};
+
+	const handleDisconnectYt = async () => {
+		setYtBusy(true);
+		setYtError(null);
+		try {
+			await youtubeOauthDisconnect();
+			await gate.recheckYoutube();
+		} catch (err) {
+			setYtError(getErrorMessage(err));
+		} finally {
+			setYtBusy(false);
+		}
+	};
+
+	const handleDeleteYtClient = async () => {
+		setYtBusy(true);
+		setYtError(null);
+		try {
+			await deleteYoutubeOauthClient();
+			await gate.recheckYoutube();
+		} catch (err) {
+			setYtError(getErrorMessage(err));
+		} finally {
+			setYtBusy(false);
+		}
+	};
+
 	return (
 		<section className="flex flex-col gap-3">
 			<h3 className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
@@ -119,7 +191,8 @@ export function PublishSettingsSection() {
 			</h3>
 			<p className="text-[11px] text-neutral-400">
 				scheduler の URL・API トークン・R2 資格情報を設定し、疎通チェックが成功すると
-				Instagram への投稿が有効になります。
+				Instagram への投稿が有効になります。YouTube への投稿は OAuth クライアントを
+				設定して Google と接続すると有効になります。
 			</p>
 
 			<div className="flex flex-col gap-1.5">
@@ -277,6 +350,97 @@ export function PublishSettingsSection() {
 					<span>
 						未設定(scheduler の疎通確認と R2 資格情報の両方が必要です)
 					</span>
+				)}
+			</p>
+
+			<div className="flex flex-col gap-1.5 border-t border-line pt-3">
+				<span className="text-[11px] text-neutral-400">
+					YouTube(Google OAuth)
+				</span>
+				<p className="text-[11px] text-neutral-400">
+					自分の Google Cloud プロジェクトの OAuth クライアント(デスクトップアプリ種別)を
+					作成し、クライアントIDとシークレットを入力してください。
+				</p>
+				{gate.youtubeStatus === "not_configured" ? (
+					<div className="flex flex-col gap-1.5">
+						<input
+							type="text"
+							aria-label="YouTubeクライアントID"
+							value={ytClientId}
+							onChange={(e) => setYtClientId(e.target.value)}
+							placeholder="クライアントID"
+							className="h-8 rounded-md border border-line bg-elevated px-2 font-mono text-[11px] text-neutral-200 focus:border-accent focus:outline-none"
+						/>
+						<input
+							type="password"
+							aria-label="YouTubeクライアントシークレット"
+							value={ytClientSecret}
+							onChange={(e) => setYtClientSecret(e.target.value)}
+							placeholder="クライアントシークレット"
+							className="h-8 rounded-md border border-line bg-elevated px-2 font-mono text-[11px] text-neutral-200 focus:border-accent focus:outline-none"
+						/>
+						<div className="flex justify-end">
+							<Button
+								size="sm"
+								variant="secondary"
+								aria-label="YouTubeクライアントを保存"
+								disabled={
+									savingYtClient || !ytClientId.trim() || !ytClientSecret.trim()
+								}
+								onClick={() => void handleSaveYtClient()}
+							>
+								{savingYtClient ? "保存中…" : "保存"}
+							</Button>
+						</div>
+					</div>
+				) : (
+					<div className="flex items-center gap-2">
+						<span className="rounded-md border border-line bg-elevated px-2 py-1.5 text-[11px] text-neutral-300">
+							{gate.youtubeStatus === "connected" ? "接続済み" : "未接続"}
+						</span>
+						{gate.youtubeStatus === "connected" ? (
+							<Button
+								size="sm"
+								variant="ghost"
+								disabled={ytBusy}
+								onClick={() => void handleDisconnectYt()}
+							>
+								{ytBusy ? "処理中…" : "切断"}
+							</Button>
+						) : (
+							<Button
+								size="sm"
+								variant="secondary"
+								disabled={connectingYt}
+								onClick={() => void handleConnectYt()}
+							>
+								{connectingYt ? "ブラウザで承認待ち…" : "Google と接続"}
+							</Button>
+						)}
+						<Button
+							size="sm"
+							variant="ghost"
+							disabled={ytBusy || connectingYt}
+							onClick={() => void handleDeleteYtClient()}
+						>
+							クライアント削除
+						</Button>
+					</div>
+				)}
+				{ytError && <span className="text-[11px] text-danger">{ytError}</span>}
+				<p className="text-[11px] text-neutral-400">
+					予約公開(publishAt)は監査済みの Google Cloud プロジェクトでのみ機能します
+					(未監査は非公開のままロックされます — YouTube Studio
+					で手動予約するフォールバックを使ってください)。
+				</p>
+			</div>
+
+			<p className="text-[11px] text-neutral-400">
+				YouTube への投稿:{" "}
+				{gate.ytReady ? (
+					<span className="text-emerald-500">有効</span>
+				) : (
+					<span>未設定(OAuth クライアントの保存と Google 接続が必要です)</span>
 				)}
 			</p>
 		</section>

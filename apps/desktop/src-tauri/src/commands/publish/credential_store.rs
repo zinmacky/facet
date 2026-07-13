@@ -7,7 +7,10 @@
 //! (手元 or 実機で `cargo test --features publish -- --ignored` を使う)。
 
 /// 資格情報ストアの抽象。service/username の組で 1 つの値を保持する。
-pub trait CredentialStore {
+/// `Send + Sync` を要求するのは、`&dyn CredentialStore` を async な Tauri コマンド
+/// (`youtube_oauth_connect` / `youtube_publish_start`)の await 境界をまたいで保持する
+/// ため(tauri の `generate_handler!` は Future に `Send` を要求する)。
+pub trait CredentialStore: Send + Sync {
 	/// 値を保存する(既存値があれば上書き)。
 	fn set(&self, service: &str, username: &str, value: &str) -> Result<(), String>;
 	/// 値を取得する。未保存(NoEntry 相当)なら `Ok(None)`。

@@ -66,6 +66,16 @@ let mockR2Credentials: {
 	bucket: string;
 } | null = null;
 
+/**
+ * YouTube OAuth のインメモリモック状態(§commands/publish/youtube_oauth.rs)。
+ * クライアント(client_id/secret)とトークンキャッシュ(接続済みフラグ)の2段構え。
+ * `youtube_oauth_connect` の既定実装は「クライアント設定済みなら即接続成功」
+ * (実ブラウザフローの成功ケースに相当)。
+ */
+let mockYoutubeOauthClient: { clientId: string; clientSecret: string } | null =
+	null;
+let mockYoutubeOauthConnected = false;
+
 /** invoke コマンドの既定実装。未対応コマンドは reject する(テスト側の見落としに気付けるように)。 */
 async function defaultInvokeImpl(cmd: string, args?: unknown): Promise<unknown> {
 	switch (cmd) {
@@ -127,6 +137,45 @@ async function defaultInvokeImpl(cmd: string, args?: unknown): Promise<unknown> 
 			// `mockImplementationOnce` で個別に差し替える)。
 			return undefined;
 		case "ig_publish_cancel":
+			return undefined;
+		case "set_youtube_oauth_client": {
+			const { clientId, clientSecret } = (args ?? {}) as {
+				clientId?: string;
+				clientSecret?: string;
+			};
+			if (!clientId?.trim() || !clientSecret?.trim()) {
+				throw new Error("クライアントIDとクライアントシークレットは必須です。");
+			}
+			mockYoutubeOauthClient = { clientId, clientSecret };
+			return undefined;
+		}
+		case "delete_youtube_oauth_client":
+			// Rust 側と同じく、クライアント削除はトークンキャッシュも道連れにする。
+			mockYoutubeOauthClient = null;
+			mockYoutubeOauthConnected = false;
+			return undefined;
+		case "youtube_oauth_status":
+			if (mockYoutubeOauthClient === null) return { status: "not_configured" };
+			return mockYoutubeOauthConnected
+				? { status: "connected" }
+				: { status: "configured" };
+		case "youtube_oauth_connect":
+			if (mockYoutubeOauthClient === null) {
+				throw new Error(
+					"YouTube の OAuth クライアント(クライアントID/シークレット)が未設定です。設定画面から入力してください。",
+				);
+			}
+			mockYoutubeOauthConnected = true;
+			return undefined;
+		case "youtube_oauth_disconnect":
+			mockYoutubeOauthConnected = false;
+			return undefined;
+		case "youtube_publish_start":
+			// jobId は呼び出し側(renderer)が args.jobId として渡す。Rust 側は戻り値を
+			// 返さない(OAuth 未接続・タイトル未入力等の同期エラーのみテストが
+			// `mockImplementationOnce` で個別に差し替える)。
+			return undefined;
+		case "youtube_publish_cancel":
 			return undefined;
 		default:
 			throw new Error(`invoke not mocked for command: ${cmd}`);
@@ -209,6 +258,8 @@ export function resetTauriMocks(): void {
 
 	mockSchedulerApiToken = null;
 	mockR2Credentials = null;
+	mockYoutubeOauthClient = null;
+	mockYoutubeOauthConnected = false;
 
 	mockListen.mockClear();
 	eventHandlers.clear();

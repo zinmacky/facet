@@ -10,6 +10,10 @@ import { Button } from "../../components/ui/Button";
 import { usePublishGateContext } from "../publish-settings/PublishGateContext";
 import { loadSchedulerUrl } from "../publish-settings/schedulerUrlStore";
 import { describeIgPublishError, startIgPublish } from "./igPublish";
+import {
+	describeYoutubePublishError,
+	startYoutubePublish,
+} from "./youtubePublish";
 import { OutputPublishSection } from "./OutputPublishSection";
 import { PostScheduleSection } from "./PostScheduleSection";
 import { ScheduleSettingsModal } from "./ScheduleSettingsModal";
@@ -106,9 +110,8 @@ export function usePublishExtras({
 	const canPublishTarget = (target: OutputTarget | undefined): boolean => {
 		if (!target) return false;
 		if (!isPlatformPublishSupported(target.platform)) return false;
-		// YouTube は今回のスコープ外(isPlatformPublishSupported が既に false を返すため
-		// ここには到達しないが、将来 YouTube 用ゲートを追加する際の分岐点として残す)。
 		if (target.platform === "instagram") return publishGate.igReady;
+		if (target.platform === "youtube") return publishGate.ytReady;
 		return false;
 	};
 
@@ -137,10 +140,9 @@ export function usePublishExtras({
 	};
 
 	// Instagram は R2 アップロード + scheduler へのジョブ登録(`ig_publish_start`、
-	// §6.4)を native(Rust)で実装済み。YouTube は今回のスコープ外(Phase 3 の別作業)
-	// のため未対応のまま — ボタンは studio 版と同じ UI 構造を保つため残しつつ、
-	// `canPublishTarget` が false の間は disabled にし、万一すり抜けて呼ばれても
-	// ここで即エラー表示に倒す防御的ガードを置く。
+	// §6.4)、YouTube は OAuth + resumable upload + publishAt(`youtube_publish_start`、
+	// §6.5)をいずれも native(Rust)で実装済み。`canPublishTarget` が false の間は
+	// disabled にし、万一すり抜けて呼ばれてもここで即エラー表示に倒す防御的ガードを置く。
 
 	/** 1 Output を投稿する。publishAt は post.publishAt(全出力共通)を使う。 */
 	const publishOutput = async (
@@ -164,7 +166,16 @@ export function usePublishExtras({
 				message:
 					target.platform === "instagram"
 						? "Instagram への投稿には設定(scheduler + R2)が必要です。設定画面から入力してください。"
-						: "YouTube への投稿はデスクトップ版では未対応です(今後のアップデートで対応予定)。",
+						: "YouTube への投稿には Google との接続が必要です。設定画面から接続してください。",
+			});
+			return;
+		}
+		// タイトル必須は Rust 側(youtube_publish_start)でも検証されるが、8Mbps の
+		// 投稿用レンダリング(数十秒かかりうる)の前に判明できる失敗はここで先に弾く。
+		if (target.platform === "youtube" && !output.title.trim()) {
+			setPubStatus(output.id, {
+				kind: "error",
+				message: "タイトルは必須です。投稿設定でタイトルを入力してください。",
 			});
 			return;
 		}
@@ -189,10 +200,11 @@ export function usePublishExtras({
 	};
 
 	/**
-	 * プラットフォーム別の投稿。Instagram は R2 アップロード + scheduler 登録
-	 * (`startIgPublish`)を実行し、進捗を `pubStatuses` の message に反映する。
-	 * YouTube は今回のスコープ外(`publishOutput` の `canPublishTarget` チェックで
-	 * 到達しない)。
+	 * プラットフォーム別の投稿。進捗を `pubStatuses` の message に反映する。
+	 * - Instagram: R2 アップロード + scheduler 登録(`startIgPublish`、§6.4)。
+	 * - YouTube: resumable upload + publishAt 予約(`startYoutubePublish`、§6.5)。
+	 *   タイトル/説明は `UploadOutput` のメタデータ(`title`/`description`)を使う。
+	 *   publishAt 指定時は YouTube 側が時刻公開を担う(scheduler は経由しない)。
 	 */
 	const publishTo = async (
 		target: OutputTarget,
@@ -200,11 +212,38 @@ export function usePublishExtras({
 		output: UploadOutput,
 		outputPath: string,
 	): Promise<void> => {
-		if (target.platform !== "instagram") {
-			throw new Error(
-				"YouTube への投稿はデスクトップ版では未対応です(今後のアップデートで対応予定)。",
-			);
+		if (target.platform === "youtube") {
+			await new Promise<void>((resolve, reject) => {
+				startYoutubePublish(
+					{
+						inputPath: outputPath,
+						title: output.title,
+						description: output.description,
+						// IG(scheduler 必須)と異なり、YouTube は publishAt 未指定を
+						// 「即時アップロード(private)」として自然に扱えるため
+						// Date.now() での補完はしない(旧 studio 版と同じ扱い)。
+						...(post.publishAt !== undefined
+							? { publishAt: post.publishAt }
+							: {}),
+					},
+					{
+						onProgress: (progress) => {
+							setPubStatus(output.id, {
+								kind: "publishing",
+								message: `アップロード中 ${Math.round(progress.percent)}%`,
+							});
+						},
+						onDone: () => resolve(),
+						onError: (error) =>
+							reject(new Error(describeYoutubePublishError(error))),
+					},
+				).catch((err: unknown) => {
+					reject(err instanceof Error ? err : new Error(getErrorMessage(err)));
+				});
+			});
+			return;
 		}
+
 		const schedulerUrl = loadSchedulerUrl();
 		const publishAt = post.publishAt ?? Date.now();
 
@@ -310,10 +349,23 @@ export function usePublishExtras({
 						)}
 					</div>
 				)}
-				<div className="shrink-0 rounded-md border border-line bg-elevated/40 px-3 py-2 text-[11px] text-neutral-400">
-					YouTube
-					への投稿はデスクトップ版では未対応です(今後のアップデートで対応予定)。書き出し済みファイルは右の「フォルダへ保存」で取得してください。
-				</div>
+				{!publishGate.ytReady && (
+					<div className="shrink-0 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-300">
+						YouTube
+						への投稿には設定(OAuth クライアント + Google 接続)が必要です。設定画面から接続してください。
+					</div>
+				)}
+				{publishGate.ytReady && (
+					// §12.2: publishAt(予約公開)は監査済み Google Cloud プロジェクトのみ
+					// 有効で、未監査プロジェクトでは private 固定のまま自動公開されない
+					// (API はエラーを返さないため実行時には検知できない)。常時表示の警告と
+					// してユーザーに伝える(docs/desktop-migration-plan.md §6.5・§12.2)。
+					<div className="shrink-0 rounded-md border border-line bg-elevated/40 px-3 py-2 text-[11px] text-neutral-400">
+						YouTube
+						の予約公開(公開日時指定)は監査済みの Google Cloud プロジェクトでのみ機能します。未監査の場合は非公開のままアップロードされるため、YouTube
+						Studio で手動予約してください。
+					</div>
+				)}
 			</>
 		),
 		sidebarActions: (assignSchedule) => (
@@ -365,7 +417,7 @@ export function usePublishExtras({
 				title={
 					anyPublishableOutput
 						? undefined
-						: "投稿可能な出力先がありません(Instagram の設定を確認してください)"
+						: "投稿可能な出力先がありません(Instagram / YouTube の設定を確認してください)"
 				}
 			>
 				すべて投稿
