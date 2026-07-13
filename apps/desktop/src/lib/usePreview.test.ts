@@ -46,6 +46,40 @@ describe("usePreview", () => {
 		});
 	});
 
+	it('usePreview("publish") の ensure() は preview_start に quality:"publish" を渡す', async () => {
+		// 投稿フロー用: フックインスタンス全体が本書き出し品質(8Mbps・publish-cache)で
+		// 動くこと。既定(引数なし)の呼び出しが quality キーを含まないことは上のテストの
+		// toHaveBeenCalledWith(完全一致)で担保済み。
+		const { result } = renderHook(() => usePreview("publish"));
+
+		let pending!: Promise<string>;
+		act(() => {
+			pending = result.current.ensure("out-1", "/in.mp4", SPEC, "sig-1");
+		});
+
+		await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+		expect(mockInvoke).toHaveBeenCalledWith("preview_start", {
+			jobId: "job-1",
+			input: "/in.mp4",
+			spec: SPEC,
+			quality: "publish",
+		});
+
+		const jobId = invokeJobId(0);
+		act(() => {
+			emitMockEvent(`preview://done/${jobId}`, {
+				path: "/publish-cache/out.mp4",
+			});
+		});
+
+		await expect(pending).resolves.toBe("/publish-cache/out.mp4");
+		expect(result.current.states.get("out-1")).toMatchObject({
+			rendering: false,
+			outputPath: "/publish-cache/out.mp4",
+			sig: "sig-1",
+		});
+	});
+
 	it("同一 key への重複 ensure() 呼び出しは同一 tick 内でも同じ Promise に合流する(preview_start は 1 回だけ)", async () => {
 		// P1 バグ修正の固定テスト: 合流判定は以前 `pending && cached?.rendering` だった。
 		// cached は state の ref ミラーで render commit 後にしか更新されないため、

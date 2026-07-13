@@ -1,5 +1,6 @@
-//! `preview_start` コマンド: `media_core::render_preview` を非同期に実行し、
-//! 進捗・完了を Tauri イベントで通知する。
+//! `preview_start` コマンド: `media_core::render_preview`(または `quality: "publish"`
+//! 指定時は `media_core::render_publish`)を非同期に実行し、進捗・完了を Tauri
+//! イベントで通知する。
 //!
 //! [`reframe`](crate::commands::reframe) モジュールと同じパターンを踏襲する
 //! (`JobsState` 共有・`spawn_blocking`・イベント名は `reframe://` を `preview://` に
@@ -54,10 +55,13 @@
 //! // 3. 購読が揃ってからジョブを開始する。done の payload は生成(またはキャッシュヒットした)
 //! //    プレビューファイルの絶対パス。renderer は <video>/<img> の src にそのまま使えないので
 //! //    convertFileSrc を通す。
+//! //    quality は省略可("preview" 既定)。"publish" を渡すと本書き出しと同一品質
+//! //    (8Mbps)で publish-cache へ生成する(IG 投稿用 — §モジュール冒頭)。
 //! await invoke("preview_start", {
 //!   jobId,
 //!   input: "/path/to/input.mp4",
 //!   spec, // EditSpec
+//!   quality: "publish", // 省略時 "preview"
 //! });
 //!
 //! // 4. 中断したい場合は reframe_cancel を使う(専用コマンドはない。モジュール冒頭参照)。
@@ -66,25 +70,55 @@
 //!
 //! ## キャッシュディレクトリ
 //!
-//! `cache_dir` は Tauri の `app_data_dir()` 配下の `preview-cache` サブディレクトリを
-//! 使う(`AppHandle` から `app.path().app_data_dir()` で取得する。プラットフォーム別の
-//! 実際のパスは Tauri のドキュメント参照)。取得に失敗した場合(通常は環境不備)は
-//! ジョブを開始せず、`preview_start` 自体がエラーを返す(`run_job` に到達する前に弾く)。
+//! `cache_dir` は Tauri の `app_data_dir()` 配下のサブディレクトリを使う
+//! (`AppHandle` から `app.path().app_data_dir()` で取得する。プラットフォーム別の
+//! 実際のパスは Tauri のドキュメント参照)。品質ごとに分離する:
+//! `quality: "preview"`(既定)は `preview-cache`、`quality: "publish"` は
+//! `publish-cache`(2Mbps のプレビュー生成物が誤って投稿されない・その逆も起きない
+//! 構造的分離。`media_core::preview` モジュール冒頭コメント参照)。取得に失敗した
+//! 場合(通常は環境不備)はジョブを開始せず、`preview_start` 自体がエラーを返す
+//! (`run_job` に到達する前に弾く)。
 //!
-//! キャッシュの削除ポリシーは未定(`media_core::preview` モジュール冒頭コメントの
-//! TODO を参照。本コマンド層は掃除を一切行わない)。
+//! キャッシュの削除ポリシー(容量上限・古い順削除)は media_core 側が品質ごとに
+//! 独立して適用する(本コマンド層は掃除を一切行わない)。
 
 use std::path::{Path, PathBuf};
 
 use media_core::spec::EditSpec;
 use media_core::{preview, CancelToken};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use super::reframe::{run_media_job, JobId, JobsState};
 
-/// キャッシュディレクトリ名(`app_data_dir()` からの相対)。
+/// プレビュー品質のキャッシュディレクトリ名(`app_data_dir()` からの相対)。
 const CACHE_DIR_NAME: &str = "preview-cache";
+
+/// 投稿品質([`RenderQuality::Publish`])のキャッシュディレクトリ名
+/// (`app_data_dir()` からの相対。[`CACHE_DIR_NAME`] と分離する — モジュール冒頭参照)。
+const PUBLISH_CACHE_DIR_NAME: &str = "publish-cache";
+
+/// レンダリング品質。renderer から `quality` 引数として渡される
+/// (省略時は [`RenderQuality::Preview`])。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderQuality {
+	/// 低ビットレート(2Mbps)・`preview-cache`。編集中の目視確認用。
+	#[default]
+	Preview,
+	/// 本書き出しと同一品質(8Mbps)・`publish-cache`。IG 等への投稿用。
+	Publish,
+}
+
+impl RenderQuality {
+	/// この品質のキャッシュディレクトリ名(`app_data_dir()` からの相対)。
+	fn cache_dir_name(self) -> &'static str {
+		match self {
+			RenderQuality::Preview => CACHE_DIR_NAME,
+			RenderQuality::Publish => PUBLISH_CACHE_DIR_NAME,
+		}
+	}
+}
 
 /// `preview://done/{jobId}` イベントのペイロード。
 #[derive(Debug, Clone, Serialize)]
@@ -108,19 +142,21 @@ fn error_event_name(job_id: &str) -> String {
 	format!("preview://error/{job_id}")
 }
 
-/// `app` の `app_data_dir()` 配下にプレビューキャッシュディレクトリのパスを組み立てる。
-/// ディレクトリの作成自体は `media_core::preview::render_preview` が
-/// `fs::create_dir_all` で行う(ここではパスの計算のみ)。
-fn resolve_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
+/// `app` の `app_data_dir()` 配下に `quality` に応じたキャッシュディレクトリのパスを
+/// 組み立てる。ディレクトリの作成自体は media_core 側(`render_preview`/`render_publish`)
+/// が `fs::create_dir_all` で行う(ここではパスの計算のみ)。
+fn resolve_cache_dir(app: &AppHandle, quality: RenderQuality) -> Result<PathBuf, String> {
 	let base = app
 		.path()
 		.app_data_dir()
 		.map_err(|err| format!("アプリデータディレクトリの取得に失敗しました: {err}"))?;
-	Ok(base.join(CACHE_DIR_NAME))
+	Ok(base.join(quality.cache_dir_name()))
 }
 
-/// `input` を `spec` の指定形状へ低ビットレートでプレビュー用に再フレーミングする
-/// ジョブを開始する(`reframe_start` と同じ [`JobsState`] を共有する)。
+/// `input` を `spec` の指定形状へ再フレーミングするジョブを開始する
+/// (`reframe_start` と同じ [`JobsState`] を共有する)。品質は `quality` で選ぶ
+/// (省略時はプレビュー品質 2Mbps。`"publish"` で本書き出しと同一品質 8Mbps —
+/// モジュール冒頭コメント参照)。
 ///
 /// `job_id` は renderer 側が採番して渡す(`reframe.rs` 冒頭コメント「jobId 採番を
 /// フロントエンドへ移した理由」参照)。ジョブ本体はバックグラウンドスレッドで実行され、
@@ -134,8 +170,10 @@ pub async fn preview_start(
 	job_id: JobId,
 	input: String,
 	spec: EditSpec,
+	quality: Option<RenderQuality>,
 ) -> Result<(), String> {
-	let cache_dir = resolve_cache_dir(&app)?;
+	let quality = quality.unwrap_or_default();
+	let cache_dir = resolve_cache_dir(&app, quality)?;
 
 	let token = CancelToken::new();
 	jobs.register(job_id.clone(), token);
@@ -151,30 +189,44 @@ pub async fn preview_start(
 			&input_path,
 			&cache_dir,
 			spec,
+			quality,
 		);
 	});
 
 	Ok(())
 }
 
-/// ジョブ本体(ブロッキングスレッド上で実行)。`media_core::render_preview` を呼び、
+/// ジョブ本体(ブロッキングスレッド上で実行)。`quality` に応じて
+/// `media_core::render_preview` / `media_core::render_publish` を呼び、
 /// 完了イベントを emit してからジョブを State から削除する
 /// (`reframe.rs` の `run_job` と対応する構造)。
 ///
 /// **P1-5: パニック時の State リーク対策**(`reframe.rs` の `run_job` と同型)。
 /// 共通の骨格(トークン取得・`JobGuard`・進捗 emit・`catch_unwind`・done/error emit)は
 /// [`run_media_job`] に集約している(P2: `reframe.rs::run_job` との重複解消。詳細は
-/// `run_media_job` 冒頭コメント参照)。ここでは `render_preview` 固有の引数組み立てと、
+/// `run_media_job` 冒頭コメント参照)。ここでは品質別レンダリング固有の引数組み立てと、
 /// 成功時の done ペイロード([`PreviewDone`])への変換のみを行う。
-fn run_job(app: &AppHandle, job_id: &str, input: &Path, cache_dir: &Path, spec: EditSpec) {
+fn run_job(
+	app: &AppHandle,
+	job_id: &str,
+	input: &Path,
+	cache_dir: &Path,
+	spec: EditSpec,
+	quality: RenderQuality,
+) {
 	run_media_job(
 		app,
 		job_id,
 		progress_event_name(job_id),
 		done_event_name(job_id),
 		error_event_name(job_id),
-		move |token, on_progress| {
-			preview::render_preview(input, &spec, cache_dir, token, on_progress)
+		move |token, on_progress| match quality {
+			RenderQuality::Preview => {
+				preview::render_preview(input, &spec, cache_dir, token, on_progress)
+			}
+			RenderQuality::Publish => {
+				preview::render_publish(input, &spec, cache_dir, token, on_progress)
+			}
 		},
 		|path| PreviewDone {
 			path: path.to_string_lossy().into_owned(),
@@ -202,6 +254,39 @@ mod tests {
 		// `resolve_cache_dir` は `AppHandle` が必要なため直接はテストできないが、
 		// 定数自体はここで固定できる。
 		assert_eq!(CACHE_DIR_NAME, "preview-cache");
+		assert_eq!(PUBLISH_CACHE_DIR_NAME, "publish-cache");
+	}
+
+	#[test]
+	fn render_quality_maps_to_separate_cache_dirs() {
+		// プレビュー品質と投稿品質でキャッシュディレクトリが分離されていること
+		// (2Mbps 生成物と 8Mbps 生成物の取り違えが構造的に起きないこと)の固定。
+		assert_eq!(RenderQuality::Preview.cache_dir_name(), "preview-cache");
+		assert_eq!(RenderQuality::Publish.cache_dir_name(), "publish-cache");
+		assert_ne!(
+			RenderQuality::Preview.cache_dir_name(),
+			RenderQuality::Publish.cache_dir_name()
+		);
+	}
+
+	#[test]
+	fn render_quality_defaults_to_preview() {
+		// `quality` 省略時(既存の renderer 呼び出し)は従来どおりプレビュー品質。
+		assert_eq!(RenderQuality::default(), RenderQuality::Preview);
+	}
+
+	#[test]
+	fn render_quality_deserializes_from_lowercase_strings() {
+		// renderer からは "preview" / "publish" の小文字文字列で渡される
+		// (`serde(rename_all = "lowercase")` の固定)。
+		let preview: RenderQuality =
+			serde_json::from_str("\"preview\"").expect("deserialize preview");
+		let publish: RenderQuality =
+			serde_json::from_str("\"publish\"").expect("deserialize publish");
+		assert_eq!(preview, RenderQuality::Preview);
+		assert_eq!(publish, RenderQuality::Publish);
+		// 未知の値はエラーになる(黙って Preview に落ちない)。
+		assert!(serde_json::from_str::<RenderQuality>("\"high\"").is_err());
 	}
 
 	// --- JobsState 経由のジョブ登録/共有(reframe.rs 側の JobsState テストと重複させず、

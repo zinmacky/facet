@@ -1,11 +1,13 @@
 import type { EditSpec } from "@facet/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getErrorMessage } from "./getErrorMessage";
-import { cancelJob, startPreview } from "./tauri";
+import { cancelJob, type RenderQuality, startPreview } from "./tauri";
 
 /**
- * `preview_start`(低ビットレート・spec ハッシュキャッシュ、`app_data_dir/preview-cache` へ
- * 生成)による 1 プレビュー対象(clip や output)ぶんの生成状態。
+ * `preview_start`(spec ハッシュキャッシュ。既定は低ビットレートで
+ * `app_data_dir/preview-cache` へ、`quality: "publish"` では本書き出し品質で
+ * `app_data_dir/publish-cache` へ生成)による 1 レンダリング対象(clip や output)
+ * ぶんの生成状態。
  * ダウンロード/保存 UI は持たない(結果はアプリキャッシュ内ファイルの絶対パスを返すのみ)。
  */
 export interface PreviewState {
@@ -43,11 +45,16 @@ export interface UsePreviewResult {
 }
 
 /**
- * `preview_start` によるプレビュー生成を key(clip.id や output.id)単位で管理する
- * 共通フック。UploadScreen の「最終プレビュー」・ExportScreen の「クロップ内容プレビュー」の
- * 双方から使う(実書き出し(`reframe_start`)は別軸で各モーダルが個別に扱う)。
+ * `preview_start` によるキャッシュ付きレンダリングを key(clip.id や output.id)単位で
+ * 管理する共通フック。UploadScreen の「最終プレビュー」・ExportScreen の
+ * 「クロップ内容プレビュー」の双方から使う(実書き出し(`reframe_start`)は別軸で
+ * 各モーダルが個別に扱う)。
+ *
+ * `quality` を省略するとプレビュー品質(2Mbps)。`"publish"` を渡すとフック
+ * インスタンス全体が本書き出し品質(8Mbps・`publish-cache`)で動く
+ * (UploadScreen の投稿フローが使う。`lib/tauri.ts` の `RenderQuality` 参照)。
  */
-export function usePreview(): UsePreviewResult {
+export function usePreview(quality?: RenderQuality): UsePreviewResult {
 	const [states, setStates] = useState<Map<string, PreviewState>>(new Map());
 	const statesRef = useRef(states);
 	statesRef.current = states;
@@ -91,29 +98,34 @@ export function usePreview(): UsePreviewResult {
 				// 後に実行されることがある。その場合に既に確定した状態(jobId 等)で
 				// 上書きしないためのガード。
 				let settled = false;
-				startPreview(input, spec, {
-					onDone: (path) => {
-						settled = true;
-						handle?.unsubscribe();
-						unsubsRef.current.delete(key);
-						pendingRef.current.delete(key);
-						patch(key, {
-							rendering: false,
-							outputPath: path,
-							sig,
-							error: undefined,
-						});
-						resolve(path);
+				startPreview(
+					input,
+					spec,
+					{
+						onDone: (path) => {
+							settled = true;
+							handle?.unsubscribe();
+							unsubsRef.current.delete(key);
+							pendingRef.current.delete(key);
+							patch(key, {
+								rendering: false,
+								outputPath: path,
+								sig,
+								error: undefined,
+							});
+							resolve(path);
+						},
+						onError: (message) => {
+							settled = true;
+							handle?.unsubscribe();
+							unsubsRef.current.delete(key);
+							pendingRef.current.delete(key);
+							patch(key, { rendering: false, error: message });
+							reject(new Error(message));
+						},
 					},
-					onError: (message) => {
-						settled = true;
-						handle?.unsubscribe();
-						unsubsRef.current.delete(key);
-						pendingRef.current.delete(key);
-						patch(key, { rendering: false, error: message });
-						reject(new Error(message));
-					},
-				})
+					quality,
+				)
 					.then((h) => {
 						handle = h;
 						if (settled) return;
@@ -131,7 +143,7 @@ export function usePreview(): UsePreviewResult {
 			pendingRef.current.set(key, promise);
 			return promise;
 		},
-		[patch],
+		[patch, quality],
 	);
 
 	const trigger = useCallback(

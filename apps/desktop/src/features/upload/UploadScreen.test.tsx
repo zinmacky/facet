@@ -148,6 +148,10 @@ describe("UploadScreen: outputSig は clip の trim/crop/aspect を反映する"
 		const callIndex = mockInvoke.mock.calls.findIndex(
 			([cmd]) => cmd === "preview_start",
 		);
+		// 目視確認用のプレビュー生成は従来どおり低ビットレート(quality 指定なし =
+		// preview 品質)。publish 品質(8Mbps)は投稿フロー専用
+		// (§UploadScreen.igPublish.test.tsx)。
+		expect(mockInvoke.mock.calls[callIndex]?.[1]).not.toHaveProperty("quality");
 		const jobId = invokeJobId(callIndex);
 		emitMockEvent(`preview://done/${jobId}`, { path: "/cache/out.mp4" });
 

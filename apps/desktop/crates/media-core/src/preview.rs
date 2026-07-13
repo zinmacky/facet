@@ -1,4 +1,17 @@
-//! プレビュー仮エンコード + spec ハッシュキャッシュ。
+//! プレビュー/投稿用レンダリング + spec ハッシュキャッシュ。
+//!
+//! 本モジュールはキャッシュ付きレンダリングを 2 つの品質で提供する:
+//! - [`render_preview`]: 低ビットレート([`PREVIEW_BITRATE`] = 2Mbps)。編集中の
+//!   目視確認用(高速)。
+//! - [`render_publish`]: 本書き出しと同一ビットレート([`PUBLISH_BITRATE`] =
+//!   `encode::DEFAULT_BITRATE` = 8Mbps)。IG 等への投稿用 — 投稿される実体が
+//!   プレビュー品質にならないようにする(呼び出し側はキャッシュディレクトリも
+//!   プレビューと分離すること。`cache_key` がビットレートをキー材料に含むため
+//!   同一ディレクトリでも衝突はしないが、ディレクトリ分離により容量上限
+//!   ([`preview_cache_max_bytes`]/[`publish_cache_max_bytes`])も独立に管理できる)。
+//!
+//! 両者は同一の実装([`render_cached`])を共有し、ビットレートとキャッシュ上限のみが
+//! 異なる。
 //!
 //! 移植元(真実の源): `apps/studio/server/src/routes/preview.ts`。TS 版は
 //! `{ spec, input: resolve(input) }` を JSON 化して sha1 の先頭 16 桁を
@@ -40,6 +53,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 
 use crate::cancel::CancelToken;
+use crate::encode;
 use crate::error::Result;
 use crate::fit;
 use crate::pipeline::{self, EncoderSelection, Progress, ReframeOptions};
@@ -48,6 +62,11 @@ use crate::spec::EditSpec;
 /// プレビュー用ビットレート。TS 版 `preview.ts` の `bitrate: "2M"` と同一
 /// (`encode::DEFAULT_BITRATE`(8Mbps)より低く、生成を高速化する)。
 pub const PREVIEW_BITRATE: usize = 2_000_000;
+
+/// 投稿用レンダリングのビットレート。本書き出し(`reframe_start` 経由の
+/// `encode::DEFAULT_BITRATE`)と同一品質にする — 投稿される動画がプレビュー品質
+/// (2Mbps)に落ちないようにするための定数(モジュール冒頭コメント参照)。
+pub const PUBLISH_BITRATE: usize = encode::DEFAULT_BITRATE;
 
 /// キャッシュキー材料のフィールド区切りに使うバイト。パス文字列や JSON 中に
 /// まず出現しない制御文字(U+0001, ASCII SOH)を使い、`"a" + "1"` と
@@ -59,29 +78,33 @@ const FIELD_SEPARATOR: char = '\u{1}';
 /// 先頭 128bit)を採用する。
 const KEY_HEX_LEN: usize = 32;
 
-/// `input_path` + `input_size` + `input_mtime` + `spec` からプレビューキャッシュの
-/// キーを作る(ファイル名にそのまま使える 16 進数文字列。拡張子は含まない)。
+/// `input_path` + `input_size` + `input_mtime` + `spec` + `bit_rate` からレンダリング
+/// キャッシュのキーを作る(ファイル名にそのまま使える 16 進数文字列。拡張子は含まない)。
 ///
 /// 決定性の要件:
-/// - 同一の引数(`input_path`/`input_size`/`input_mtime`/`spec` がすべて等しい)を
-///   何度呼んでも同じキーを返す(プロセスを跨いでも安定 — sha256 は乱数シードを
-///   持たないアルゴリズムなので `std::collections::hash_map::DefaultHasher`
+/// - 同一の引数(`input_path`/`input_size`/`input_mtime`/`spec`/`bit_rate` がすべて
+///   等しい)を何度呼んでも同じキーを返す(プロセスを跨いでも安定 — sha256 は乱数
+///   シードを持たないアルゴリズムなので `std::collections::hash_map::DefaultHasher`
 ///   (SipHash、プロセスごとにシードが変わりうる)とは異なりこれが保証される)。
 /// - `spec`(preset/trim/crop のいずれか)が変われば別のキーになる。
 /// - `input_size`/`input_mtime` が変われば(パスが同じでも)別のキーになる
 ///   (同一パスへの上書きを検知するため。モジュール冒頭コメント参照)。
+/// - `bit_rate` が変われば別のキーになる(プレビュー品質 2Mbps と投稿品質 8Mbps の
+///   生成物はディレクトリ分離に加えキー自体でも区別する — 万一同一ディレクトリを
+///   指定されても品質の取り違えが構造的に起きないようにする)。
 ///
 /// `input_path` は呼び出し側で解決済み(正規化・絶対パス化された)ものを渡す想定。
 /// 本関数はパス解決(`fs::canonicalize` 等)を行わない — 相対パスと絶対パスで別の
 /// パスとして扱われるべきかは呼び出し側の責務とする(TS 版は `resolve(input)` を
-/// 呼び出し側の関数内で行っている。`render_preview` はここで `input` をそのまま
+/// 呼び出し側の関数内で行っている。`render_cached` はここで `input` をそのまま
 /// 材料に使うので、呼び出し側が同じファイルに対して常に同じ表記のパスを渡す
 /// 必要がある)。
-pub fn preview_cache_key(
+pub fn render_cache_key(
 	input_path: &Path,
 	input_size: u64,
 	input_mtime: SystemTime,
 	spec: &EditSpec,
+	bit_rate: usize,
 ) -> String {
 	// spec のシリアライズはこの EditSpec の実装では実質失敗しない(f64 フィールドは
 	// すべて正当な JSON からのデシリアライズ由来で有限値のみを持つ)が、`unwrap`/
@@ -102,11 +125,12 @@ pub fn preview_cache_key(
 	let mut material = String::new();
 	let _ = write!(
 		material,
-		"{}{sep}{}{sep}{}{sep}{}",
+		"{}{sep}{}{sep}{}{sep}{}{sep}{}",
 		input_path.to_string_lossy(),
 		input_size,
 		mtime_nanos,
 		spec_repr,
+		bit_rate,
 		sep = FIELD_SEPARATOR,
 	);
 
@@ -124,13 +148,15 @@ fn cache_file_path(cache_dir: &Path, key: &str) -> PathBuf {
 	cache_dir.join(format!("{key}.mp4"))
 }
 
-/// プレビューキャッシュディレクトリ(`cache_dir`)の合計サイズ上限の既定値(2 GiB)。
+/// レンダリングキャッシュディレクトリ(`cache_dir`)の合計サイズ上限の既定値(2 GiB)。
+/// プレビューキャッシュ・投稿用キャッシュそれぞれに独立に適用される
+/// (ディレクトリが別なので合算はされない)。
 ///
 /// ユーザー承認済みの初期方針: 合計 2GB 上限・mtime の古い順削除
 /// (モジュール冒頭コメント参照)。
 pub const DEFAULT_PREVIEW_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// [`DEFAULT_PREVIEW_CACHE_MAX_BYTES`] を上書きする環境変数名。
+/// プレビューキャッシュの [`DEFAULT_PREVIEW_CACHE_MAX_BYTES`] を上書きする環境変数名。
 ///
 /// `concurrency::MAX_CONCURRENT_ENCODES_ENV` と同じ流儀(未設定・数値としてパース
 /// 不能・0 以下のいずれの場合も既定値にフォールバックする)。`Facet_` 独自設定である
@@ -138,16 +164,29 @@ pub const DEFAULT_PREVIEW_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// 付けている。
 pub const PREVIEW_CACHE_MAX_BYTES_ENV: &str = "FACET_PREVIEW_CACHE_MAX_BYTES";
 
-/// 環境変数 [`PREVIEW_CACHE_MAX_BYTES_ENV`] からキャッシュ上限バイト数を読む。
+/// 投稿用キャッシュの上限を上書きする環境変数名(プレビュー側と独立)。
+pub const PUBLISH_CACHE_MAX_BYTES_ENV: &str = "FACET_PUBLISH_CACHE_MAX_BYTES";
+
+/// `env_name` の環境変数からキャッシュ上限バイト数を読む。
 ///
 /// 未設定・数値としてパース不能・0 のいずれの場合も
 /// [`DEFAULT_PREVIEW_CACHE_MAX_BYTES`] にフォールバックする。
-pub fn preview_cache_max_bytes() -> u64 {
-	env::var(PREVIEW_CACHE_MAX_BYTES_ENV)
+fn cache_max_bytes_from_env(env_name: &str) -> u64 {
+	env::var(env_name)
 		.ok()
 		.and_then(|raw| raw.trim().parse::<u64>().ok())
 		.filter(|&max| max > 0)
 		.unwrap_or(DEFAULT_PREVIEW_CACHE_MAX_BYTES)
+}
+
+/// プレビューキャッシュの上限バイト数([`PREVIEW_CACHE_MAX_BYTES_ENV`] で上書き可)。
+pub fn preview_cache_max_bytes() -> u64 {
+	cache_max_bytes_from_env(PREVIEW_CACHE_MAX_BYTES_ENV)
+}
+
+/// 投稿用キャッシュの上限バイト数([`PUBLISH_CACHE_MAX_BYTES_ENV`] で上書き可)。
+pub fn publish_cache_max_bytes() -> u64 {
+	cache_max_bytes_from_env(PUBLISH_CACHE_MAX_BYTES_ENV)
 }
 
 /// `path` がキャッシュ掃除の対象となる「完成済みの」プレビューファイルかどうかを
@@ -257,21 +296,8 @@ fn evict_if_over_limit(cache_dir: &Path, just_written: &Path, max_bytes: u64) {
 	}
 }
 
-/// `spec` に従って `input` を低ビットレートでプレビュー用に再フレーミングし、
-/// `cache_dir` 配下にキャッシュする。
-///
-/// - キャッシュヒット(同一 `input`(サイズ/mtime 含む)+ 同一 `spec` で既に生成済み)
-///   の場合は再エンコードせず既存ファイルのパスを即座に返す。
-/// - キャッシュミスの場合は [`pipeline::reframe`] を [`PREVIEW_BITRATE`] で実行し、
-///   `<cache_dir>/<key>.mp4` に書き出す。書き込みは `reframe` 自身が行う
-///   一時ファイル→リネーム方式(`pipeline.rs` 冒頭コメント参照)にそのまま乗るため、
-///   本関数側で追加の原子性担保は不要(中断・失敗時に不完全な mp4 が
-///   `cache_dir` に残ることはない)。
-/// - エンコーダは [`EncoderSelection::Auto`](プラットフォーム別候補、
-///   `encoder_select` 参照)を使う(プレビュー用途でも本エンコードと同じ選択規則)。
-/// - キャッシュミスで新規に書き出した場合のみ、書き込み成功後に `cache_dir` の掃除
-///   ([`evict_if_over_limit`])を行う(モジュール冒頭コメント参照)。キャッシュヒット時
-///   (既に存在するファイルをそのまま返す経路)は掃除を走らせない。
+/// `spec` に従って `input` を低ビットレート([`PREVIEW_BITRATE`])でプレビュー用に
+/// 再フレーミングし、`cache_dir` 配下にキャッシュする(実体は [`render_cached`])。
 pub fn render_preview(
 	input: &Path,
 	spec: &EditSpec,
@@ -279,11 +305,73 @@ pub fn render_preview(
 	cancel: &CancelToken,
 	on_progress: &dyn Fn(Progress),
 ) -> Result<PathBuf> {
+	render_cached(
+		input,
+		spec,
+		cache_dir,
+		PREVIEW_BITRATE,
+		preview_cache_max_bytes(),
+		cancel,
+		on_progress,
+	)
+}
+
+/// `spec` に従って `input` を本書き出し品質([`PUBLISH_BITRATE`] =
+/// `encode::DEFAULT_BITRATE`)で投稿用に再フレーミングし、`cache_dir` 配下に
+/// キャッシュする(実体は [`render_cached`])。
+///
+/// `cache_dir` にはプレビューキャッシュとは**別の**ディレクトリを渡すこと
+/// (取り違え防止。モジュール冒頭コメント参照。呼び出し側の実例:
+/// `src-tauri/src/commands/preview.rs` の `publish-cache`)。
+pub fn render_publish(
+	input: &Path,
+	spec: &EditSpec,
+	cache_dir: &Path,
+	cancel: &CancelToken,
+	on_progress: &dyn Fn(Progress),
+) -> Result<PathBuf> {
+	render_cached(
+		input,
+		spec,
+		cache_dir,
+		PUBLISH_BITRATE,
+		publish_cache_max_bytes(),
+		cancel,
+		on_progress,
+	)
+}
+
+/// `spec` に従って `input` を `bit_rate` で再フレーミングし、`cache_dir` 配下に
+/// キャッシュする([`render_preview`]/[`render_publish`] の共通実体)。
+///
+/// - キャッシュヒット(同一 `input`(サイズ/mtime 含む)+ 同一 `spec` + 同一
+///   `bit_rate` で既に生成済み)の場合は再エンコードせず既存ファイルのパスを
+///   即座に返す。
+/// - キャッシュミスの場合は [`pipeline::reframe`] を `bit_rate` で実行し、
+///   `<cache_dir>/<key>.mp4` に書き出す。書き込みは `reframe` 自身が行う
+///   一時ファイル→リネーム方式(`pipeline.rs` 冒頭コメント参照)にそのまま乗るため、
+///   本関数側で追加の原子性担保は不要(中断・失敗時に不完全な mp4 が
+///   `cache_dir` に残ることはない)。
+/// - エンコーダは [`EncoderSelection::Auto`](プラットフォーム別候補、
+///   `encoder_select` 参照)を使う(プレビュー用途でも本エンコードと同じ選択規則)。
+/// - キャッシュミスで新規に書き出した場合のみ、書き込み成功後に `cache_dir` の掃除
+///   ([`evict_if_over_limit`]、上限は `max_cache_bytes`)を行う(モジュール冒頭
+///   コメント参照)。キャッシュヒット時(既に存在するファイルをそのまま返す経路)は
+///   掃除を走らせない。
+fn render_cached(
+	input: &Path,
+	spec: &EditSpec,
+	cache_dir: &Path,
+	bit_rate: usize,
+	max_cache_bytes: u64,
+	cancel: &CancelToken,
+	on_progress: &dyn Fn(Progress),
+) -> Result<PathBuf> {
 	let metadata = fs::metadata(input)?;
 	let input_size = metadata.len();
 	let input_mtime = metadata.modified()?;
 
-	let key = preview_cache_key(input, input_size, input_mtime, spec);
+	let key = render_cache_key(input, input_size, input_mtime, spec, bit_rate);
 	fs::create_dir_all(cache_dir)?;
 	let output_path = cache_file_path(cache_dir, &key);
 
@@ -301,10 +389,10 @@ pub fn render_preview(
 		source: spec.source,
 		trim: spec.trim,
 		encoder: EncoderSelection::Auto,
-		bit_rate: PREVIEW_BITRATE,
+		bit_rate,
 		cancel,
 		on_progress,
-		// プレビューは既に `cache_dir` 内で完結しており、`output_path` 自体が
+		// 生成物は既に `cache_dir` 内で完結しており、`output_path` 自体が
 		// アプリ管理のキャッシュディレクトリ配下(ユーザーから見える書き出し先では
 		// ない)。そのため一時ファイルも常に `output_path` と同じディレクトリ
 		// (= cache_dir)に書く従来挙動でよく、`staging_dir` は使わない
@@ -314,7 +402,7 @@ pub fn render_preview(
 
 	pipeline::reframe(input, &output_path, options)?;
 
-	evict_if_over_limit(cache_dir, &output_path, preview_cache_max_bytes());
+	evict_if_over_limit(cache_dir, &output_path, max_cache_bytes);
 
 	Ok(output_path)
 }
@@ -361,8 +449,8 @@ mod tests {
 		let path = Path::new("/tmp/input.mp4");
 		let mtime = epoch_plus(1_700_000_000);
 
-		let key1 = preview_cache_key(path, 12_345, mtime, &spec);
-		let key2 = preview_cache_key(path, 12_345, mtime, &spec);
+		let key1 = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
+		let key2 = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
 
 		assert_eq!(key1, key2);
 		assert_eq!(key1.len(), KEY_HEX_LEN);
@@ -373,11 +461,11 @@ mod tests {
 		let path = Path::new("/tmp/input.mp4");
 		let mtime = epoch_plus(1_700_000_000);
 		let mut spec = sample_spec();
-		let base_key = preview_cache_key(path, 12_345, mtime, &spec);
+		let base_key = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
 
 		spec.preset.width = 1350;
 		spec.preset.height = 1080;
-		let changed_key = preview_cache_key(path, 12_345, mtime, &spec);
+		let changed_key = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
 
 		assert_ne!(base_key, changed_key);
 	}
@@ -387,10 +475,10 @@ mod tests {
 		let path = Path::new("/tmp/input.mp4");
 		let mtime = epoch_plus(1_700_000_000);
 		let mut spec = sample_spec();
-		let base_key = preview_cache_key(path, 12_345, mtime, &spec);
+		let base_key = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
 
 		spec.preset.fit = FitMode::Crop;
-		let changed_key = preview_cache_key(path, 12_345, mtime, &spec);
+		let changed_key = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
 
 		assert_ne!(base_key, changed_key);
 	}
@@ -400,13 +488,13 @@ mod tests {
 		let path = Path::new("/tmp/input.mp4");
 		let mtime = epoch_plus(1_700_000_000);
 		let mut spec = sample_spec();
-		let base_key = preview_cache_key(path, 12_345, mtime, &spec);
+		let base_key = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
 
 		spec.trim = Some(Trim {
 			start: 2.0,
 			end: 6.0,
 		});
-		let changed_key = preview_cache_key(path, 12_345, mtime, &spec);
+		let changed_key = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
 
 		assert_ne!(base_key, changed_key);
 	}
@@ -416,10 +504,10 @@ mod tests {
 		let path = Path::new("/tmp/input.mp4");
 		let mtime = epoch_plus(1_700_000_000);
 		let mut spec = sample_spec();
-		let base_key = preview_cache_key(path, 12_345, mtime, &spec);
+		let base_key = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
 
 		spec.trim = None;
-		let changed_key = preview_cache_key(path, 12_345, mtime, &spec);
+		let changed_key = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
 
 		assert_ne!(base_key, changed_key);
 	}
@@ -429,7 +517,7 @@ mod tests {
 		let path = Path::new("/tmp/input.mp4");
 		let mtime = epoch_plus(1_700_000_000);
 		let mut spec = sample_spec();
-		let base_key = preview_cache_key(path, 12_345, mtime, &spec);
+		let base_key = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
 
 		spec.crop = Some(CropRect {
 			x: 0.2,
@@ -437,7 +525,7 @@ mod tests {
 			width: 0.6,
 			height: 1.0,
 		});
-		let changed_key = preview_cache_key(path, 12_345, mtime, &spec);
+		let changed_key = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
 
 		assert_ne!(base_key, changed_key);
 	}
@@ -447,8 +535,20 @@ mod tests {
 		let spec = sample_spec();
 		let path = Path::new("/tmp/input.mp4");
 
-		let key1 = preview_cache_key(path, 12_345, epoch_plus(1_700_000_000), &spec);
-		let key2 = preview_cache_key(path, 12_345, epoch_plus(1_700_000_001), &spec);
+		let key1 = render_cache_key(
+			path,
+			12_345,
+			epoch_plus(1_700_000_000),
+			&spec,
+			PREVIEW_BITRATE,
+		);
+		let key2 = render_cache_key(
+			path,
+			12_345,
+			epoch_plus(1_700_000_001),
+			&spec,
+			PREVIEW_BITRATE,
+		);
 
 		assert_ne!(key1, key2);
 	}
@@ -459,8 +559,8 @@ mod tests {
 		let path = Path::new("/tmp/input.mp4");
 		let mtime = epoch_plus(1_700_000_000);
 
-		let key1 = preview_cache_key(path, 12_345, mtime, &spec);
-		let key2 = preview_cache_key(path, 12_346, mtime, &spec);
+		let key1 = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
+		let key2 = render_cache_key(path, 12_346, mtime, &spec, PREVIEW_BITRATE);
 
 		assert_ne!(key1, key2);
 	}
@@ -470,10 +570,46 @@ mod tests {
 		let spec = sample_spec();
 		let mtime = epoch_plus(1_700_000_000);
 
-		let key1 = preview_cache_key(Path::new("/tmp/a.mp4"), 12_345, mtime, &spec);
-		let key2 = preview_cache_key(Path::new("/tmp/b.mp4"), 12_345, mtime, &spec);
+		let key1 = render_cache_key(
+			Path::new("/tmp/a.mp4"),
+			12_345,
+			mtime,
+			&spec,
+			PREVIEW_BITRATE,
+		);
+		let key2 = render_cache_key(
+			Path::new("/tmp/b.mp4"),
+			12_345,
+			mtime,
+			&spec,
+			PREVIEW_BITRATE,
+		);
 
 		assert_ne!(key1, key2);
+	}
+
+	#[test]
+	fn bit_rate_change_produces_different_key() {
+		// 同一入力・同一 spec でも品質(ビットレート)が違えば別キャッシュエントリに
+		// なる(プレビュー 2Mbps と投稿用 8Mbps の取り違え防止。ディレクトリ分離に
+		// 加えた二重の防御 — モジュール冒頭コメント参照)。
+		let spec = sample_spec();
+		let path = Path::new("/tmp/input.mp4");
+		let mtime = epoch_plus(1_700_000_000);
+
+		let preview_key = render_cache_key(path, 12_345, mtime, &spec, PREVIEW_BITRATE);
+		let publish_key = render_cache_key(path, 12_345, mtime, &spec, PUBLISH_BITRATE);
+
+		assert_ne!(preview_key, publish_key);
+	}
+
+	#[test]
+	fn publish_bitrate_matches_full_export_quality() {
+		// 投稿用レンダリングの品質が本書き出し(reframe_start の既定 =
+		// encode::DEFAULT_BITRATE)と一致していることの固定(誤ってプレビュー品質へ
+		// 退行しないこと)。
+		assert_eq!(PUBLISH_BITRATE, encode::DEFAULT_BITRATE);
+		assert!(PREVIEW_BITRATE < PUBLISH_BITRATE);
 	}
 
 	#[test]
@@ -484,8 +620,8 @@ mod tests {
 		let spec = sample_spec();
 		let mtime = epoch_plus(0);
 
-		let key1 = preview_cache_key(Path::new("/tmp/a"), 1, mtime, &spec);
-		let key2 = preview_cache_key(Path::new("/tmp/a1"), 0, mtime, &spec);
+		let key1 = render_cache_key(Path::new("/tmp/a"), 1, mtime, &spec, PREVIEW_BITRATE);
+		let key2 = render_cache_key(Path::new("/tmp/a1"), 0, mtime, &spec, PREVIEW_BITRATE);
 
 		assert_ne!(key1, key2);
 	}
@@ -513,11 +649,15 @@ mod tests {
 		f()
 	}
 
-	fn restore_env(previous: Option<String>) {
+	fn restore_env_var(env_name: &str, previous: Option<String>) {
 		match previous {
-			Some(value) => env::set_var(PREVIEW_CACHE_MAX_BYTES_ENV, value),
-			None => env::remove_var(PREVIEW_CACHE_MAX_BYTES_ENV),
+			Some(value) => env::set_var(env_name, value),
+			None => env::remove_var(env_name),
 		}
+	}
+
+	fn restore_env(previous: Option<String>) {
+		restore_env_var(PREVIEW_CACHE_MAX_BYTES_ENV, previous);
 	}
 
 	/// 呼び出しごとに一意な一時ディレクトリを作って返す(他テスト・他プロセスとの
@@ -675,6 +815,47 @@ mod tests {
 			assert_eq!(preview_cache_max_bytes(), 12_345);
 
 			restore_env(previous);
+		});
+	}
+
+	#[test]
+	fn publish_cache_max_bytes_is_independent_from_preview_env() {
+		// 投稿用キャッシュの上限は専用の環境変数(PUBLISH_CACHE_MAX_BYTES_ENV)のみを
+		// 見る — プレビュー側の環境変数を設定しても publish 側の上限は変わらず、
+		// その逆も同様(ディレクトリ分離と対になる独立した容量管理)。
+		with_env_lock(|| {
+			let prev_preview = env::var(PREVIEW_CACHE_MAX_BYTES_ENV).ok();
+			let prev_publish = env::var(PUBLISH_CACHE_MAX_BYTES_ENV).ok();
+
+			env::remove_var(PUBLISH_CACHE_MAX_BYTES_ENV);
+			env::set_var(PREVIEW_CACHE_MAX_BYTES_ENV, "111");
+			assert_eq!(preview_cache_max_bytes(), 111);
+			assert_eq!(publish_cache_max_bytes(), DEFAULT_PREVIEW_CACHE_MAX_BYTES);
+
+			env::set_var(PUBLISH_CACHE_MAX_BYTES_ENV, "222");
+			assert_eq!(publish_cache_max_bytes(), 222);
+			assert_eq!(preview_cache_max_bytes(), 111);
+
+			restore_env_var(PREVIEW_CACHE_MAX_BYTES_ENV, prev_preview);
+			restore_env_var(PUBLISH_CACHE_MAX_BYTES_ENV, prev_publish);
+		});
+	}
+
+	#[test]
+	fn publish_cache_max_bytes_uses_default_when_env_unset_or_invalid() {
+		with_env_lock(|| {
+			let previous = env::var(PUBLISH_CACHE_MAX_BYTES_ENV).ok();
+
+			env::remove_var(PUBLISH_CACHE_MAX_BYTES_ENV);
+			assert_eq!(publish_cache_max_bytes(), DEFAULT_PREVIEW_CACHE_MAX_BYTES);
+
+			env::set_var(PUBLISH_CACHE_MAX_BYTES_ENV, "not-a-number");
+			assert_eq!(publish_cache_max_bytes(), DEFAULT_PREVIEW_CACHE_MAX_BYTES);
+
+			env::set_var(PUBLISH_CACHE_MAX_BYTES_ENV, "0");
+			assert_eq!(publish_cache_max_bytes(), DEFAULT_PREVIEW_CACHE_MAX_BYTES);
+
+			restore_env_var(PUBLISH_CACHE_MAX_BYTES_ENV, previous);
 		});
 	}
 }
