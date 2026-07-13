@@ -34,11 +34,8 @@ interface ExportScreenProps {
 	 */
 	resetToken: number;
 	onGoToEdit: () => void;
-	/**
-	 * "アップロードへ進む" の遷移先。public 版(投稿ステップ自体を持たない2 step
-	 * ウィザード)では App.tsx が渡さない — undefined のときボタン自体を出さない。
-	 */
-	onGoToUpload?: () => void;
+	/** "リフレームへ進む" の遷移先(両エディション共通の3 step ウィザード)。 */
+	onGoToUpload: () => void;
 	/** results から導出した進捗サマリを App(StepIndicator バッジ)へ押し上げる。 */
 	onProgressSummary?: (summary: ExportSummary) => void;
 }
@@ -411,7 +408,7 @@ export function ExportScreen({
 		<section ref={rootRef} className="flex h-full min-h-0 flex-col">
 			{/* ステップ遷移時のフォーカス移動先(a11y、App.tsx goToStep 参照)。視覚上は非表示。 */}
 			<h2 id="wizard-panel-heading-export" tabIndex={-1} className="sr-only">
-				書き出し
+				確認
 			</h2>
 			<div className="min-h-0 flex-1 overflow-y-auto p-4">
 				<div className="flex h-full min-h-0 gap-4">
@@ -543,15 +540,13 @@ export function ExportScreen({
 							: `書き出しを開始(${clips.length}本)`}
 					</Button>
 				)}
-				{onGoToUpload && (
-					<Button
-						variant="primary"
-						disabled={clips.length === 0}
-						onClick={onGoToUpload}
-					>
-						アップロードへ進む
-					</Button>
-				)}
+				<Button
+					variant="primary"
+					disabled={clips.length === 0}
+					onClick={onGoToUpload}
+				>
+					リフレームへ進む
+				</Button>
 			</footer>
 		</section>
 	);

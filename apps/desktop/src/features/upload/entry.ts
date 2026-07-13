@@ -1,10 +1,17 @@
-export { UploadScreen } from "./UploadScreen";
+export { UploadScreen } from "./UploadScreenPrivate";
 
 /**
- * private エディションで使う実体(そのまま `UploadScreen` を再輸出するだけ)。
- * App.tsx は `virtual:upload-entry` からこのモジュールを読む
- * (vite.config.ts / vitest.config.ts の `resolve.alias` が edition に応じて
- * このファイルと `./entry.public.ts` を差し替える。§src/lib/edition.ts)。
+ * private エディションで使う実体。共通の `ReframeScreen` に投稿系スロット
+ * (`usePublishExtras`)を差し込んだ `UploadScreenPrivate` をそのまま再輸出する。
+ * App.tsx は `virtual:upload-entry` からこのモジュールを読む(vite.config.ts /
+ * vitest.config.ts の `resolve.alias` が edition に応じてこのファイルと
+ * `./entry.public.ts` を差し替える。§src/lib/edition.ts)。
+ *
+ * public との違いは「投稿(スケジュール・キャプション・IG/YT 連携)スロットを
+ * 埋めるかどうか」だけで、リフレーム機能そのもの(ターゲット別アスペクト/フィットの
+ * 選択・レンダリング・フォルダへの保存)は両エディション共通の `ReframeScreen.tsx` が
+ * 担う(v2.4 エディション分離時にリフレーム機能ごと public から除外してしまった
+ * 切り分けミスの修正、§docs/desktop-migration-plan.md の wizard 再構成メモ)。
  *
  * 設計メモ: 当初は `React.lazy` による動的 import で「public バンドルからの除外」も
  * 兼ねる案を検討したが、Rollup は `if (private) import(...)` のような到達しない

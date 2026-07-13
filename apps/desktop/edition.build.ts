@@ -23,8 +23,10 @@ export function resolveEdition(mode: string): Edition {
 
 /**
  * `virtual:upload-entry` の差し替え先(§src/vite-env.d.ts)。
- * public は投稿系コードを一切含まないスタブ(entry.public.ts)、private は実体
- * (entry.ts)を指す。
+ * どちらも共通の `ReframeScreen`(ターゲット別アスペクト/フィットの選択・
+ * レンダリング・フォルダへの保存)を描画する。private は投稿系スロットを埋めた
+ * 版(entry.ts → UploadScreenPrivate)、public は投稿系コードを一切含まないまま
+ * `ReframeScreen` をそのまま使う版(entry.public.ts)を指す。
  */
 export function uploadEntryAlias(
 	edition: Edition,

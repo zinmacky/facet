@@ -2,8 +2,10 @@ import type { ReactNode } from "react";
 
 /**
  * ▼/▶ + 見出しの流儀に合わせた、小さな折りたたみ表示。
- * 投稿(Phase 3 まで無効)専用のフィールドをまとめて隠すために使う
- * (PostDetail の予約日時・一括投稿、OutputCard のメタデータ・投稿ボタン)。
+ * 投稿(private エディション専用)のフィールドをまとめて隠すために使う
+ * (PostScheduleSection の予約日時・一括投稿、OutputPublishSection のメタデータ・
+ * 投稿ボタン)。private 専用コードからのみ import されるため、public バンドルの
+ * import グラフには含まれない。
  */
 export function Disclosure({
 	title,

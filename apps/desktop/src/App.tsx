@@ -17,8 +17,7 @@ import { UploadScreen } from "virtual:upload-entry";
 import { PublishGateProvider } from "virtual:publish-settings-entry";
 import {
 	WizardShell,
-	WIZARD_STEPS_PRIVATE,
-	WIZARD_STEPS_PUBLIC,
+	WIZARD_STEPS,
 	type WizardStep,
 } from "./features/wizard/WizardShell";
 import {
@@ -45,10 +44,6 @@ export interface Source {
 
 type Step = WizardStep;
 
-/** edition に応じたウィザードのステップ構成(§lib/edition.ts)。 */
-const WIZARD_STEPS =
-	EDITION === "private" ? WIZARD_STEPS_PRIVATE : WIZARD_STEPS_PUBLIC;
-
 /** ソースから新しい Clip を作る(連番付き)。 */
 function createClip(source: Source, index: number): Clip {
 	return {
@@ -62,18 +57,21 @@ function createClip(source: Source, index: number): Clip {
 
 /**
  * アプリの状態オーナー。
- * 編集/書き出し/アップロードの3画面を横スライドのウィザードとして常時マウントし、
+ * 編集/確認/リフレームの3画面を横スライドのウィザードとして常時マウントし、
  * `step` で表示中の画面を切り替える(WizardShell が実際のスライド表示を担う)。
  * 元画面ではソース選択と切り抜き(trim + クロップ枠 + アスペクト比)を編集する。
+ * 3 step 構成は両エディション共通(§features/wizard/WizardShell.tsx の
+ * `WIZARD_STEPS`)。投稿系 UI の有無はリフレーム画面内部の描画で出し分ける
+ * (§features/upload/ReframeScreen.tsx の `PublishSlots`)。
  */
 export function App() {
 	const [source, setSource] = useState<Source | null>(null);
 	const [clips, setClips] = useState<Clip[]>([]);
 	const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 	const [step, setStep] = useState<Step>("edit");
-	// アップロード画面の投稿処理中フラグ(離脱抑止に使う)。
+	// リフレーム画面の投稿処理中フラグ(private のみ真になりうる。離脱抑止に使う)。
 	const [uploadBusy, setUploadBusy] = useState(false);
-	// 書き出し画面の進捗サマリ(StepIndicator のバッジ表示に使う)。
+	// 確認画面の進捗サマリ(StepIndicator のバッジ表示に使う)。
 	const [exportSummary, setExportSummary] = useState<ExportSummary>();
 	// 増加させるたびに ExportScreen/UploadScreen が全状態を明示的に破棄する
 	// (新しい元動画を選択したときのみ増分する — リスク4対応)。
@@ -109,7 +107,7 @@ export function App() {
 			setSource(result);
 			setClips([first]);
 			setSelectedClipId(first.id);
-			// 新しい元動画を選んだので、必ず編集画面へ戻り、書き出し/アップロード画面の
+			// 新しい元動画を選んだので、必ず編集画面へ戻り、確認/リフレーム画面の
 			// 古い結果(前の動画の clip に紐づく results/posts/preview)を破棄させる。
 			setStep("edit");
 			setResetToken((t) => t + 1);
@@ -154,7 +152,7 @@ export function App() {
 	// "export" へ前進してよいか / "upload" へ前進してよいか。
 	const canGoExport = !!source && clips.length > 0;
 	const canGoUpload = clips.length > 0;
-	// アップロード画面が投稿処理中の間は、そこから離れる遷移をすべて禁止する。
+	// リフレーム画面が投稿処理中(private のみ)の間は、そこから離れる遷移をすべて禁止する。
 	const stepLocked = step === "upload" && uploadBusy;
 
 	// ウィザードの画面遷移をここに集約する。StepIndicator・各画面の戻る/進む
@@ -321,7 +319,7 @@ export function App() {
 										onClick={() => goToStep("export")}
 										className="w-full shrink-0"
 									>
-										すべて書き出し
+										確認へ進む
 										{clips.length > 0 ? `(${clips.length}本)` : ""}
 									</Button>
 								</aside>
@@ -334,29 +332,23 @@ export function App() {
 								clips={clips}
 								resetToken={resetToken}
 								onGoToEdit={() => goToStep("edit")}
-								onGoToUpload={
-									EDITION === "private" ? () => goToStep("upload") : undefined
-								}
+								onGoToUpload={() => goToStep("upload")}
 								onProgressSummary={setExportSummary}
 							/>
 						),
-						// public 版は投稿(アップロード)ステップ自体を持たない(WIZARD_STEPS 参照)。
-						// UploadScreen(virtual:upload-entry)は public ビルドではスタブに
-						// 差し替わるため参照自体は無害だが、意図を明示するため edition で分岐する。
-						...(EDITION === "private"
-							? {
-									upload: (
-										<UploadScreen
-											active={step === "upload"}
-											source={source}
-											clips={clips}
-											resetToken={resetToken}
-											onGoToExport={() => goToStep("export")}
-											onBusyChange={setUploadBusy}
-										/>
-									),
-								}
-							: {}),
+						// リフレーム画面は両エディション共通(§WIZARD_STEPS)。投稿系 UI の有無は
+						// UploadScreen(virtual:upload-entry)側の描画で出し分ける
+						// (private: 投稿スロットあり、public: なし)。
+						upload: (
+							<UploadScreen
+								active={step === "upload"}
+								source={source}
+								clips={clips}
+								resetToken={resetToken}
+								onGoToExport={() => goToStep("export")}
+								onBusyChange={setUploadBusy}
+							/>
+						),
 					}}
 				/>
 

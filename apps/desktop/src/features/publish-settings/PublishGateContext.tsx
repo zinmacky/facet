@@ -15,7 +15,7 @@ import { usePublishGate, type PublishGateState } from "./usePublishGate";
  *
  * **前 PR(#85)からの申し送り事項の解消**: 以前は `PublishSettingsSection` と
  * `UploadScreen` がそれぞれ独立に `usePublishGate()` を呼んでおり、両方が
- * マウントされている間(設定ダイアログを開いた状態でアップロード画面にいる等)は
+ * マウントされている間(設定ダイアログを開いた状態でリフレーム画面にいる等)は
  * `has_scheduler_api_token`/`check_scheduler_connection` が2重に発火していた。
  * 本 Provider を `App.tsx` で1回だけマウントし、両コンポーネントは
  * `usePublishGateContext()` 経由で同じ状態を読むことでこれを解消する。

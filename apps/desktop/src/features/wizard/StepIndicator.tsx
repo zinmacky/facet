@@ -1,8 +1,8 @@
 import { cn } from "../../components/ui/cn";
 import type { WizardStep } from "./WizardShell";
-import { WIZARD_STEPS_PRIVATE } from "./WizardShell";
+import { WIZARD_STEPS } from "./WizardShell";
 
-/** 書き出し画面の進捗サマリ(ExportScreen から onProgressSummary で押し上げる)。 */
+/** 確認画面の進捗サマリ(ExportScreen から onProgressSummary で押し上げる)。 */
 export interface ExportSummary {
 	total: number;
 	done: number;
@@ -11,17 +11,17 @@ export interface ExportSummary {
 
 const STEP_LABELS: Record<WizardStep, string> = {
 	edit: "編集",
-	export: "書き出し",
-	upload: "アップロード",
+	export: "確認",
+	upload: "リフレーム",
 };
 
 interface StepIndicatorProps {
-	/** 表示するステップ構成(既定は現行の3ステップ。public 版は App.tsx が2ステップを渡す)。 */
+	/** 表示するステップ構成(既定は共通の3ステップ、§WIZARD_STEPS)。 */
 	steps?: readonly WizardStep[];
 	step: WizardStep;
-	/** "export" へ前進してよいか(既定条件: !!source && clips.length > 0)。 */
+	/** "export"(確認)へ前進してよいか(既定条件: !!source && clips.length > 0)。 */
 	canGoExport: boolean;
-	/** "upload" へ前進してよいか(既定条件: clips.length > 0。steps に "upload" が無ければ無視される)。 */
+	/** "upload"(リフレーム)へ前進してよいか(既定条件: clips.length > 0)。 */
 	canGoUpload: boolean;
 	/** true の間は現在ステップ以外への遷移をすべて禁止する(投稿処理中の離脱抑止用)。 */
 	locked?: boolean;
@@ -30,12 +30,12 @@ interface StepIndicatorProps {
 }
 
 /**
- * 編集/書き出し/(アップロード)のステップを示すバッジ列。
+ * 編集/確認/リフレームのステップを示すバッジ列。
  * 後退クリックは常時可能。前進クリックは対応する canGoXxx が true のときのみ許可する
  * (locked が true の間は現在ステップ以外すべて禁止)。
  */
 export function StepIndicator({
-	steps = WIZARD_STEPS_PRIVATE,
+	steps = WIZARD_STEPS,
 	step,
 	canGoExport,
 	canGoUpload,

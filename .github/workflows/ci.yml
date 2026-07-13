@@ -48,12 +48,15 @@ jobs:
         run: git diff --exit-code -- packages/contract/schema/
 
       # public(配布版)フロントビルドに投稿系コードが含まれないことを検査する
-      # (edition-split, docs/desktop-migration-plan.md §6.6)。マーカーには
-      # features/upload/ 配下(PostDetail.tsx / Disclosure.tsx)でのみ使われる
-      # UI 文字列「一括投稿」を使う — JS の関数/変数名は minify で読み替えられるため
+      # (edition-split, docs/desktop-migration-plan.md §6.6)。リフレーム画面
+      # (features/upload/ReframeScreen.tsx)自体は両エディション共通で、投稿
+      # (スケジュール・キャプション・IG/YT 連携)のみ private 専用ファイル群
+      # (usePublishExtras.tsx が import する PostScheduleSection.tsx 等)に分離されている。
+      # マーカーには features/upload/PostScheduleSection.tsx でのみ使われる UI 文字列
+      # 「一括投稿」を使う — JS の関数/変数名は minify で読み替えられるため
       # 識別子は使わず、minify されても保持される文字列リテラルを見る
-      # (単に "アップロード" だけだと StepIndicator の共有ラベル辞書等、edition に
-      # 関わらず常時コンパイルされる無害な文字列にもヒットし false positive になる)。
+      # (単に "リフレーム"/"アップロード" だけだと StepIndicator の共有ラベル辞書等、
+      # edition に関わらず常時コンパイルされる無害な文字列にもヒットし false positive になる)。
       # 資格情報設定 UI(features/publish-settings/、§11-3)についても同様に、
       # PublishSettingsSection.tsx でのみ使われる UI 文字列「APIトークン」を見る。
       - name: Build public frontend and check for upload-feature markers

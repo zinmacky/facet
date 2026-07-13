@@ -12,7 +12,7 @@ import {
 	mockInvoke,
 	mockJoin,
 } from "../../test/tauri-mock";
-import { UploadScreen } from "./UploadScreen";
+import { UploadScreen } from "./UploadScreenPrivate";
 
 const SOURCE = { inputPath: "/in.mp4", probe: DEFAULT_MEDIA_INFO };
 
@@ -54,7 +54,7 @@ describe("UploadScreen: 一括書き出しのファイル名組み立て", () =>
 		await user.click(screen.getByRole("button", { name: "+ 出力先を追加" }));
 
 		mockDialogOpen.mockResolvedValueOnce("/out");
-		await user.click(screen.getByRole("button", { name: "フォルダへ一括書き出し" }));
+		await user.click(screen.getByRole("button", { name: "フォルダへ保存" }));
 
 		await waitFor(() => expect(reframeStartCalls()).toHaveLength(2));
 		expect(mockJoin).toHaveBeenCalledWith("/out", "Clip_A_yt-shorts_crop.mp4");

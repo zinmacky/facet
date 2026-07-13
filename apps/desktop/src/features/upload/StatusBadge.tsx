@@ -1,5 +1,5 @@
 import { StatusPill, type StatusTone } from "../../components/ui/StatusPill";
-import type { PubStatus, PubStatusKind } from "./uploadTypes";
+import type { PubStatus, PubStatusKind } from "./publishSupport";
 
 const LABEL: Record<PubStatusKind, string> = {
 	idle: "未投稿",
@@ -20,7 +20,7 @@ const TONE: Record<PubStatusKind, StatusTone> = {
 export function StatusBadge({ status }: { status: PubStatus | undefined }) {
 	const kind = status?.kind ?? "idle";
 	// "publishing" 中は message に進捗(例: "アップロード中 42%")が入る
-	// (`UploadScreen.tsx` の `startIgPublish` onProgress 参照)。error 以外でも表示する。
+	// (`usePublishExtras.ts` の `startIgPublish` onProgress 参照)。error 以外でも表示する。
 	return (
 		<StatusPill tone={TONE[kind]}>
 			{LABEL[kind]}

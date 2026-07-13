@@ -100,9 +100,11 @@ jobs:
       # tauri.conf.json の既定 beforeBuildCommand(`vite build --mode public`)を
       # そのまま使う(§tauri.conf.json)ため、ここで独立に同じ `--mode public` で
       # ビルドした dist/ を検査すれば、直後の tauri-action(手順8)が生成する
-      # 実際のバンドルの中身と同一の内容を事前に確認できる。マーカーには
-      # features/upload/ 配下(PostDetail.tsx / Disclosure.tsx)でのみ使われる
-      # UI 文字列「一括投稿」を使う(JS 識別子は minify で読み替えられるため使わない)。
+      # 実際のバンドルの中身と同一の内容を事前に確認できる。リフレーム画面
+      # (features/upload/ReframeScreen.tsx)自体は両エディション共通で、投稿
+      # (スケジュール・キャプション・IG/YT 連携)のみ private 専用ファイル群に分離
+      # されている。マーカーには features/upload/PostScheduleSection.tsx でのみ
+      # 使われる UI 文字列「一括投稿」を使う(JS 識別子は minify で読み替えられるため使わない)。
       # 資格情報設定 UI(features/publish-settings/、§11-3)も同様に、
       # PublishSettingsSection.tsx でのみ使われる UI 文字列「APIトークン」を見る。
       - name: Verify public frontend excludes upload-feature markers

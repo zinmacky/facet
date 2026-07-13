@@ -21,7 +21,7 @@ const DEFAULT_R2_BUCKET = "facet-media";
  * トークン・R2(Cloudflare, S3 互換)資格情報(いずれも秘密のため OS キーチェーン、
  * §publishSettingsClient.ts / src-tauri/src/commands/publish/)を設定し、疎通チェックの
  * 結果を表示する。「scheduler 疎通 OK かつ R2 資格情報保存済み」で IG 投稿が有効になる
- * (`PublishGateContext.igReady`、`features/upload/UploadScreen.tsx` 参照)。
+ * (`PublishGateContext.igReady`、`features/upload/usePublishExtras.tsx` 参照)。
  *
  * トークン・シークレットは type="password" で入力し、保存後は値を再表示しない
  * (保存済みバッジ + 削除ボタンのみ表示する。§実装方針)。

@@ -9,7 +9,7 @@ import {
 	invokeJobId,
 	mockInvoke,
 } from "../../test/tauri-mock";
-import { UploadScreen } from "./UploadScreen";
+import { UploadScreen } from "./UploadScreenPrivate";
 
 /**
  * IG(Instagram)投稿フローのテスト(Phase 3 本体、§6.4)。
@@ -76,10 +76,11 @@ async function openIgPublishButton(user: ReturnType<typeof userEvent.setup>) {
 }
 
 /**
- * OutputCard 側の「投稿設定」折りたたみトグル。アクセシブルネームは
- * 「▶投稿設定<ステータス>」(trailing の StatusBadge を含む)になるため、
- * 初期ステータス「未投稿」で PostDetail 側の「投稿設定(予約日時・一括投稿)」と
- * 区別する(このヘルパは折りたたみを開く前 = 未投稿のときにのみ使う)。
+ * OutputCard に差し込まれる OutputPublishSection の「投稿設定」折りたたみトグル。
+ * アクセシブルネームは「▶投稿設定<ステータス>」(trailing の StatusBadge を含む)に
+ * なるため、初期ステータス「未投稿」で PostDetail に差し込まれる PostScheduleSection
+ * 側の「投稿設定(予約日時・一括投稿)」と区別する(このヘルパは折りたたみを開く前 =
+ * 未投稿のときにのみ使う)。
  */
 function outputCardDisclosureButton() {
 	return screen.getByRole("button", { name: /投稿設定.*未投稿/ });
