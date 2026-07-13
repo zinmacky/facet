@@ -392,7 +392,14 @@ async fn run_ig_publish(
 	let _ = app.emit(&progress_event_name(&job_id), IgPublishProgress::Enqueuing);
 
 	let manifest = JobManifest::new(idempotency_key, r2_key, caption, publish_at);
-	match scheduler_client::enqueue_job(&client, &scheduler_url, &scheduler_token, &manifest).await
+	match scheduler_client::enqueue_job(
+		&client,
+		&scheduler_url,
+		&scheduler_token,
+		&manifest,
+		scheduler_client::ENQUEUE_TIMEOUT,
+	)
+	.await
 	{
 		Ok(response) => {
 			let _ = app.emit(

@@ -7,10 +7,22 @@
 //! 同モジュールの `ConnectionCheckResult` と同じ考え方(401=トークン不正、
 //! 503=scheduler 未設定)を踏襲する。
 
+use std::time::Duration;
+
 use reqwest::{Client, StatusCode, Url};
 use thiserror::Error;
 
 use super::manifest::{JobCreateResponse, JobManifest};
+
+/// `enqueue_job` の 1 リクエストあたりの上限時間。scheduler が無応答でも
+/// これを超えたら Network エラーとして打ち切る。共有 `reqwest::Client` には
+/// タイムアウトを設定しない(R2 アップロードは長時間かつ協調キャンセルで別管理の
+/// ため)ので、enqueue だけリクエスト単位で縛る。無指定だと scheduler の無応答で
+/// `run_ig_publish` タスクが完走せず、`JobGuard` も走らずジョブがキャンセル不能の
+/// まま残る(GHSA-q37v-7xpp-x229)。`scheduler_check::REQUEST_TIMEOUT`(10s)より
+/// 緩め: enqueue は R2 アップロード後の一発 POST で Workers のコールドスタートを
+/// 含みうる。
+pub const ENQUEUE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
 pub enum EnqueueError {
@@ -53,6 +65,7 @@ pub async fn enqueue_job(
 	scheduler_url: &str,
 	token: &str,
 	manifest: &JobManifest,
+	timeout: Duration,
 ) -> Result<JobCreateResponse, EnqueueError> {
 	let url = join_jobs_url(scheduler_url).map_err(EnqueueError::Network)?;
 
@@ -60,9 +73,19 @@ pub async fn enqueue_job(
 		.post(url)
 		.bearer_auth(token)
 		.json(manifest)
+		.timeout(timeout)
 		.send()
 		.await
-		.map_err(|err| EnqueueError::Network(err.to_string()))?;
+		.map_err(|err| {
+			if err.is_timeout() {
+				EnqueueError::Network(format!(
+					"scheduler が {} 秒以内に応答しませんでした。",
+					timeout.as_secs()
+				))
+			} else {
+				EnqueueError::Network(err.to_string())
+			}
+		})?;
 
 	match response.status() {
 		StatusCode::OK | StatusCode::CREATED => response
@@ -136,6 +159,24 @@ mod tests {
 		)
 	}
 
+	/// 応答を返さないサーバ(接続だけ受けて握ったまま)。タイムアウト検証用。
+	fn spawn_stalling_server() -> String {
+		let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+		let addr = listener.local_addr().unwrap();
+		std::thread::spawn(move || {
+			// accept した stream を drop せず保持し続けることで、クライアント側を
+			// レスポンス待ちのまま吊るす。
+			if let Ok((stream, _)) = listener.accept() {
+				std::thread::sleep(Duration::from_secs(5));
+				drop(stream);
+			}
+		});
+		format!("http://{addr}")
+	}
+
+	/// 通常のモックテストで使う短いタイムアウト(本番既定は `ENQUEUE_TIMEOUT`)。
+	const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 	#[tokio::test]
 	async fn enqueue_job_returns_response_on_201() {
 		let base = spawn_mock_server(
@@ -143,9 +184,15 @@ mod tests {
 			r#"{"id":"job-1","status":"pending"}"#,
 		);
 		let client = Client::new();
-		let resp = enqueue_job(&client, &base, "valid-token", &sample_manifest())
-			.await
-			.unwrap();
+		let resp = enqueue_job(
+			&client,
+			&base,
+			"valid-token",
+			&sample_manifest(),
+			TEST_TIMEOUT,
+		)
+		.await
+		.unwrap();
 		assert_eq!(resp.id, "job-1");
 		assert_eq!(resp.status, "pending");
 	}
@@ -154,9 +201,15 @@ mod tests {
 	async fn enqueue_job_returns_response_on_200_idempotent_replay() {
 		let base = spawn_mock_server("HTTP/1.1 200 OK", r#"{"id":"job-1","status":"pending"}"#);
 		let client = Client::new();
-		let resp = enqueue_job(&client, &base, "valid-token", &sample_manifest())
-			.await
-			.unwrap();
+		let resp = enqueue_job(
+			&client,
+			&base,
+			"valid-token",
+			&sample_manifest(),
+			TEST_TIMEOUT,
+		)
+		.await
+		.unwrap();
 		assert_eq!(resp.id, "job-1");
 	}
 
@@ -164,9 +217,15 @@ mod tests {
 	async fn enqueue_job_unauthorized_on_401() {
 		let base = spawn_mock_server("HTTP/1.1 401 Unauthorized", "{}");
 		let client = Client::new();
-		let err = enqueue_job(&client, &base, "wrong-token", &sample_manifest())
-			.await
-			.unwrap_err();
+		let err = enqueue_job(
+			&client,
+			&base,
+			"wrong-token",
+			&sample_manifest(),
+			TEST_TIMEOUT,
+		)
+		.await
+		.unwrap_err();
 		assert!(matches!(err, EnqueueError::Unauthorized));
 	}
 
@@ -174,9 +233,15 @@ mod tests {
 	async fn enqueue_job_service_unavailable_on_503() {
 		let base = spawn_mock_server("HTTP/1.1 503 Service Unavailable", "{}");
 		let client = Client::new();
-		let err = enqueue_job(&client, &base, "any-token", &sample_manifest())
-			.await
-			.unwrap_err();
+		let err = enqueue_job(
+			&client,
+			&base,
+			"any-token",
+			&sample_manifest(),
+			TEST_TIMEOUT,
+		)
+		.await
+		.unwrap_err();
 		assert!(matches!(err, EnqueueError::ServiceUnavailable));
 	}
 
@@ -187,9 +252,15 @@ mod tests {
 			r#"{"error":"invalid job manifest"}"#,
 		);
 		let client = Client::new();
-		let err = enqueue_job(&client, &base, "any-token", &sample_manifest())
-			.await
-			.unwrap_err();
+		let err = enqueue_job(
+			&client,
+			&base,
+			"any-token",
+			&sample_manifest(),
+			TEST_TIMEOUT,
+		)
+		.await
+		.unwrap_err();
 		assert!(matches!(err, EnqueueError::Rejected(_)));
 	}
 
@@ -201,10 +272,32 @@ mod tests {
 			"http://127.0.0.1:1",
 			"any-token",
 			&sample_manifest(),
+			TEST_TIMEOUT,
 		)
 		.await
 		.unwrap_err();
 		assert!(matches!(err, EnqueueError::Network(_)));
+	}
+
+	#[tokio::test]
+	async fn enqueue_job_times_out_when_server_never_responds() {
+		let base = spawn_stalling_server();
+		let client = Client::new();
+		// 無応答サーバに短いタイムアウトで当て、無期限にハングせず打ち切ることを確認する。
+		let err = enqueue_job(
+			&client,
+			&base,
+			"any-token",
+			&sample_manifest(),
+			Duration::from_millis(300),
+		)
+		.await
+		.unwrap_err();
+		// タイムアウトは Network に分類され、秒数付きのメッセージになる。
+		match err {
+			EnqueueError::Network(msg) => assert!(msg.contains("応答しませんでした")),
+			other => panic!("expected Network timeout error, got {other:?}"),
+		}
 	}
 
 	/// 実 scheduler(Cloudflare Workers)へ実際にジョブ登録する実機テスト
@@ -240,10 +333,10 @@ mod tests {
 		);
 
 		let client = Client::new();
-		let first = enqueue_job(&client, &scheduler_url, &token, &manifest)
+		let first = enqueue_job(&client, &scheduler_url, &token, &manifest, ENQUEUE_TIMEOUT)
 			.await
 			.expect("first enqueue should succeed");
-		let second = enqueue_job(&client, &scheduler_url, &token, &manifest)
+		let second = enqueue_job(&client, &scheduler_url, &token, &manifest, ENQUEUE_TIMEOUT)
 			.await
 			.expect("idempotent replay should succeed");
 		assert_eq!(
