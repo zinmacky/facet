@@ -1,0 +1,279 @@
+import { beforeEach, describe, expect, it } from "vitest";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { Clip } from "../../types";
+import { renderWithProviders } from "../../test/render";
+import {
+	DEFAULT_MEDIA_INFO,
+	emitMockEvent,
+	invokeJobId,
+	mockInvoke,
+} from "../../test/tauri-mock";
+import { UploadScreen } from "./UploadScreen";
+
+/**
+ * IG(Instagram)投稿フローのテスト(Phase 3 本体、§6.4)。
+ *
+ * - ゲート活性化条件: scheduler 疎通 OK + R2 資格情報保存済み(igReady)のときのみ
+ *   Instagram 向け Output の投稿ボタンが有効になる(YouTube は引き続き disabled)。
+ * - 投稿フロー: プレビュー生成(preview_start)→ ig_publish_start(listen-before-invoke)
+ *   → 進捗(uploading %)→ done で「完了」。
+ * - エラー分類: Rust 側の構造化 enum(kind タグ)がユーザー向けメッセージに変換される。
+ */
+
+const SOURCE = { inputPath: "/in.mp4", probe: DEFAULT_MEDIA_INFO };
+
+const CLIP: Clip = {
+	id: "clip-1",
+	name: "ClipOne",
+	trim: { start: 0, end: 5 },
+	aspect: "free",
+};
+
+const SCHEDULER_URL = "https://scheduler.example.workers.dev";
+
+beforeEach(() => {
+	window.localStorage.clear();
+});
+
+/** ゲートが開く前提条件(scheduler URL + トークン + R2 資格情報)を作る。 */
+async function setUpReadyGate() {
+	window.localStorage.setItem(
+		"facet.desktop.private.schedulerUrl",
+		SCHEDULER_URL,
+	);
+	// tauri-mock の defaultInvokeImpl のインメモリ状態を直接構築する
+	// (render 前に呼ぶことで、PublishGateProvider のマウント時チェックが ready になる)。
+	await mockInvoke("set_scheduler_api_token", { token: "test-token" });
+	await mockInvoke("set_r2_credentials", {
+		accountId: "acc",
+		accessKeyId: "key",
+		secretAccessKey: "secret",
+		bucket: "facet-media",
+	});
+}
+
+function renderScreen() {
+	return renderWithProviders(
+		<UploadScreen
+			active
+			source={SOURCE}
+			clips={[CLIP]}
+			resetToken={0}
+			onGoToExport={() => {}}
+		/>,
+	);
+}
+
+/** 出力ターゲットを Instagram リールへ変更し、「投稿設定」を開いて投稿ボタンを返す。 */
+async function openIgPublishButton(user: ReturnType<typeof userEvent.setup>) {
+	await waitFor(() =>
+		expect(screen.getByLabelText("出力ターゲット")).toBeInTheDocument(),
+	);
+	await user.selectOptions(screen.getByLabelText("出力ターゲット"), "ig-reels");
+	await user.click(outputCardDisclosureButton());
+	return screen.getByRole("button", { name: "投稿" });
+}
+
+/**
+ * OutputCard 側の「投稿設定」折りたたみトグル。アクセシブルネームは
+ * 「▶投稿設定<ステータス>」(trailing の StatusBadge を含む)になるため、
+ * 初期ステータス「未投稿」で PostDetail 側の「投稿設定(予約日時・一括投稿)」と
+ * 区別する(このヘルパは折りたたみを開く前 = 未投稿のときにのみ使う)。
+ */
+function outputCardDisclosureButton() {
+	return screen.getByRole("button", { name: /投稿設定.*未投稿/ });
+}
+
+describe("UploadScreen: IG 投稿のゲート活性化", () => {
+	it("設定が未完了(igReady=false)の間は投稿ボタンが disabled", async () => {
+		const user = userEvent.setup();
+		renderScreen();
+
+		const publishButton = await openIgPublishButton(user);
+		expect(publishButton).toBeDisabled();
+		// 案内バナーも表示される。
+		expect(
+			screen.getByText(/への投稿には設定(.*)が必要です/),
+		).toBeInTheDocument();
+	});
+
+	it("scheduler 疎通 OK + R2 資格情報ありで Instagram の投稿ボタンが有効になる", async () => {
+		await setUpReadyGate();
+		const user = userEvent.setup();
+		renderScreen();
+
+		const publishButton = await openIgPublishButton(user);
+		await waitFor(() => expect(publishButton).toBeEnabled());
+	});
+
+	it("ゲートが開いていても YouTube 向け Output の投稿ボタンは disabled のまま", async () => {
+		await setUpReadyGate();
+		const user = userEvent.setup();
+		renderScreen();
+
+		// 既定ターゲットは yt-shorts(YouTube)。ターゲットは変えずに投稿設定を開く。
+		await waitFor(() =>
+			expect(screen.getByLabelText("出力ターゲット")).toBeInTheDocument(),
+		);
+		await user.click(outputCardDisclosureButton());
+
+		expect(screen.getByRole("button", { name: "投稿" })).toBeDisabled();
+	});
+
+	it("「すべて投稿」は投稿可能な Output が無い間 disabled、IG 出力があれば有効になる", async () => {
+		await setUpReadyGate();
+		const user = userEvent.setup();
+		renderScreen();
+
+		// 既定(yt-shorts のみ)では disabled。
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "すべて投稿" })).toBeDisabled(),
+		);
+
+		// IG ターゲットへ変更すると有効になる。
+		await user.selectOptions(screen.getByLabelText("出力ターゲット"), "ig-reels");
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "すべて投稿" })).toBeEnabled(),
+		);
+	});
+});
+
+describe("UploadScreen: IG 投稿フロー", () => {
+	it("プレビュー生成 → ig_publish_start → 進捗 → done で「完了」になる", async () => {
+		await setUpReadyGate();
+		const user = userEvent.setup();
+		renderScreen();
+
+		const publishButton = await openIgPublishButton(user);
+		await waitFor(() => expect(publishButton).toBeEnabled());
+		await user.click(publishButton);
+
+		// 1. レンダリング(preview_start)が走る。
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith(
+				"preview_start",
+				expect.objectContaining({ input: SOURCE.inputPath }),
+			),
+		);
+		const previewCallIndex = mockInvoke.mock.calls.findIndex(
+			([cmd]) => cmd === "preview_start",
+		);
+		const previewJobId = invokeJobId(previewCallIndex);
+		emitMockEvent(`preview://done/${previewJobId}`, { path: "/cache/out.mp4" });
+
+		// 2. ig_publish_start がプレビュー結果のパス・キャプション・scheduler URL 付きで
+		//    呼ばれる(publishAt 未設定のため即時 = Date.now() ベースの数値)。
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith(
+				"ig_publish_start",
+				expect.objectContaining({
+					inputPath: "/cache/out.mp4",
+					caption: "",
+					schedulerUrl: SCHEDULER_URL,
+					publishAt: expect.any(Number),
+				}),
+			),
+		);
+		const igCallIndex = mockInvoke.mock.calls.findIndex(
+			([cmd]) => cmd === "ig_publish_start",
+		);
+		const igJobId = invokeJobId(igCallIndex);
+
+		// 3. アップロード進捗がステータスバッジに反映される。
+		emitMockEvent(`ig_publish://progress/${igJobId}`, {
+			phase: "uploading",
+			bytesSent: 42,
+			totalBytes: 100,
+			percent: 42,
+		});
+		await waitFor(() =>
+			expect(screen.getByText(/アップロード中 42%/)).toBeInTheDocument(),
+		);
+
+		// 4. done で「完了」。
+		emitMockEvent(`ig_publish://done/${igJobId}`, {
+			schedulerJobId: "scheduler-job-1",
+			status: "pending",
+		});
+		await waitFor(() => expect(screen.getByText("完了")).toBeInTheDocument());
+	});
+
+	it("401(enqueue_unauthorized)はトークン無効のメッセージとして表示される", async () => {
+		await setUpReadyGate();
+		const user = userEvent.setup();
+		renderScreen();
+
+		const publishButton = await openIgPublishButton(user);
+		await waitFor(() => expect(publishButton).toBeEnabled());
+		await user.click(publishButton);
+
+		const previewCallIndex = await waitFor(() => {
+			const index = mockInvoke.mock.calls.findIndex(
+				([cmd]) => cmd === "preview_start",
+			);
+			expect(index).toBeGreaterThanOrEqual(0);
+			return index;
+		});
+		emitMockEvent(`preview://done/${invokeJobId(previewCallIndex)}`, {
+			path: "/cache/out.mp4",
+		});
+
+		const igCallIndex = await waitFor(() => {
+			const index = mockInvoke.mock.calls.findIndex(
+				([cmd]) => cmd === "ig_publish_start",
+			);
+			expect(index).toBeGreaterThanOrEqual(0);
+			return index;
+		});
+		emitMockEvent(`ig_publish://error/${invokeJobId(igCallIndex)}`, {
+			kind: "enqueue_unauthorized",
+		});
+
+		await waitFor(() =>
+			expect(
+				screen.getByText(/scheduler の API トークンが無効です/),
+			).toBeInTheDocument(),
+		);
+	});
+
+	it("バリデーション違反(invoke reject)はエラーステータスとして表示される", async () => {
+		await setUpReadyGate();
+		const user = userEvent.setup();
+		renderScreen();
+
+		const publishButton = await openIgPublishButton(user);
+		await waitFor(() => expect(publishButton).toBeEnabled());
+
+		// ig_publish_start のみ reject させる(バリデーション違反は Rust 側で
+		// ジョブ開始前に同期 Err として返る、§commands/publish/ig.rs)。
+		const defaultImpl = mockInvoke.getMockImplementation();
+		mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+			if (cmd === "ig_publish_start") {
+				throw new Error(
+					"ファイルサイズが上限を超えています(310.0MB > 300MB)。Instagram の上限は300MBです。",
+				);
+			}
+			return defaultImpl?.(cmd, args);
+		});
+
+		await user.click(publishButton);
+
+		const previewCallIndex = await waitFor(() => {
+			const index = mockInvoke.mock.calls.findIndex(
+				([cmd]) => cmd === "preview_start",
+			);
+			expect(index).toBeGreaterThanOrEqual(0);
+			return index;
+		});
+		emitMockEvent(`preview://done/${invokeJobId(previewCallIndex)}`, {
+			path: "/cache/out.mp4",
+		});
+
+		await waitFor(() =>
+			expect(
+				screen.getByText(/ファイルサイズが上限を超えています/),
+			).toBeInTheDocument(),
+		);
+	});
+});

@@ -1,23 +1,29 @@
-//! Phase 3(IG/YouTube 公開連携)の土台。`publish` cargo feature が有効なビルド
+//! Phase 3(IG/YouTube 公開連携)。`publish` cargo feature が有効なビルド
 //! (private エディション。build:mac-private 等)でのみコンパイルされる
 //! (§commands/mod.rs の `#[cfg(feature = "publish")]`、docs/desktop-migration-plan.md §6.6)。
 //!
-//! このモジュールが持つのは「資格情報設定 + OS キーチェーン + 実行時ゲート」
-//! (v2.4 §11-3・§6.6)のみ。IG(R2 アップロード + POST /jobs)・YouTube(OAuth +
-//! アップロード)本体のコマンドは Phase 3 本体(後続 PR)でここに追加する。
-//!
 //! - [`credential_store`]: OS キーチェーン連携のトレイト分離(テスト容易性のため)。
 //! - [`scheduler_check`]: scheduler への2段階疎通チェック(health → Bearer 認証)。
+//! - [`r2_credentials`]: R2(S3 互換)資格情報のキーチェーン連携(§6.4)。
+//! - [`ig`]: IG(Instagram)本体のコマンド(`ig_publish_start`/`ig_publish_cancel`。
+//!   R2 アップロード + POST /jobs、§6.4・§8 Phase 3)。
 //!
-//! トークン値そのものを返す invoke コマンドは存在しない(get 系は「保存済みか」の
+//! YouTube(OAuth + アップロード)本体のコマンドは Phase 3 の別作業として今後ここに
+//! 追加する(今回は IG のみ実装、§実装指示のスコープ)。
+//!
+//! トークン・資格情報そのものを返す invoke コマンドは存在しない(get 系は「保存済みか」の
 //! boolean のみを返す。§実装方針)。set は値を受け取るが、ログ・エラーメッセージに
 //! 値を含めない(credential_store.rs の `sanitize_err` 参照)。
 
 mod credential_store;
+mod ig;
+mod r2_credentials;
 mod scheduler_check;
 
 use credential_store::{CredentialStore, KeyringStore};
 use scheduler_check::perform_check;
+
+pub use ig::IgJobsState;
 pub use scheduler_check::ConnectionCheckResult;
 
 /// キーチェーンのサービス名前空間。private エディション専用の識別子を使い、他アプリ
@@ -27,7 +33,10 @@ const SERVICE: &str = "com.facet.desktop.private";
 /// scheduler の Bearer トークンのキーチェーン内 username。
 const KEY_SCHEDULER_API_TOKEN: &str = "scheduler_api_token";
 
-// YouTube OAuth 実装(Phase 3 本体、後続 PR)で使う予定のキー名。今はまだ未使用のため
+/// R2(S3 互換)資格情報一式(JSON)のキーチェーン内 username(§r2_credentials.rs)。
+const KEY_R2_CREDENTIALS: &str = "r2_credentials";
+
+// YouTube OAuth 実装(Phase 3 の別作業)で使う予定のキー名。今はまだ未使用のため
 // 定数だけ予約し、実際の set/get コマンドは追加しない。
 #[allow(dead_code)]
 const KEY_YOUTUBE_OAUTH_REFRESH_TOKEN: &str = "youtube_oauth_refresh_token";
@@ -83,6 +92,70 @@ pub async fn check_scheduler_connection(
 ) -> Result<ConnectionCheckResult, String> {
 	let token = KeyringStore.get(SERVICE, KEY_SCHEDULER_API_TOKEN)?;
 	Ok(perform_check(&scheduler_url, token.as_deref()).await)
+}
+
+/// R2(S3 互換)資格情報をキーチェーンへ保存する(既存値は上書き)。
+/// `bucket` が空文字列なら既定値(`r2_credentials::DEFAULT_BUCKET`)を使う。
+/// 値そのものはログ・エラーメッセージに含めない。
+#[tauri::command]
+pub fn set_r2_credentials(
+	account_id: String,
+	access_key_id: String,
+	secret_access_key: String,
+	bucket: String,
+) -> Result<(), String> {
+	r2_credentials::set_impl(
+		&KeyringStore,
+		&account_id,
+		&access_key_id,
+		&secret_access_key,
+		&bucket,
+	)
+}
+
+/// R2 資格情報が保存済みかどうかだけを返す(値そのものは返さない)。
+#[tauri::command]
+pub fn has_r2_credentials() -> Result<bool, String> {
+	r2_credentials::has_impl(&KeyringStore)
+}
+
+/// 保存済みの R2 資格情報を削除する(未保存でも成功扱い)。
+#[tauri::command]
+pub fn delete_r2_credentials() -> Result<(), String> {
+	r2_credentials::delete_impl(&KeyringStore)
+}
+
+/// IG(Instagram)公開ジョブを開始する(ロジック本体は `ig::start_impl`、
+/// §ig.rs `start_impl` 冒頭コメント: `#[tauri::command]` をこの薄いラッパに置く理由)。
+#[tauri::command]
+pub async fn ig_publish_start(
+	app: tauri::AppHandle,
+	jobs: tauri::State<'_, IgJobsState>,
+	job_id: ig::JobId,
+	input_path: String,
+	caption: String,
+	publish_at: i64,
+	scheduler_url: String,
+) -> Result<(), String> {
+	ig::start_impl(
+		app,
+		jobs,
+		job_id,
+		input_path,
+		caption,
+		publish_at,
+		scheduler_url,
+	)
+	.await
+}
+
+/// IG 公開ジョブをキャンセルする(ロジック本体は `ig::cancel_impl`)。
+#[tauri::command]
+pub fn ig_publish_cancel(
+	job_id: ig::JobId,
+	jobs: tauri::State<'_, IgJobsState>,
+) -> Result<(), String> {
+	ig::cancel_impl(job_id, jobs)
 }
 
 #[cfg(test)]

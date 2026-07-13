@@ -19,10 +19,12 @@ const TONE: Record<PubStatusKind, StatusTone> = {
 
 export function StatusBadge({ status }: { status: PubStatus | undefined }) {
 	const kind = status?.kind ?? "idle";
+	// "publishing" 中は message に進捗(例: "アップロード中 42%")が入る
+	// (`UploadScreen.tsx` の `startIgPublish` onProgress 参照)。error 以外でも表示する。
 	return (
 		<StatusPill tone={TONE[kind]}>
 			{LABEL[kind]}
-			{kind === "error" && status?.message ? `: ${status.message}` : ""}
+			{status?.message ? `: ${status.message}` : ""}
 		</StatusPill>
 	);
 }

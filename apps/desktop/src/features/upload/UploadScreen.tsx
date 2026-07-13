@@ -15,7 +15,9 @@ import { uniqueBaseNames } from "../../lib/uniqueBaseName";
 import { getErrorMessage } from "../../lib/getErrorMessage";
 import { Button } from "../../components/ui/Button";
 import { useConfirm } from "../../components/ui/confirm";
-import { usePublishGate } from "../publish-settings/usePublishGate";
+import { usePublishGateContext } from "../publish-settings/PublishGateContext";
+import { loadSchedulerUrl } from "../publish-settings/schedulerUrlStore";
+import { describeIgPublishError, startIgPublish } from "./igPublish";
 import { PostDetail } from "./PostDetail";
 import { PostRow } from "./PostRow";
 import { BulkPresetsModal } from "./BulkPresetsModal";
@@ -23,7 +25,7 @@ import { ScheduleSettingsModal } from "./ScheduleSettingsModal";
 import {
 	DEFAULT_FIT,
 	DEFAULT_TARGET_ID,
-	PUBLISH_SUPPORTED,
+	isPlatformPublishSupported,
 	type UploadOutput,
 	type UploadPost,
 	type PubStatus,
@@ -83,13 +85,23 @@ export function UploadScreen({
 	const bulkExportQueue = useReframeQueue();
 	const confirm = useConfirm();
 	const { settings, updateSettings } = useSettings();
-	// 実行時ゲート(§features/publish-settings/usePublishGate.ts、
-	// docs/desktop-migration-plan.md §6.6・§11-3)。実際の投稿機能(IG/YouTube)は
-	// Phase 3 本体(後続 PR)で実装するため、PUBLISH_SUPPORTED 自体は当面 false のまま
-	// 据え置き、投稿ボタンの disabled 判定はまだこのゲートと組み合わせない
-	// (ゲートが true でも「未対応」表示のままで良い、§実装指示)。ここでは設定状況を
-	// 案内バナーに反映するだけの土台として配線する。
-	const publishGate = usePublishGate();
+	// 実行時ゲート(§features/publish-settings/PublishGateContext.tsx、
+	// docs/desktop-migration-plan.md §6.6・§11-3)。`igReady`(scheduler 疎通 OK かつ
+	// R2 資格情報保存済み)+ `isPlatformPublishSupported`(コード対応状況)の両方を
+	// 満たす場合のみ Instagram への投稿ボタンを有効化する(`canPublishTarget` 参照)。
+	// PublishSettingsSection と同一インスタンスを共有する(二重疎通チェック防止、
+	// §PublishGateContext.tsx 冒頭コメント)。
+	const publishGate = usePublishGateContext();
+
+	/** `target` への投稿がボタンとして有効化されるか(コード対応 + 実行時ゲート)。 */
+	const canPublishTarget = (target: OutputTarget | undefined): boolean => {
+		if (!target) return false;
+		if (!isPlatformPublishSupported(target.platform)) return false;
+		// YouTube は今回のスコープ外(isPlatformPublishSupported が既に false を返すため
+		// ここには到達しないが、将来 YouTube 用ゲートを追加する際の分岐点として残す)。
+		if (target.platform === "instagram") return publishGate.igReady;
+		return false;
+	};
 
 	// 一括予約スケジュールの入力状態。
 	const [startDate, setStartDate] = useState("");
@@ -457,25 +469,17 @@ export function UploadScreen({
 	};
 
 	// ---- 投稿処理 ------------------------------------------------------------
-	// desktop 版は Phase 3 まで IG/YouTube への実投稿(studio-server の
-	// `/api/publish/*` HTTP エンドポイント)に対応しない(desktop に studio-server は
-	// 存在しないため、叩けば ECONNREFUSED になる)。ボタンは studio 版と同じ UI 構造を
-	// 保つため残しつつ disabled にし(PUBLISH_SUPPORTED 参照)、万一 disabled をすり抜けて
-	// 呼ばれても HTTP を叩かず即エラー表示に倒す防御的ガードをここに置く。
+	// Instagram は R2 アップロード + scheduler へのジョブ登録(`ig_publish_start`、
+	// §6.4)を native(Rust)で実装済み。YouTube は今回のスコープ外(Phase 3 の別作業)
+	// のため未対応のまま — ボタンは studio 版と同じ UI 構造を保つため残しつつ、
+	// `canPublishTarget` が false の間は disabled にし、万一すり抜けて呼ばれても
+	// ここで即エラー表示に倒す防御的ガードを置く。
 
 	/** 1 Output を投稿する。publishAt は post.publishAt(全出力共通)を使う。 */
 	const publishOutput = async (
 		post: UploadPost,
 		output: UploadOutput,
 	): Promise<void> => {
-		if (!PUBLISH_SUPPORTED) {
-			setPubStatus(output.id, {
-				kind: "error",
-				message:
-					"投稿はデスクトップ版では未対応です(Phase 3 で対応予定)。書き出しは「フォルダへ一括書き出し」を使ってください。",
-			});
-			return;
-		}
 		if (!source) return;
 		const clip = clips.find((c) => c.id === post.clipId);
 		if (!clip) return;
@@ -487,13 +491,23 @@ export function UploadScreen({
 			});
 			return;
 		}
+		if (!canPublishTarget(target)) {
+			setPubStatus(output.id, {
+				kind: "error",
+				message:
+					target.platform === "instagram"
+						? "Instagram への投稿には設定(scheduler + R2)が必要です。設定画面から入力してください。"
+						: "YouTube への投稿はデスクトップ版では未対応です(今後のアップデートで対応予定)。",
+			});
+			return;
+		}
 
 		try {
 			// 1. レンダリング(生成済みなら再利用)。
 			setPubStatus(output.id, { kind: "rendering" });
 			const outputPath = await ensureRendered(post, output);
 
-			// 2. 投稿(Phase 3 で studio-server 相当の native 実装に置き換える)。
+			// 2. 投稿。
 			setPubStatus(output.id, { kind: "publishing" });
 			await publishTo(target, post, output, clip.name, outputPath);
 
@@ -508,17 +522,51 @@ export function UploadScreen({
 	};
 
 	/**
-	 * プラットフォーム別の投稿。Phase 3 で実装予定(現状は PUBLISH_SUPPORTED=false のため
-	 * publishOutput の早期リターンで到達しない)。
+	 * プラットフォーム別の投稿。Instagram は R2 アップロード + scheduler 登録
+	 * (`startIgPublish`)を実行し、進捗を `pubStatuses` の message に反映する。
+	 * YouTube は今回のスコープ外(`publishOutput` の `canPublishTarget` チェックで
+	 * 到達しない)。
 	 */
 	const publishTo = async (
-		_target: OutputTarget,
-		_post: UploadPost,
-		_output: UploadOutput,
+		target: OutputTarget,
+		post: UploadPost,
+		output: UploadOutput,
 		_clipName: string,
-		_outputPath: string,
+		outputPath: string,
 	): Promise<void> => {
-		throw new Error("投稿はデスクトップ版では未対応です(Phase 3 で対応予定)。");
+		if (target.platform !== "instagram") {
+			throw new Error(
+				"YouTube への投稿はデスクトップ版では未対応です(今後のアップデートで対応予定)。",
+			);
+		}
+		const schedulerUrl = loadSchedulerUrl();
+		const publishAt = post.publishAt ?? Date.now();
+
+		await new Promise<void>((resolve, reject) => {
+			startIgPublish(
+				{
+					inputPath: outputPath,
+					caption: output.caption,
+					publishAt,
+					schedulerUrl,
+				},
+				{
+					onProgress: (progress) => {
+						setPubStatus(output.id, {
+							kind: "publishing",
+							message:
+								progress.phase === "uploading"
+									? `アップロード中 ${Math.round(progress.percent)}%`
+									: "投稿ジョブを登録中…",
+						});
+					},
+					onDone: () => resolve(),
+					onError: (error) => reject(new Error(describeIgPublishError(error))),
+				},
+			).catch((err: unknown) => {
+				reject(err instanceof Error ? err : new Error(getErrorMessage(err)));
+			});
+		});
 	};
 
 	// 1 Post の全 Output を逐次投稿する。
@@ -558,6 +606,11 @@ export function UploadScreen({
 
 	// 一括書き出し可否の判定に使う全 Output 数。
 	const totalOutputs = posts.reduce((sum, p) => sum + p.outputs.length, 0);
+
+	/** 「すべて投稿」ボタンの活性化判定: いずれかの Output が投稿可能(canPublishTarget)か。 */
+	const anyPublishableOutput = posts.some((post) =>
+		post.outputs.some((output) => canPublishTarget(targetById(output.targetId))),
+	);
 
 	/**
 	 * フォルダへ一括書き出し: 保存先フォルダを選ばせたうえで、全 Post の全 Output を
@@ -702,19 +755,19 @@ export function UploadScreen({
 					アップロード
 				</h2>
 				<div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-4">
-					{!PUBLISH_SUPPORTED && (
+					{!publishGate.igReady && (
 						<div className="shrink-0 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-300">
-							投稿(YouTube / Instagram)はデスクトップ版では未対応です(Phase 3
-							で対応予定)。書き出し済みファイルは右の「フォルダへ一括書き出し」で取得してください。
-							{publishGate.ready && (
-								<>
-									{" "}
-									公開連携の設定は完了しています(疎通チェック済み) —
-									投稿機能の実装後、自動的に有効になります。
-								</>
+							Instagram
+							への投稿には設定(scheduler の疎通確認 + R2 資格情報)が必要です。設定画面から入力してください。
+							{publishGate.ready && !publishGate.hasR2Credentials && (
+								<> (scheduler の疎通は OK です。R2 資格情報が未設定です。)</>
 							)}
 						</div>
 					)}
+					<div className="shrink-0 rounded-md border border-line bg-elevated/40 px-3 py-2 text-[11px] text-neutral-400">
+						YouTube
+						への投稿はデスクトップ版では未対応です(今後のアップデートで対応予定)。書き出し済みファイルは右の「フォルダへ一括書き出し」で取得してください。
+					</div>
 					<div className="flex min-h-0 flex-1 items-start gap-3">
 						{/* 中央: 選択中 Post の詳細 */}
 						<div className="max-h-full min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
@@ -726,6 +779,9 @@ export function UploadScreen({
 									renders={preview.states}
 									pubStatuses={pubStatuses}
 									busy={busy}
+									canPublishOutput={(output) =>
+										canPublishTarget(targetById(output.targetId))
+									}
 									onPatchPost={(patch) => patchPost(selectedPost.id, patch)}
 									onPatchOutput={(outputId, patch) =>
 										patchOutput(selectedPost.id, outputId, patch)
@@ -843,11 +899,11 @@ export function UploadScreen({
 					<Button
 						variant="primary"
 						onClick={() => publishAllMutation.mutate()}
-						disabled={busy || totalOutputs === 0 || !PUBLISH_SUPPORTED}
+						disabled={busy || totalOutputs === 0 || !anyPublishableOutput}
 						title={
-							PUBLISH_SUPPORTED
+							anyPublishableOutput
 								? undefined
-								: "デスクトップ版では未対応(Phase 3 で対応予定)"
+								: "投稿可能な出力先がありません(Instagram の設定を確認してください)"
 						}
 					>
 						すべて投稿

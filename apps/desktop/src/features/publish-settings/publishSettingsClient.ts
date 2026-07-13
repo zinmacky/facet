@@ -43,3 +43,37 @@ export function checkSchedulerConnection(
 		schedulerUrl,
 	});
 }
+
+/** R2(Cloudflare, S3 互換)資格情報の入力(§6.4)。 */
+export interface R2CredentialsInput {
+	accountId: string;
+	accessKeyId: string;
+	secretAccessKey: string;
+	/** 空文字列なら Rust 側で既定値("facet-media")を使う。 */
+	bucket: string;
+}
+
+/** R2 資格情報をキーチェーンへ保存する(既存値は上書き)。 */
+export function setR2Credentials({
+	accountId,
+	accessKeyId,
+	secretAccessKey,
+	bucket,
+}: R2CredentialsInput): Promise<void> {
+	return invoke<void>("set_r2_credentials", {
+		accountId,
+		accessKeyId,
+		secretAccessKey,
+		bucket,
+	});
+}
+
+/** R2 資格情報が保存済みかどうかだけを返す(値そのものは返らない)。 */
+export function hasR2Credentials(): Promise<boolean> {
+	return invoke<boolean>("has_r2_credentials");
+}
+
+/** 保存済みの R2 資格情報を削除する(未保存でも成功扱い)。 */
+export function deleteR2Credentials(): Promise<void> {
+	return invoke<void>("delete_r2_credentials");
+}

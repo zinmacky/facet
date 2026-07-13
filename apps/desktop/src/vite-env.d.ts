@@ -22,14 +22,17 @@ declare module "virtual:upload-entry" {
 }
 
 /**
- * 公開連携(scheduler URL / API トークン / 疎通チェック)の設定セクション。実体は
- * vite.config.ts / vitest.config.ts の `resolve.alias` で edition ごとに差し替える:
+ * 公開連携(scheduler URL / API トークン / 疎通チェック / R2 資格情報)の設定セクション
+ * + 実行時ゲートの共有 Provider。実体は vite.config.ts / vitest.config.ts の
+ * `resolve.alias` で edition ごとに差し替える:
  * - private: `features/publish-settings/entry.ts`(実体)
- * - public : `features/publish-settings/entry.public.ts`(何もレンダリングしないスタブ)
- * SettingsDialog.tsx はこのモジュール経由で描画するため、edition 分岐を持たない。
+ * - public : `features/publish-settings/entry.public.tsx`(何もレンダリングしない
+ *   スタブ + 子要素をそのまま透過するだけの no-op Provider)
+ * SettingsDialog.tsx / App.tsx はこのモジュール経由で描画するため、edition 分岐を持たない。
  */
 declare module "virtual:publish-settings-entry" {
-	import type { ComponentType } from "react";
+	import type { ComponentType, ReactNode } from "react";
 
 	export const PublishSettingsSection: ComponentType;
+	export const PublishGateProvider: ComponentType<{ children: ReactNode }>;
 }

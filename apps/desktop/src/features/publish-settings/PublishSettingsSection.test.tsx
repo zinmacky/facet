@@ -1,18 +1,26 @@
+import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render as testingLibraryRender, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { mockInvoke } from "../../test/tauri-mock";
+import { PublishGateProvider } from "./PublishGateContext";
 import { PublishSettingsSection } from "./PublishSettingsSection";
 
 /**
  * `PublishSettingsSection` は `useSettings`/`useConfirm` に依存しないため
- * `renderWithProviders` は不要(素の `render` で足りる)。
+ * `renderWithProviders`(`test/render.tsx`)は不要だが、`usePublishGateContext()` を
+ * 使うため `PublishGateProvider` では包む必要がある(Provider 外での呼び出しは
+ * 例外を投げる、§PublishGateContext.tsx)。
  * localStorage(scheduler URL の保存先、§schedulerUrlStore.ts)はテスト間で
  * 引きずらないよう毎回クリアする(SettingsDialog.test.tsx と同じ方針)。
  */
 beforeEach(() => {
 	window.localStorage.clear();
 });
+
+function render(ui: ReactElement) {
+	return testingLibraryRender(<PublishGateProvider>{ui}</PublishGateProvider>);
+}
 
 async function saveSchedulerUrl(
 	user: ReturnType<typeof userEvent.setup>,

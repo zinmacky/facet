@@ -1,5 +1,5 @@
 import type { FitMode } from "@facet/core";
-import type { Clip } from "../../types";
+import type { Clip, OutputTarget } from "../../types";
 import { clipPreviewSig } from "../../lib/clipSig";
 import { cn } from "../../components/ui/cn";
 
@@ -71,12 +71,27 @@ export const DEFAULT_TARGET_ID = "yt-shorts";
 export const DEFAULT_FIT: FitMode = "crop";
 
 /**
- * IG/YouTube への実投稿は Phase 3 まで desktop 版では未対応
- * (studio-server の `/api/publish/*` に依存しており、desktop にはそのサーバが無い)。
- * 投稿ボタン群は studio 版と UI 構造を保つため残しつつ、ここを false にして
- * disabled + 説明表示のみ行う(HTTP を叩いて ECONNREFUSED になる経路を塞ぐ)。
+ * プラットフォーム別の投稿対応状況(desktop 版, Phase 3)。
+ *
+ * - Instagram: R2 アップロード + POST /jobs を Rust で実装済み(§6.4)。ただし実際に
+ *   投稿ボタンを有効化するにはこれに加えて実行時ゲート(`PublishGateContext.igReady` —
+ *   scheduler 疎通 OK かつ R2 資格情報保存済み)も満たす必要がある
+ *   (`isPlatformPublishSupported` はコード対応状況のみを表し、ゲートは呼び出し側で
+ *   別途組み合わせる、`UploadScreen.tsx` 参照)。
+ * - YouTube: 今回のスコープ外(Phase 3 の別作業として今後 OAuth + アップロードを実装する)。
+ *   ボタン群は studio 版と UI 構造を保つため残しつつ disabled のままにする。
  */
-export const PUBLISH_SUPPORTED = false;
+export const INSTAGRAM_PUBLISH_SUPPORTED = true;
+export const YOUTUBE_PUBLISH_SUPPORTED = false;
+
+/** `target.platform` のコード対応状況(実行時ゲートは含まない)。 */
+export function isPlatformPublishSupported(
+	platform: OutputTarget["platform"],
+): boolean {
+	return platform === "instagram"
+		? INSTAGRAM_PUBLISH_SUPPORTED
+		: YOUTUBE_PUBLISH_SUPPORTED;
+}
 
 /** 既定の Output を生成する。 */
 export function createOutput(): UploadOutput {
