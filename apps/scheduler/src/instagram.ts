@@ -10,11 +10,18 @@ const TOKEN_KEY = "ig_long_lived";
 /**
  * Graph API のエラー。message にレスポンス由来の説明を載せる。
  * DO 側で attempts++ の対象として捕捉する。
+ * `code` / `subcode` は Graph の `error.code` / `error.error_subcode`(あれば)を保持し、
+ * 文言に依存しないエラー分類(例: 二重 publish 判定)やログ診断に使う。
  */
 export class InstagramError extends Error {
-	constructor(message: string) {
+	readonly code?: number;
+	readonly subcode?: number;
+
+	constructor(message: string, opts?: { code?: number; subcode?: number }) {
 		super(message);
 		this.name = "InstagramError";
+		this.code = opts?.code;
+		this.subcode = opts?.subcode;
 	}
 }
 
@@ -46,9 +53,14 @@ async function readGraphJson(res: Response): Promise<Record<string, unknown>> {
 		);
 	}
 	if (typeof body === "object" && body !== null && "error" in body) {
-		const err = (body as { error?: { message?: string } }).error;
+		const err = (
+			body as {
+				error?: { message?: string; code?: number; error_subcode?: number };
+			}
+		).error;
 		throw new InstagramError(
 			err?.message ?? `graph API error (status ${res.status})`,
+			{ code: err?.code, subcode: err?.error_subcode },
 		);
 	}
 	if (!res.ok) {
