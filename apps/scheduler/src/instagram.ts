@@ -40,6 +40,16 @@ function graphUrl(env: Env, path: string): string {
 }
 
 /**
+ * アクセストークンは URL クエリやボディではなく `Authorization: Bearer` ヘッダで渡す。
+ * URL クエリに載せると Worker/プロキシ/Graph 側のアクセスログに残りやすいため
+ * (Graph API はヘッダ渡しを正式サポートする)。呼び出し側は返り値を fetch の
+ * `headers` にスプレッドして使う。
+ */
+function authHeader(token: string): Record<string, string> {
+	return { authorization: `Bearer ${token}` };
+}
+
+/**
  * Graph API のレスポンスを JSON として読み、エラー形状(`{error:{message}}`)なら例外にする。
  * HTTP ステータスが失敗でも Graph はボディにエラーを載せるため、常にボディを検査する。
  */
@@ -84,11 +94,13 @@ export async function createContainer(
 		media_type: params.mediaType,
 		video_url: params.videoUrl,
 		caption: params.caption,
-		access_token: token,
 	});
 	const res = await fetch(graphUrl(env, `${env.IG_USER_ID}/media`), {
 		method: "POST",
-		headers: { "content-type": "application/x-www-form-urlencoded" },
+		headers: {
+			"content-type": "application/x-www-form-urlencoded",
+			...authHeader(token),
+		},
 		body,
 	});
 	const json = await readGraphJson(res);
@@ -107,10 +119,10 @@ export async function getContainerStatus(
 ): Promise<ContainerStatus> {
 	const query = new URLSearchParams({
 		fields: "status_code",
-		access_token: token,
 	});
 	const res = await fetch(graphUrl(env, `${containerId}?${query.toString()}`), {
 		method: "GET",
+		headers: authHeader(token),
 	});
 	const json = await readGraphJson(res);
 	const status = json.status_code;
@@ -133,11 +145,13 @@ export async function publishContainer(
 ): Promise<string> {
 	const body = new URLSearchParams({
 		creation_id: containerId,
-		access_token: token,
 	});
 	const res = await fetch(graphUrl(env, `${env.IG_USER_ID}/media_publish`), {
 		method: "POST",
-		headers: { "content-type": "application/x-www-form-urlencoded" },
+		headers: {
+			"content-type": "application/x-www-form-urlencoded",
+			...authHeader(token),
+		},
 		body,
 	});
 	const json = await readGraphJson(res);
