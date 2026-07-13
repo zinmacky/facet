@@ -17,4 +17,9 @@ export interface Env {
 
 	// secret(wrangler secret で投入)
 	IG_APP_SECRET: string;
+	/**
+	 * 公開エンドポイント(GET / , /jobs 配下)の Bearer トークン認証に使う。
+	 * 未設定の場合、認証ミドルウェアは fail-closed で全リクエストを 503 で拒否する。
+	 */
+	SCHEDULER_API_TOKEN?: string;
 }
