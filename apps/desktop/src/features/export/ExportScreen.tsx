@@ -34,7 +34,11 @@ interface ExportScreenProps {
 	 */
 	resetToken: number;
 	onGoToEdit: () => void;
-	onGoToUpload: () => void;
+	/**
+	 * "アップロードへ進む" の遷移先。public 版(投稿ステップ自体を持たない2 step
+	 * ウィザード)では App.tsx が渡さない — undefined のときボタン自体を出さない。
+	 */
+	onGoToUpload?: () => void;
 	/** results から導出した進捗サマリを App(StepIndicator バッジ)へ押し上げる。 */
 	onProgressSummary?: (summary: ExportSummary) => void;
 }
@@ -539,13 +543,15 @@ export function ExportScreen({
 							: `書き出しを開始(${clips.length}本)`}
 					</Button>
 				)}
-				<Button
-					variant="primary"
-					disabled={clips.length === 0}
-					onClick={onGoToUpload}
-				>
-					アップロードへ進む
-				</Button>
+				{onGoToUpload && (
+					<Button
+						variant="primary"
+						disabled={clips.length === 0}
+						onClick={onGoToUpload}
+					>
+						アップロードへ進む
+					</Button>
+				)}
 			</footer>
 		</section>
 	);

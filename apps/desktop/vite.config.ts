@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import tailwindcss from "@tailwindcss/vite";
+import { resolveEdition, uploadEntryAlias } from "./edition.build";
 
 // Tauri が期待する固定ポート。studio/web(5178/5179)と衝突しないよう 5180 を使う。
 const TAURI_DEV_PORT = 5180;
@@ -19,26 +20,37 @@ export default defineConfig(({ mode }) => {
 	// (alias が無ければ `@tauri-apps/api/*` 等は実パッケージのまま解決される)。
 	const isMock = mode === "mock";
 
+	// public/private エディション(§lib/edition.ts、edition.build.ts)。
+	// `--mode public` を明示したビルド/dev コマンドのみ public、それ以外は既定で
+	// private(現行の全機能。dev:mock やテスト実行時の既定もここに含まれる)。
+	const edition = resolveEdition(mode);
+
 	return {
 		plugins: [react(), tailwindcss()],
 		// Rust 側のエラー出力を vite が隠さないようにする
 		clearScreen: false,
 		resolve: {
-			alias: isMock
-				? {
-						// Tauri ランタイムを renderer 内完結のモック実装へ差し替える
-						// (§src/mock/README.md)。ブラウザで Tauri ネイティブウィンドウ無しに
-						// renderer を起動し、UIUX 確認のスクリーンショットを撮れるようにする。
-						"@tauri-apps/api/core": `${mockDir}core.ts`,
-						"@tauri-apps/api/event": `${mockDir}event.ts`,
-						"@tauri-apps/api/path": `${mockDir}path.ts`,
-						"@tauri-apps/plugin-dialog": `${mockDir}dialog.ts`,
-						"@tauri-apps/plugin-opener": `${mockDir}opener.ts`,
-						"@tauri-apps/plugin-notification": `${mockDir}notification.ts`,
-						"@tauri-apps/plugin-updater": `${mockDir}updater.ts`,
-						"@tauri-apps/plugin-process": `${mockDir}process.ts`,
-					}
-				: undefined,
+			alias: {
+				// public 版の投稿系コード除外(virtual:upload-entry の差し替え、
+				// §src/vite-env.d.ts)。edition に関わらず常に設定する
+				// (private でも entry.ts への解決が必要なため)。
+				...uploadEntryAlias(edition, import.meta.url),
+				...(isMock
+					? {
+							// Tauri ランタイムを renderer 内完結のモック実装へ差し替える
+							// (§src/mock/README.md)。ブラウザで Tauri ネイティブウィンドウ無しに
+							// renderer を起動し、UIUX 確認のスクリーンショットを撮れるようにする。
+							"@tauri-apps/api/core": `${mockDir}core.ts`,
+							"@tauri-apps/api/event": `${mockDir}event.ts`,
+							"@tauri-apps/api/path": `${mockDir}path.ts`,
+							"@tauri-apps/plugin-dialog": `${mockDir}dialog.ts`,
+							"@tauri-apps/plugin-opener": `${mockDir}opener.ts`,
+							"@tauri-apps/plugin-notification": `${mockDir}notification.ts`,
+							"@tauri-apps/plugin-updater": `${mockDir}updater.ts`,
+							"@tauri-apps/plugin-process": `${mockDir}process.ts`,
+						}
+					: {}),
+			},
 		},
 		server: {
 			port: isMock ? MOCK_DEV_PORT : TAURI_DEV_PORT,
@@ -62,6 +74,11 @@ export default defineConfig(({ mode }) => {
 			// (bulk-download バグ修正で studio-server 依存の fetch 呼び出しを撤去した)。
 		},
 		envPrefix: ["VITE_", "TAURI_ENV_*"],
+		define: {
+			// §src/lib/edition.ts。文字列リテラルに置換されるため、`EDITION === "private"`
+			// のような分岐は minify 時に定数畳み込みされる(未使用ブランチの死コード化)。
+			__FACET_EDITION__: JSON.stringify(edition),
+		},
 		build: {
 			// Tauri は Windows で Chromium、macOS/Linux で WebKit を使う
 			target:

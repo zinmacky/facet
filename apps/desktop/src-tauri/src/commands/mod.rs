@@ -9,7 +9,15 @@
 //! `reframe_start` と同じ `reframe::JobsState` を共有するため、
 //! `preview_start` が返したジョブも `reframe_cancel` でキャンセルできる
 //! (`preview` モジュール冒頭コメント参照)。
+//!
+//! エディション分離(v2.4, docs/desktop-migration-plan.md §6.6): `publish` モジュールは
+//! Phase 3(IG/YouTube 公開連携)の土台。`publish` feature が有効なビルド
+//! (private、build:mac-private 等)でのみコンパイルされ、public(配布版)の
+//! バイナリには含まれない。現時点ではまだ実コマンドは無い(空モジュール、
+//! `publish.rs` 冒頭コメント参照)。
 
 pub mod preview;
 pub mod probe;
+#[cfg(feature = "publish")]
+pub mod publish;
 pub mod reframe;
