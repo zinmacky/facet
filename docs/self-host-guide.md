@@ -20,11 +20,11 @@
 ### 現状でできること / できないこと(重要)
 
 - **Instagram の予約公開は実装済み**です(R2 アップロード + scheduler 経由の予約公開)。
-- **YouTube の予約公開は desktop 側に未実装**です(2026-07-13 時点。コード上も
-  YouTube 投稿は明示的にスコープ外とされており、UI 上のボタンも「デスクトップ版
-  では未対応」と表示されます)。§4 は将来の実装に備えた**準備作業**として記載して
-  いますが、desktop アプリ側の接続 UI が存在しないため、今すぐ接続はできません。
-  実装が進み次第この文書を更新します。
+- **YouTube への投稿・予約公開も実装済み**です(OAuth 接続 UI + resumable upload +
+  `publishAt` 予約、§4)。ただし **監査(Audit)済みでない Google Cloud プロジェクト
+  では `publishAt` による予約公開が機能せず、非公開のまま自動公開されません**
+  (§4・§5.4。YouTube 側の仕様であり Facet 固有の制限ではない)。個人でセルフホスト
+  する場合は通常この監査を通していないため、§4 のフォールバック手順を参照してください。
 
 ---
 
@@ -285,27 +285,70 @@ Instagram への投稿が有効になります。
 
 ---
 
-## 4. YouTube 連携のセットアップ(準備作業のみ・接続 UI は未実装)
+## 4. YouTube 連携のセットアップ
 
-前述のとおり、desktop 側に YouTube への OAuth 接続・アップロード UI は
-まだ実装されていません。以下は実装が入った際にすぐ使えるよう、外部側の準備を
-先に済ませておきたい場合の手順です。
+YouTube への OAuth 接続・アップロード UI・`publishAt` 予約公開は desktop 側に
+実装済みです(private エディションのみ。実装は
+[apps/desktop/src-tauri/src/commands/publish/youtube_oauth.rs](../apps/desktop/src-tauri/src/commands/publish/youtube_oauth.rs) /
+[youtube.rs](../apps/desktop/src-tauri/src/commands/publish/youtube.rs)、
+UI は
+[apps/desktop/src/features/publish-settings/PublishSettingsSection.tsx](../apps/desktop/src/features/publish-settings/PublishSettingsSection.tsx))。
 
-- Google Cloud のプロジェクトを作成し、YouTube Data API v3 を有効化する。
-- OAuth 同意画面を設定し、OAuth クライアントを**「デスクトップアプリ」種別**で
-  作成する(ブラウザ埋め込みでなくローカルアプリからの認可コードフローを想定する
-  ため)。
-- テスト段階(Google の審査前)では OAuth 同意画面のテストユーザーに自分の
-  Google アカウントを登録しておく。
-- **未監査(unverified)のアプリでは `publishAt` による予約公開が private ロック
-  される**(非公開のままフリップされない)制約があります。個人の自己ホスト用途
-  では通常この監査(Audit)は通っていないため、次のいずれかで運用します:
-  - YouTube API Services の Audit フォームから監査を申請する(無料、個人でも
-    申請可能)。
-  - 監査を通さない場合は、Facet からは**非公開でアップロードし、YouTube Studio
-    側で手動予約設定**するフォールバックを使う。
+### 4.1 Google Cloud 側の準備
 
-desktop アプリ側の対応が実装され次第、この節を接続手順込みで更新します。
+1. Google Cloud のプロジェクトを作成し、YouTube Data API v3 を有効化する。
+2. OAuth 同意画面を設定する(User Type は External。個人利用のみなので審査は
+   不要 — テストユーザーに自分の Google アカウントを追加すれば動作する)。
+3. OAuth クライアントを**「デスクトップアプリ」種別**で作成する(Facet はループ
+   バックリダイレクト方式の Installed App フローを使うため、この種別が必須)。
+   発行される **クライアント ID** と **クライアントシークレット** を控える。
+
+画面の項目名・ボタン配置は Google Cloud Console 側の変更で陳腐化しやすいため、
+「〜の画面で」程度の記載に留めます(以下同様)。詰まった場合は Google Cloud の
+公式ドキュメント(OAuth 2.0 for Mobile & Desktop Apps)を参照してください。
+
+### 4.2 desktop 側での接続
+
+private エディションの設定画面(公開連携セクション、§3.4 の続き)の
+「YouTube(Google OAuth)」で:
+
+1. §4.1 で控えたクライアント ID / シークレットを入力して保存する(OS キーチェーン
+   に保存され、以後は「未接続」バッジのみ表示される。値は再表示されない)。
+2. 「Google と接続」を押す。OS の既定ブラウザが開き、Google の同意画面が表示
+   される(既定ブラウザが自動起動しない場合は §5 参照)。承認すると desktop 側が
+   自動的にトークンを受け取り、「接続済み」表示に変わる(5分待っても応答がない
+   場合はタイムアウトしエラーになるので再試行する)。
+3. 「切断」はキャッシュ済みトークンのみ削除する(クライアント ID/シークレットは
+   残るため再接続時に再入力は不要)。「クライアント削除」はクライアント資格情報と
+   キャッシュ済みトークンを両方削除する(トークンは道連れで無効になる)。
+
+### 4.3 投稿
+
+リフレーム画面で YouTube 向け Output を選び、**タイトルを入力**(必須。未入力
+だと投稿前バリデーションで弾かれる)してから投稿します。説明欄は任意です。
+公開日時(`publishAt`)を指定した場合、YouTube 側の要件により `privacyStatus` は
+常に `private` に固定されます(desktop 側が明示的にこの値を送る)。公開日時を
+指定しない場合も、既定では `private` でアップロードされます。
+
+### 4.4 未監査アプリの制約(重要)
+
+**監査(Audit)を通していない Google Cloud プロジェクトでは、`publishAt` を
+指定して予約公開してもアプリは非公開(private)のロックがかかったままになり、
+指定時刻が来ても自動的に公開へ切り替わりません**。YouTube API はこれをエラー
+としては返さないため、desktop 側からは検知できません(常時表示の警告バナーで
+注意喚起しています。設定画面の YouTube セクションと、投稿画面のバナーの両方に
+表示されます)。個人でセルフホストする場合は通常この監査を通していないため、
+次のいずれかで運用してください:
+
+- YouTube API Services の Audit フォームから監査を申請する(無料、個人でも
+  申請可能。審査には日数がかかる)。
+- 監査を通さない場合は、Facet からは**非公開でアップロードし、YouTube Studio
+  側で手動で予約設定**するフォールバックを使う。
+
+参考: `videos.insert` のクォータコストは 1 回 1,600 unit、既定の日次上限は
+10,000 unit のため、個人利用では概ね 1 日 6 本程度が上限になります(詳細は
+[docs/desktop-migration-plan.md](./desktop-migration-plan.md) §12.2、2026-07 時点で
+確認した仕様)。
 
 ---
 
@@ -342,7 +385,25 @@ desktop アプリ側の対応が実装され次第、この節を接続手順込
 scheduler が `jobManifest` のバリデーションで 400 を返した場合(通常は
 desktop 側の事前バリデーションで弾かれるため稀)です。
 
-### 5.4 それでも公開されない場合
+### 5.4 YouTube 投稿ジョブ側のエラー分類
+
+アップロード実行中のエラーは `YoutubePublishRuntimeError`(`kind` タグの enum、
+[youtube.rs](../apps/desktop/src-tauri/src/commands/publish/youtube.rs) の
+`classify_error`)として届き、以下のメッセージで表示されます。
+
+| `kind` | 意味 | 対応 |
+|---|---|---|
+| `not_authorized` | トークンが無効・失効・未認可(401 相当) | 設定画面から「Google と接続」をやり直す |
+| `quota_or_forbidden` | 403(quota 超過または権限不足。YouTube API は両者を区別せず 403 を返すため一括りに扱う) | §4.4 のクォータ上限を確認する。時間を置くか翌日再試行する |
+| `network` | 通信エラー(接続不可・タイムアウト等) | ネットワーク状態を確認して再試行する |
+| `api` | 上記以外の YouTube API エラー(不正なリクエスト・想定外のレスポンス等) | メッセージ内の詳細(`detail`)を確認する |
+| `cancelled` | ユーザーがキャンセルした | 対応不要 |
+| `internal` | ファイル読み込み失敗等、desktop 側の内部エラー | メッセージ内の詳細を確認する。再現する場合は入力ファイルの状態を確認する |
+
+いずれも OAuth 未接続・タイトル未入力などジョブ開始前に判明する失敗は、上記の
+イベントではなく投稿開始時の同期エラーとして表示されます(§4.3)。
+
+### 5.5 それでも公開されない場合
 
 - scheduler のログを見る: `wrangler tail`(Cloudflare ダッシュボードの Logs
   でも確認可能)。
@@ -354,6 +415,9 @@ desktop 側の事前バリデーションで弾かれるため稀)です。
 - R2 の公開読取設定(§3.3)が漏れていると、Meta 側が `video_url` を取得できず
   コンテナ作成が失敗する。R2_PUBLIC_BASE + キー(`posts/<date>/<uuid>.mp4`)に
   ブラウザで直接アクセスできるか確認する。
+- YouTube で「アップロードは成功したのに公開されない」場合は、まず §4.4 の
+  未監査ロックを疑う(エラーにならず非公開のままになるため気づきにくい)。
+  YouTube Studio で当該動画の公開設定を確認する。
 
 ---
 
