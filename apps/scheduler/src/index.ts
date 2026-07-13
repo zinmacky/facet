@@ -1,10 +1,17 @@
 import { Hono } from "hono";
+import { requireBearerAuth } from "./auth.js";
 import { scanDueJobs } from "./cron.js";
 import type { Env } from "./env.js";
 import { jobsRoutes } from "./routes/jobs.js";
 import { refreshTokens } from "./token-refresh.js";
 
 const app = new Hono<{ Bindings: Env }>();
+
+// 疎通チェック用のヘルスチェック。無認証で公開するため認証ミドルウェアより前に登録する。
+app.get("/health", (c) => c.json({ ok: true }));
+
+// これ以降の全ルート(状態変更・情報返却を行う公開エンドポイント)に Bearer 認証を適用する。
+app.use("*", requireBearerAuth());
 
 app.get("/", (c) => c.text("facet-scheduler"));
 app.route("/jobs", jobsRoutes());
@@ -37,3 +44,6 @@ export default {
 };
 
 export { PublishDO } from "./publish-do.js";
+
+// テスト用(app.request での HTTP レベル検証に使う)。
+export { app };
