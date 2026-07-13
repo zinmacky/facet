@@ -95,7 +95,7 @@ jobs:
         run: pnpm --filter "@facet/desktop^..." build
 
       # --- 7. tauri-action(署名付きビルド + GitHub Release draft 作成) ---
-      # tauri.release.conf.json をオーバーレイし、LGPL FFmpeg の DLL と
+      # tauri.win-release.conf.json をオーバーレイし、LGPL FFmpeg の DLL と
       # LICENSES/COPYING.LGPLv3 を exe 隣接にバンドルする(Wave A/B)。
       # TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) が未設定だとこのステップで失敗する
       # (初回リリース前チェックリスト、docs/phase4-packaging.md 参照)。
@@ -112,7 +112,7 @@ jobs:
           # フォールバックし `npm run tauri` が Missing script で失敗する(v0.1.0 の
           # 2回目ビルドで実際に発生)。pnpm 経由で tauri CLI を起動するよう明示する。
           tauriScript: pnpm tauri
-          args: --config src-tauri/tauri.release.conf.json
+          args: --config src-tauri/tauri.win-release.conf.json
           tagName: v__VERSION__
           releaseName: "Facet desktop v__VERSION__"
           releaseBody: |
@@ -189,7 +189,7 @@ jobs:
             exit 1
           }
 
-          # COPYING.LGPLv3 が同梱されていることを確認(tauri.release.conf.json の resources)。
+          # COPYING.LGPLv3 が同梱されていることを確認(tauri.win-release.conf.json の resources)。
           if (-not (Test-Path (Join-Path $appDir "COPYING.LGPLv3"))) {
             Write-Error "COPYING.LGPLv3 が配布物に同梱されていません: $appDir"
             exit 1

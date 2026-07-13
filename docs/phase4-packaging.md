@@ -13,7 +13,7 @@ Facet desktop(`apps/desktop`)は `media-core` crate(`ffmpeg-next`)経由で FFmp
 | タグ | `latest`(検証専用、再現性は求めない) | 日付固定タグに pin(`autobuild-YYYY-MM-DD-HH-MM`)。再現性・監査可能性のため |
 | 取得先 | 開発者が手動 or CI キャッシュ(`.ffmpeg`) | `apps/desktop/src-tauri/ffmpeg-dist/`(DLL のみ) |
 | 同梱物 | ffmpeg.exe / ffprobe.exe を含む(dev 実行に使わないが zip 構成のまま) | **DLL のみ**。ffmpeg.exe / ffprobe.exe は同梱しない |
-| ビルドコマンド | `pnpm --filter @facet/desktop dev` / `cargo build`(`tauri.conf.json`) | `pnpm --filter @facet/desktop build:release`(`tauri.release.conf.json` オーバーレイ) |
+| ビルドコマンド | `pnpm --filter @facet/desktop dev` / `cargo build`(`tauri.conf.json`) | `pnpm --filter @facet/desktop build:win-release`(`tauri.win-release.conf.json` オーバーレイ) |
 | リンク先 | `FFMPEG_DIR` を GPL ビルドのルートに向ける | `FFMPEG_DIR` を **LGPL ビルドのルート**に向ける(`fetch-ffmpeg-lgpl.ps1` の戻り値) |
 
 **重要**: 配布物は DLL を LGPL 版に差し替えるだけでは不十分。`cargo build` /
@@ -33,9 +33,9 @@ Facet desktop(`apps/desktop`)は `media-core` crate(`ffmpeg-next`)経由で FFmp
    戻り値(標準出力の最終行)が LGPL ビルドのルートパス。
 2. `$env:FFMPEG_DIR` にそのルートパスを設定する(`$env:LIBCLANG_PATH` は
    従来どおり `C:\Program Files\LLVM\bin` 等、bindgen 用に別途必要)。
-3. `pnpm --filter @facet/desktop build:release` を実行する
-   (`tauri build --config src-tauri/tauri.release.conf.json`)。
-   - `tauri.release.conf.json` は `bundle.resources` で
+3. `pnpm --filter @facet/desktop build:win-release` を実行する
+   (`tauri build --config src-tauri/tauri.win-release.conf.json`)。
+   - `tauri.win-release.conf.json` は `bundle.resources` で
      `ffmpeg-dist/*.dll` と `LICENSES/COPYING.LGPLv3`(リポジトリ直下)を exe 隣接
      (`"./"`)に配置する設定のみを持つオーバーレイ(`tauri dev` には影響しない)。
 4. 生成された NSIS インストーラ
@@ -110,7 +110,7 @@ git push origin v0.1.0
 5. `scripts/run-license-gate.ps1`(tauri build 前のゲート。fail で全停止)
 6. `pnpm --filter "@facet/desktop^..." build`(`@facet/contract` /
    `@facet/core` の dist/schema を先にビルド)
-7. `tauri-apps/tauri-action@v0`(`--config src-tauri/tauri.release.conf.json`、
+7. `tauri-apps/tauri-action@v0`(`--config src-tauri/tauri.win-release.conf.json`、
    `releaseDraft: true`、`TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` で署名)
 8. 成果物検査: NSIS の updater 用 zip(`*.nsis.zip`)を展開し、期待する DLL が
    すべて同梱・実行ファイルの混入なし・`COPYING.LGPLv3` 同梱・
