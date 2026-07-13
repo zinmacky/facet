@@ -7,8 +7,6 @@ import { cancelMockJob, startMockJob } from "./jobRunner";
  * renderer 向け API と同形のレスポンスを返す)。
  */
 
-let jobSeq = 0;
-
 // 公開連携(publish 系コマンド)のインメモリ状態。dev:mock は private エディション
 // 既定のため、`PublishGateProvider`(App マウント時)や設定ダイアログがこれらの
 // コマンドを呼ぶ。ブラウザ確認用に「保存すればゲートが開く」最小挙動のみ実装する
@@ -25,15 +23,16 @@ export async function invoke<T>(
 			return MOCK_PROBE as unknown as T;
 
 		case "reframe_start": {
-			jobSeq += 1;
-			const jobId = `mock-reframe-${jobSeq}`;
+			// renderer(§lib/tauri.ts)が採番した jobId をそのまま使う。独自採番すると
+			// emit する `reframe://progress/<id>` と renderer が listen する UUID が
+			// 食い違い、進捗・done・cancel が一切届かなくなる(§ig_publish_start と同規則)。
+			const jobId = typeof args?.jobId === "string" ? args.jobId : "";
 			startMockJob({ namespace: "reframe", jobId });
 			return jobId as unknown as T;
 		}
 
 		case "preview_start": {
-			jobSeq += 1;
-			const jobId = `mock-preview-${jobSeq}`;
+			const jobId = typeof args?.jobId === "string" ? args.jobId : "";
 			startMockJob({ namespace: "preview", jobId });
 			return jobId as unknown as T;
 		}
