@@ -48,13 +48,13 @@ use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
 use crate::cancel::CancelToken;
 use crate::encode;
-use crate::error::Result;
+use crate::error::{MediaError, Result};
 use crate::fit;
 use crate::pipeline::{self, EncoderSelection, Progress, ReframeOptions};
 use crate::spec::EditSpec;
@@ -341,6 +341,71 @@ pub fn render_publish(
 	)
 }
 
+/// 同一 output への二重要求をコアレスする際のポーリング間隔。
+const COALESCE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// コアレス待ちの最大ポーリング回数(100ms × 3000 = 約5分の安全上限)。実行中の
+/// 1 本目は通常この上限より前に完了/失敗して待ちが解ける。上限は「1 本目が病的に
+/// 停止した場合」のバックストップで、超過時は元の挙動どおり `OutputBusy` を返す。
+const COALESCE_MAX_POLLS: usize = 3000;
+
+/// [`render_cached`] のコアレス結果。呼び出し側が eviction を走らせるかの判断に使う。
+#[derive(Debug)]
+enum RenderOutcome {
+	/// 自分がエンコードして書き出した(eviction 対象)。
+	Rendered,
+	/// 実行中の別ジョブの完了を待ってキャッシュを共有した(自分は書き出していない)。
+	Coalesced,
+}
+
+/// [`coalesce_render`] の 1 回のレンダリング試行結果。
+enum RenderAttempt {
+	/// 自分が書き出しに成功した。
+	Rendered,
+	/// 同一 output へ別ジョブが書き込み中(`OutputBusy`)。待って再試行する。
+	Busy,
+}
+
+/// 同一 `output_path` へ書き込み中の別ジョブがあるとき、即 `OutputBusy` で落とさずに
+/// 待機してキャッシュを共有する(M-2: ダブルクリック等で同一 spec のプレビューが
+/// 二重要求されたとき、2 本目を失敗させない)。
+///
+/// - `already_present` が真になれば 1 本目の成功物が出現したとみなし `Coalesced`。
+/// - `try_render` が `Rendered` を返せば自分が書き出したので `Rendered`。1 本目が
+///   失敗して registry が解放されれば、次の `try_render` は `Busy` ではなく実行に入る。
+/// - 上限まで `Busy` が続けば `OutputBusy` を返す(元挙動へのフォールバック)。
+///
+/// sleep を注入するため純粋なループとして切り出す(`concurrency::retry_on_encoder_open`
+/// と同じ設計で、ffmpeg 非依存の単体テストが可能)。
+fn coalesce_render(
+	cancel: &CancelToken,
+	output_path: &Path,
+	already_present: impl Fn() -> bool,
+	mut try_render: impl FnMut() -> Result<RenderAttempt>,
+	sleep: impl Fn(Duration),
+	max_polls: usize,
+) -> Result<RenderOutcome> {
+	for _ in 0..max_polls {
+		if already_present() {
+			return Ok(RenderOutcome::Coalesced);
+		}
+		if cancel.is_cancelled() {
+			return Err(MediaError::Cancelled);
+		}
+		match try_render()? {
+			RenderAttempt::Rendered => return Ok(RenderOutcome::Rendered),
+			RenderAttempt::Busy => sleep(COALESCE_POLL_INTERVAL),
+		}
+	}
+	// 上限到達直前に 1 本目が完了しているかもしれないので最後に一度だけ確認する。
+	if already_present() {
+		return Ok(RenderOutcome::Coalesced);
+	}
+	Err(MediaError::OutputBusy {
+		path: output_path.to_path_buf(),
+	})
+}
+
 /// `spec` に従って `input` を `bit_rate` で再フレーミングし、`cache_dir` 配下に
 /// キャッシュする([`render_preview`]/[`render_publish`] の共通実体)。
 ///
@@ -382,27 +447,45 @@ fn render_cached(
 		return Ok(output_path);
 	}
 
-	let options = ReframeOptions {
-		preset: &spec.preset,
-		sigma: fit::DEFAULT_SIGMA,
-		crop: spec.crop,
-		source: spec.source,
-		trim: spec.trim,
-		encoder: EncoderSelection::Auto,
-		bit_rate,
+	// 同一 output への二重要求は 1 本目の完了を待って共有する(M-2)。`reframe` は
+	// 消費型の `ReframeOptions` を取るため、試行ごとに options を組み直す(`OutputBusy`
+	// は実処理前に返るので busy 試行に無駄なエンコードは発生しない)。
+	let outcome = coalesce_render(
 		cancel,
-		on_progress,
-		// 生成物は既に `cache_dir` 内で完結しており、`output_path` 自体が
-		// アプリ管理のキャッシュディレクトリ配下(ユーザーから見える書き出し先では
-		// ない)。そのため一時ファイルも常に `output_path` と同じディレクトリ
-		// (= cache_dir)に書く従来挙動でよく、`staging_dir` は使わない
-		// (`pipeline.rs` モジュール冒頭コメント「`ReframeOptions.staging_dir`」参照)。
-		staging_dir: None,
-	};
+		&output_path,
+		|| output_path.exists(),
+		|| {
+			let options = ReframeOptions {
+				preset: &spec.preset,
+				sigma: fit::DEFAULT_SIGMA,
+				crop: spec.crop,
+				source: spec.source,
+				trim: spec.trim,
+				encoder: EncoderSelection::Auto,
+				bit_rate,
+				cancel,
+				on_progress,
+				// 生成物は既に `cache_dir` 内で完結しており、`output_path` 自体が
+				// アプリ管理のキャッシュディレクトリ配下(ユーザーから見える書き出し先では
+				// ない)。そのため一時ファイルも常に `output_path` と同じディレクトリ
+				// (= cache_dir)に書く従来挙動でよく、`staging_dir` は使わない
+				// (`pipeline.rs` モジュール冒頭コメント「`ReframeOptions.staging_dir`」参照)。
+				staging_dir: None,
+			};
+			match pipeline::reframe(input, &output_path, options) {
+				Ok(_) => Ok(RenderAttempt::Rendered),
+				Err(MediaError::OutputBusy { .. }) => Ok(RenderAttempt::Busy),
+				Err(err) => Err(err),
+			}
+		},
+		std::thread::sleep,
+		COALESCE_MAX_POLLS,
+	)?;
 
-	pipeline::reframe(input, &output_path, options)?;
-
-	evict_if_over_limit(cache_dir, &output_path, max_cache_bytes);
+	// 自分が書き出したときのみ eviction を走らせる(共有時は書き込んでいない)。
+	if matches!(outcome, RenderOutcome::Rendered) {
+		evict_if_over_limit(cache_dir, &output_path, max_cache_bytes);
+	}
 
 	Ok(output_path)
 }
@@ -857,5 +940,118 @@ mod tests {
 
 			restore_env_var(PUBLISH_CACHE_MAX_BYTES_ENV, previous);
 		});
+	}
+
+	// ---- coalesce_render(M-2: 同一 output の二重要求) --------------------------
+
+	#[test]
+	fn coalesce_render_renders_immediately_without_sleeping() {
+		let cancel = CancelToken::new();
+		let slept = std::cell::Cell::new(0usize);
+		let outcome = coalesce_render(
+			&cancel,
+			Path::new("/tmp/x.mp4"),
+			|| false,
+			|| Ok(RenderAttempt::Rendered),
+			|_| slept.set(slept.get() + 1),
+			10,
+		)
+		.expect("should render");
+		assert!(matches!(outcome, RenderOutcome::Rendered));
+		assert_eq!(slept.get(), 0, "書き出せたら待たない");
+	}
+
+	#[test]
+	fn coalesce_render_waits_then_shares_cache() {
+		let cancel = CancelToken::new();
+		let checks = std::cell::Cell::new(0usize);
+		let slept = std::cell::Cell::new(0usize);
+		let outcome = coalesce_render(
+			&cancel,
+			Path::new("/tmp/x.mp4"),
+			|| {
+				// 2 回目の確認で 1 本目の成果物が出現したことにする。
+				let n = checks.get();
+				checks.set(n + 1);
+				n >= 1
+			},
+			|| Ok(RenderAttempt::Busy),
+			|_| slept.set(slept.get() + 1),
+			10,
+		)
+		.expect("should coalesce");
+		assert!(matches!(outcome, RenderOutcome::Coalesced));
+		assert!(slept.get() >= 1, "1 本目を待つ間 sleep する");
+	}
+
+	#[test]
+	fn coalesce_render_busy_then_renders_when_first_fails() {
+		let cancel = CancelToken::new();
+		let attempts = std::cell::Cell::new(0usize);
+		let outcome = coalesce_render(
+			&cancel,
+			Path::new("/tmp/x.mp4"),
+			|| false,
+			|| {
+				// 1 回目は busy、2 回目(1 本目が解放された後)は自分が書き出す。
+				let n = attempts.get();
+				attempts.set(n + 1);
+				if n == 0 {
+					Ok(RenderAttempt::Busy)
+				} else {
+					Ok(RenderAttempt::Rendered)
+				}
+			},
+			|_| {},
+			10,
+		)
+		.expect("should render on retry");
+		assert!(matches!(outcome, RenderOutcome::Rendered));
+		assert_eq!(attempts.get(), 2);
+	}
+
+	#[test]
+	fn coalesce_render_propagates_non_busy_error() {
+		let cancel = CancelToken::new();
+		let err = coalesce_render(
+			&cancel,
+			Path::new("/tmp/x.mp4"),
+			|| false,
+			|| Err(MediaError::EncoderNotFound { name: "x".into() }),
+			|_| {},
+			10,
+		)
+		.expect_err("should propagate");
+		assert!(matches!(err, MediaError::EncoderNotFound { .. }));
+	}
+
+	#[test]
+	fn coalesce_render_returns_cancelled() {
+		let cancel = CancelToken::new();
+		cancel.cancel();
+		let err = coalesce_render(
+			&cancel,
+			Path::new("/tmp/x.mp4"),
+			|| false,
+			|| Ok(RenderAttempt::Rendered),
+			|_| {},
+			10,
+		)
+		.expect_err("should be cancelled");
+		assert!(matches!(err, MediaError::Cancelled));
+	}
+
+	#[test]
+	fn coalesce_render_times_out_as_output_busy() {
+		let cancel = CancelToken::new();
+		let outcome = coalesce_render(
+			&cancel,
+			Path::new("/tmp/busy.mp4"),
+			|| false,
+			|| Ok(RenderAttempt::Busy),
+			|_| {},
+			3,
+		);
+		assert!(matches!(outcome, Err(MediaError::OutputBusy { .. })));
 	}
 }
