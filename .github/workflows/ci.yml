@@ -54,6 +54,8 @@ jobs:
       # 識別子は使わず、minify されても保持される文字列リテラルを見る
       # (単に "アップロード" だけだと StepIndicator の共有ラベル辞書等、edition に
       # 関わらず常時コンパイルされる無害な文字列にもヒットし false positive になる)。
+      # 資格情報設定 UI(features/publish-settings/、§11-3)についても同様に、
+      # PublishSettingsSection.tsx でのみ使われる UI 文字列「APIトークン」を見る。
       - name: Build public frontend and check for upload-feature markers
         if: matrix.task == 'build'
         run: |
@@ -69,8 +71,8 @@ jobs:
             echo "::error::$assets_dir が生成されていません(vite build の出力構成を確認してください)"
             exit 1
           fi
-          if grep -rl "一括投稿" "$assets_dir"; then
-            echo "::error::public ビルドの成果物に投稿系マーカー(「一括投稿」)が含まれています"
+          if grep -rlE "一括投稿|APIトークン" "$assets_dir"; then
+            echo "::error::public ビルドの成果物に投稿系マーカー(「一括投稿」/「APIトークン」)が含まれています"
             exit 1
           fi
           rm -rf apps/desktop/dist-public-check
@@ -185,6 +187,14 @@ jobs:
       - name: cargo check --workspace --features publish
         if: matrix.task == 'check-publish'
         run: cargo check --workspace --features publish
+
+      # commands::publish のテスト(§11-3)は CredentialStore をトレイト分離しており、
+      # 実 OS キーチェーンに触れるテストのみ #[ignore] で隔離済み(ubuntu ランナーには
+      # Secret Service が無く不安定なため)。ignore されていないテストは HTTP をループバック
+      # 上でモックするのみでキーチェーンに触れないため、ここで実行して安全。
+      - name: cargo test --workspace --features publish
+        if: matrix.task == 'check-publish'
+        run: cargo test --workspace --features publish
 
       # ライセンス検査: GPL/AGPL 系は allow リストに含めないことで既定 deny になる
       # (apps/desktop/deny.toml 参照)。

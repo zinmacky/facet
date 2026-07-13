@@ -45,8 +45,17 @@ export const mockNewJobId = vi.fn((): string => {
 	return `job-${jobCounter}`;
 });
 
+/**
+ * `commands::publish`(§features/publish-settings/)向けのインメモリ「キーチェーン」
+ * モック状態。テストは `mockInvoke.mockImplementationOnce(...)` で個別の応答を
+ * 差し替えられるが、既定実装では set/has/delete/check_scheduler_connection が
+ * この変数を介して一貫した挙動になる(保存済みトークンがあれば疎通チェックは "ok" を
+ * 返す、という単純な既定シナリオ)。
+ */
+let mockSchedulerApiToken: string | null = null;
+
 /** invoke コマンドの既定実装。未対応コマンドは reject する(テスト側の見落としに気付けるように)。 */
-async function defaultInvokeImpl(cmd: string, _args?: unknown): Promise<unknown> {
+async function defaultInvokeImpl(cmd: string, args?: unknown): Promise<unknown> {
 	switch (cmd) {
 		case "ping":
 			return "pong";
@@ -59,6 +68,21 @@ async function defaultInvokeImpl(cmd: string, _args?: unknown): Promise<unknown>
 		case "reframe_cancel":
 		case "set_max_concurrent_encodes":
 			return undefined;
+		case "set_scheduler_api_token": {
+			const { token } = (args ?? {}) as { token?: string };
+			if (!token?.trim()) throw new Error("トークンが空です。");
+			mockSchedulerApiToken = token;
+			return undefined;
+		}
+		case "has_scheduler_api_token":
+			return mockSchedulerApiToken !== null;
+		case "delete_scheduler_api_token":
+			mockSchedulerApiToken = null;
+			return undefined;
+		case "check_scheduler_connection":
+			return mockSchedulerApiToken === null
+				? { status: "no_token" }
+				: { status: "ok" };
 		default:
 			throw new Error(`invoke not mocked for command: ${cmd}`);
 	}
@@ -137,6 +161,8 @@ export function resetTauriMocks(): void {
 
 	mockNewJobId.mockClear();
 	jobCounter = 0;
+
+	mockSchedulerApiToken = null;
 
 	mockListen.mockClear();
 	eventHandlers.clear();

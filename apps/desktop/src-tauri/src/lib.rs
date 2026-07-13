@@ -32,10 +32,13 @@
 // コメント参照)。
 //
 // エディション分離(v2.4, docs/desktop-migration-plan.md §6.6): `publish` cargo feature
-// (Cargo.toml [features])が既定で無効なため、`commands::publish`(Phase 3 の IG/YouTube
-// 公開連携コマンドが乗る予定のモジュール)は public(配布版)ビルドのバイナリに
+// (Cargo.toml [features])が既定で無効なため、`commands::publish`(資格情報設定 + OS
+// キーチェーン + scheduler 疎通チェック。§11-3)は public(配布版)ビルドのバイナリに
 // 一切含まれない。private ビルド(build:mac-private 等)のみ `--features publish` で
-// 有効化する。現時点ではまだ実コマンドが無いため、下記 invoke_handler への登録も無い。
+// 有効化する。`tauri::generate_handler!` は各エントリに `#[cfg(...)]` を個別に
+// 付けられる(tauri-macros の Handler パーサがそのまま素通しする)ため、下記
+// invoke_handler 内で `#[cfg(feature = "publish")]` を付けて出し分ける
+// (ハンドラ一覧を feature 有無で二重管理せずに済む)。
 mod commands;
 
 use commands::reframe::JobsState;
@@ -61,8 +64,18 @@ pub fn run() {
 			commands::reframe::reframe_cancel,
 			commands::reframe::set_max_concurrent_encodes,
 			commands::preview::preview_start,
-			// Phase 3(IG/YouTube 公開連携): `publish` feature 有効時、ここに
-			// commands::publish::xxx を追加する(現時点では未実装)。
+			// 資格情報設定 + OS キーチェーン + scheduler 疎通チェック(§11-3)。
+			// `publish` feature 無効(public ビルド)ではこれらのコマンド自体が
+			// 存在しないため、ここで削除されコンパイルされない。
+			#[cfg(feature = "publish")]
+			commands::publish::set_scheduler_api_token,
+			#[cfg(feature = "publish")]
+			commands::publish::has_scheduler_api_token,
+			#[cfg(feature = "publish")]
+			commands::publish::delete_scheduler_api_token,
+			#[cfg(feature = "publish")]
+			commands::publish::check_scheduler_connection,
+			// IG/YouTube 本体のコマンドは後続 PR でここに追加する。
 		])
 		.run(tauri::generate_context!())
 		.expect("error while running tauri application");

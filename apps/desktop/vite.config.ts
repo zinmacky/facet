@@ -2,7 +2,11 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import tailwindcss from "@tailwindcss/vite";
-import { resolveEdition, uploadEntryAlias } from "./edition.build";
+import {
+	publishSettingsEntryAlias,
+	resolveEdition,
+	uploadEntryAlias,
+} from "./edition.build";
 
 // Tauri が期待する固定ポート。studio/web(5178/5179)と衝突しないよう 5180 を使う。
 const TAURI_DEV_PORT = 5180;
@@ -35,6 +39,9 @@ export default defineConfig(({ mode }) => {
 				// §src/vite-env.d.ts)。edition に関わらず常に設定する
 				// (private でも entry.ts への解決が必要なため)。
 				...uploadEntryAlias(edition, import.meta.url),
+				// 公開連携の設定 UI 除外(virtual:publish-settings-entry の差し替え、
+				// §src/vite-env.d.ts・docs/desktop-migration-plan.md §11-3)。
+				...publishSettingsEntryAlias(edition, import.meta.url),
 				...(isMock
 					? {
 							// Tauri ランタイムを renderer 内完結のモック実装へ差し替える
