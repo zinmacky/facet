@@ -41,6 +41,7 @@ publish = [
 	"dep:chrono",
 	"dep:mime",
 	"dep:async-trait",
+	"dep:contract-rs",
 ]
 
 [build-dependencies]
@@ -161,6 +162,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # reframe/probe コマンドの実処理(Wave 5: コマンド境界の配線)。
 media-core = { path = "../crates/media-core" }
+# `jobs::manifest` の `JobManifest`/`JobCreateResponse`(typify 配線、Issue #93)。
+# `jobs`(ひいてはこの依存)は `publish` feature 限定 — `jobs/mod.rs` が
+# `#[cfg(feature = "publish")]` で各サブモジュールを丸ごとゲートしている。
+contract-rs = { path = "../crates/contract-rs", optional = true }
 
 [dev-dependencies]
 # `commands::publish::scheduler_check` / `jobs::r2_upload` / `jobs::scheduler_client` の

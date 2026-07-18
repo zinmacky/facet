@@ -60,7 +60,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
-use crate::jobs::manifest::{self, JobManifest};
+use crate::jobs::manifest;
 use crate::jobs::r2_upload::{self, R2UploadError};
 use crate::jobs::scheduler_client::{self, EnqueueError};
 use crate::jobs::sigv4::{self, R2Credentials};
@@ -238,12 +238,21 @@ fn derive_idempotency_key(job_id: &str) -> String {
 	Uuid::new_v5(&IDEMPOTENCY_KEY_NAMESPACE, job_id.as_bytes()).to_string()
 }
 
-/// enqueue 前バリデーション(ファイルサイズ・尺・キャプション長)。
+/// enqueue 前バリデーション(ファイルサイズ・尺・キャプション長・公開時刻)。
 /// 尺の取得(`media_core::probe`)は libav の同期 API のため、呼び出し側
 /// (`ig_publish_start`)が `spawn_blocking` 経由で呼ぶ(`commands::probe::probe` と同じ
 /// 方針)。サイズチェックを先に行い、上限超過が明らかな場合は probe(デコードを伴う)を
 /// 省略する。
-fn validate_enqueue_target(path: &Path, caption: &str) -> Result<(), String> {
+///
+/// `publish_at` の検証(`manifest::validate_publish_at`)は typify 配線後の
+/// `JobManifest.publish_at` が `NonZeroU64`(0/負値を表現できない)になったことに伴い
+/// 追加した([`manifest`] モジュール冒頭コメント参照)。以前はここでチェックせず
+/// scheduler 側の 400 応答(`EnqueueError::Rejected`)に委ねていたが、typify 配線後は
+/// 検証を怠ると `manifest::new_job_manifest` がパニックしてしまうため、ここで
+/// 事前に弾いて従来通りの通常のエラーとして返す。
+fn validate_enqueue_target(path: &Path, caption: &str, publish_at: i64) -> Result<(), String> {
+	manifest::validate_publish_at(publish_at).map_err(|err| err.to_string())?;
+
 	let metadata = std::fs::metadata(path)
 		.map_err(|err| format!("ファイル情報の取得に失敗しました: {err}"))?;
 	manifest::validate_file_size(metadata.len()).map_err(|err| err.to_string())?;
@@ -302,7 +311,7 @@ pub(crate) async fn start_impl(
 	let path_for_validate = path.clone();
 	let caption_for_validate = caption.clone();
 	tauri::async_runtime::spawn_blocking(move || {
-		validate_enqueue_target(&path_for_validate, &caption_for_validate)
+		validate_enqueue_target(&path_for_validate, &caption_for_validate, publish_at)
 	})
 	.await
 	.map_err(|err| format!("バリデーションタスクが異常終了しました: {err}"))??;
@@ -466,7 +475,7 @@ async fn run_ig_publish(
 
 	let _ = app.emit(&progress_event_name(&job_id), IgPublishProgress::Enqueuing);
 
-	let manifest = JobManifest::new(idempotency_key, r2_key, caption, publish_at);
+	let manifest = manifest::new_job_manifest(idempotency_key, r2_key, caption, publish_at);
 	match scheduler_client::enqueue_job(
 		&client,
 		&scheduler_url,
@@ -640,5 +649,234 @@ mod tests {
 
 		let json = serde_json::to_value(IgPublishProgress::Enqueuing).unwrap();
 		assert_eq!(json["phase"], "enqueuing");
+	}
+
+	// ---- 契約スキーマとの整合性検証(Issue #93 パート B) --------------------------------
+	//
+	// `IgPublishProgress`/`IgPublishDone`/`IgPublishRuntimeError` は Rust→renderer 専用の
+	// Tauri イベントペイロードで、対応する TS 側の手書き型は無い(`igPublish.ts` は
+	// `@facet/contract` の `z.infer` から型を導出する形にした、パート B-2)。
+	//
+	// **typify によるコード生成は見送る**(パート B-3 の指示通り)。理由:
+	// `IgPublishProgress`/`IgPublishRuntimeError` は internally-tagged enum
+	// (`#[serde(tag = "phase"/"kind")]`)だが、`generate-schema.mjs` が出力する素の
+	// JSON Schema は discriminated union を `anyOf`(各分岐が `const` フィールドを持つ
+	// ただの oneOf 相当)としてしか表現できない(OpenAPI の `discriminator` 拡張が無い
+	// ため)。typify はこの形から「これは `tag` フィールドで判別する enum だ」と
+	// 自動認識できず、`subtype0`/`subtype1`... のような無意味な分岐名を持つ enum を
+	// 生成してしまい、Rust 側の internally-tagged 表現(`{"phase":"uploading",...}` の
+	// フラットな JSON)を再現できない。typify にこの構造を正しく生成させるには
+	// スキーマ側に手を入れる(zod 側で構造を変える、または生成後にパッチする)必要が
+	// あり、Rust→renderer 専用のイベント(scheduler との HTTP 境界のような複数言語間の
+	// 真の共有契約ではない)にそこまでのコストを払う価値は薄いと判断した。
+	// 代わりに #112 の流儀(`jobs/manifest.rs` のスキーマ整合テスト)を踏襲し、
+	// 生成コードを介さず `serde_json` のみで直接 JSON Schema と突き合わせる
+	// (新規依存を増やさない)。
+	//
+	// 検証範囲: タグ名(`phase`/`kind`)・各 variant のタグ値・フィールド名・型が
+	// `packages/contract/schema/ig-publish-events.json` と一致すること。
+
+	use std::collections::BTreeSet;
+
+	/// `packages/contract/schema/ig-publish-events.json` の内容そのもの。ワークスペース外
+	/// のファイルを参照するため、`include_str!` のパスは `CARGO_MANIFEST_DIR` ではなく
+	/// 本ソースファイルからの相対パスになる点に注意(`jobs/manifest.rs` と同じ流儀)。
+	const IG_PUBLISH_EVENTS_SCHEMA_JSON: &str =
+		include_str!("../../../../../../packages/contract/schema/ig-publish-events.json");
+
+	fn contract_schema() -> serde_json::Value {
+		serde_json::from_str(IG_PUBLISH_EVENTS_SCHEMA_JSON)
+			.expect("packages/contract/schema/ig-publish-events.json must be valid JSON")
+	}
+
+	fn schema_def<'a>(schema: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+		schema
+			.get("$defs")
+			.and_then(|defs| defs.get(name))
+			.unwrap_or_else(|| panic!("契約スキーマに $defs.{name} が見つかりません"))
+	}
+
+	fn json_type_name(value: &serde_json::Value) -> &'static str {
+		match value {
+			serde_json::Value::Null => "null",
+			serde_json::Value::Bool(_) => "boolean",
+			serde_json::Value::Number(n) => {
+				if n.is_i64() || n.is_u64() {
+					"integer"
+				} else {
+					"number"
+				}
+			}
+			serde_json::Value::String(_) => "string",
+			serde_json::Value::Array(_) => "array",
+			serde_json::Value::Object(_) => "object",
+		}
+	}
+
+	/// 単一オブジェクトスキーマ(`properties`/`required`)に対して `actual` を照合する
+	/// (`jobs::manifest` の同名ロジックの簡易版。本契約で使う `const`/`type` のみ対応)。
+	fn assert_object_matches_schema(
+		object_schema: &serde_json::Value,
+		actual: &serde_json::Value,
+		path: &str,
+	) {
+		let properties = object_schema["properties"]
+			.as_object()
+			.unwrap_or_else(|| panic!("{path}: properties が object ではない"));
+		let required: BTreeSet<&str> = object_schema["required"]
+			.as_array()
+			.unwrap_or_else(|| panic!("{path}: required が array ではない"))
+			.iter()
+			.map(|v| v.as_str().unwrap())
+			.collect();
+		let actual_obj = actual
+			.as_object()
+			.unwrap_or_else(|| panic!("{path}: シリアライズ結果が object ではない"));
+
+		let actual_keys: BTreeSet<&str> = actual_obj.keys().map(String::as_str).collect();
+		let schema_keys: BTreeSet<&str> = properties.keys().map(String::as_str).collect();
+		assert_eq!(
+			actual_keys, schema_keys,
+			"{path}: キー集合が契約スキーマと不一致"
+		);
+		for key in &required {
+			assert!(
+				actual_obj.contains_key(*key),
+				"{path}.{key} は契約上 required だが出力に無い"
+			);
+		}
+
+		for (key, field_schema) in properties {
+			let value = &actual_obj[key];
+			if let Some(const_value) = field_schema.get("const") {
+				assert_eq!(value, const_value, "{path}.{key}: const と不一致");
+				continue;
+			}
+			let type_field = field_schema
+				.get("type")
+				.unwrap_or_else(|| panic!("{path}.{key}: const/type のいずれも無い"));
+			let allowed_types: Vec<&str> = match type_field {
+				serde_json::Value::String(s) => vec![s.as_str()],
+				serde_json::Value::Array(arr) => arr.iter().map(|v| v.as_str().unwrap()).collect(),
+				_ => panic!("{path}.{key}: type フィールドの形式が不正: {type_field:?}"),
+			};
+			let actual_type = json_type_name(value);
+			assert!(
+				allowed_types.contains(&actual_type),
+				"{path}.{key}: 型不一致(schema={allowed_types:?}, actual={actual_type}, value={value:?})"
+			);
+		}
+	}
+
+	/// タグ付き union(`anyOf`、各分岐が `tag_field` に `const` を持つ)に対して、`actual` の
+	/// タグ値から該当 variant を選び出して照合する。Rust 側の internally-tagged enum
+	/// (`#[serde(tag = "...")]`)の表現と対になる。
+	fn assert_tagged_union_matches(
+		union_schema: &serde_json::Value,
+		tag_field: &str,
+		actual: &serde_json::Value,
+		path: &str,
+	) {
+		let variants = union_schema["anyOf"]
+			.as_array()
+			.unwrap_or_else(|| panic!("{path}: anyOf が array ではない(タグ付き union ではない?)"));
+		let actual_tag = actual
+			.get(tag_field)
+			.and_then(|v| v.as_str())
+			.unwrap_or_else(|| panic!("{path}: タグフィールド {tag_field} が無い"));
+		let matching = variants
+			.iter()
+			.find(|variant| variant["properties"][tag_field]["const"].as_str() == Some(actual_tag))
+			.unwrap_or_else(|| {
+				panic!("{path}: タグ値 {actual_tag:?} に一致する variant が契約に無い")
+			});
+		assert_object_matches_schema(matching, actual, &format!("{path}({actual_tag})"));
+	}
+
+	#[test]
+	fn ig_publish_progress_variant_count_matches_contract() {
+		let schema = contract_schema();
+		let def = schema_def(&schema, "igPublishProgress");
+		let anyof = def["anyOf"].as_array().unwrap();
+		// Rust 側 `IgPublishProgress` の variant 数(Uploading, Enqueuing)と一致すること
+		// (契約側だけに無関係な分岐が増える/Rust 側だけ増えて契約に無いケースを検知)。
+		assert_eq!(anyof.len(), 2);
+	}
+
+	#[test]
+	fn ig_publish_progress_uploading_conforms_to_contract_schema() {
+		let actual = serde_json::to_value(IgPublishProgress::Uploading {
+			bytes_sent: 10,
+			total_bytes: 100,
+			percent: 10.0,
+		})
+		.unwrap();
+		assert_tagged_union_matches(
+			schema_def(&contract_schema(), "igPublishProgress"),
+			"phase",
+			&actual,
+			"igPublishProgress",
+		);
+	}
+
+	#[test]
+	fn ig_publish_progress_enqueuing_conforms_to_contract_schema() {
+		let actual = serde_json::to_value(IgPublishProgress::Enqueuing).unwrap();
+		assert_tagged_union_matches(
+			schema_def(&contract_schema(), "igPublishProgress"),
+			"phase",
+			&actual,
+			"igPublishProgress",
+		);
+	}
+
+	#[test]
+	fn ig_publish_done_conforms_to_contract_schema() {
+		let actual = serde_json::to_value(IgPublishDone {
+			scheduler_job_id: "job-1".to_string(),
+			status: "pending".to_string(),
+		})
+		.unwrap();
+		assert_object_matches_schema(
+			schema_def(&contract_schema(), "igPublishDone"),
+			&actual,
+			"igPublishDone",
+		);
+	}
+
+	#[test]
+	fn ig_publish_runtime_error_variant_count_matches_contract() {
+		let schema = contract_schema();
+		let def = schema_def(&schema, "igPublishRuntimeError");
+		let anyof = def["anyOf"].as_array().unwrap();
+		// Rust 側 `IgPublishRuntimeError` の variant 数(7つ)と一致すること。
+		assert_eq!(anyof.len(), 7);
+	}
+
+	#[test]
+	fn ig_publish_runtime_error_all_variants_conform_to_contract_schema() {
+		let variants = [
+			IgPublishRuntimeError::UploadFailed {
+				detail: "d".to_string(),
+			},
+			IgPublishRuntimeError::EnqueueUnauthorized,
+			IgPublishRuntimeError::EnqueueServiceUnavailable,
+			IgPublishRuntimeError::EnqueueRejected {
+				detail: "d".to_string(),
+			},
+			IgPublishRuntimeError::Network {
+				detail: "d".to_string(),
+			},
+			IgPublishRuntimeError::Cancelled,
+			IgPublishRuntimeError::Internal {
+				detail: "d".to_string(),
+			},
+		];
+		let schema = contract_schema();
+		let def = schema_def(&schema, "igPublishRuntimeError");
+		for variant in variants {
+			let actual = serde_json::to_value(&variant).unwrap();
+			assert_tagged_union_matches(def, "kind", &actual, "igPublishRuntimeError");
+		}
 	}
 }

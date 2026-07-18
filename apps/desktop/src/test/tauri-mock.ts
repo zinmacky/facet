@@ -1,5 +1,9 @@
 import { vi } from "vitest";
-import type { IgPublishDone } from "../features/upload/igPublish";
+import type {
+	IgPublishDone,
+	IgPublishProgress,
+	IgPublishRuntimeError,
+} from "../features/upload/igPublish";
 import type { MediaInfo } from "../lib/tauri";
 
 /**
@@ -34,6 +38,27 @@ export const DEFAULT_MEDIA_INFO: MediaInfo = {
 export const MOCK_IG_PUBLISH_DONE: IgPublishDone = {
 	schedulerJobId: "scheduler-job-1",
 	status: "pending",
+};
+
+/**
+ * `emitMockEvent("ig_publish://progress/<jobId>", ...)` に渡す既定の progress
+ * ペイロード。`MOCK_IG_PUBLISH_DONE` と同じ理由で `UploadScreen.igPublish.test.tsx` /
+ * `test/contract-boundary.test.ts` の双方から参照する(Issue #93 パート B-4)。
+ */
+export const MOCK_IG_PUBLISH_PROGRESS: IgPublishProgress = {
+	phase: "uploading",
+	bytesSent: 42,
+	totalBytes: 100,
+	percent: 42,
+};
+
+/**
+ * `emitMockEvent("ig_publish://error/<jobId>", ...)` に渡す既定の error ペイロード。
+ * `MOCK_IG_PUBLISH_DONE` と同じ理由で `UploadScreen.igPublish.test.tsx` /
+ * `test/contract-boundary.test.ts` の双方から参照する(Issue #93 パート B-4)。
+ */
+export const MOCK_IG_PUBLISH_ERROR: IgPublishRuntimeError = {
+	kind: "enqueue_unauthorized",
 };
 
 /**

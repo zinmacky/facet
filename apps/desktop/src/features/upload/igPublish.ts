@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+	IgPublishDone as ContractIgPublishDone,
+	IgPublishProgress as ContractIgPublishProgress,
+	IgPublishRuntimeError as ContractIgPublishRuntimeError,
+} from "@facet/contract";
 import { newJobId } from "../../lib/jobId";
 
 /**
@@ -9,28 +14,20 @@ import { newJobId } from "../../lib/jobId";
  * `listen()` を完了させてから `invoke()` する(ジョブがどれだけ早く失敗しても
  * 取りこぼさないため。理由は `src-tauri/src/commands/reframe.rs` 冒頭コメント
  * 「jobId 採番をフロントエンドへ移した理由」参照)。
+ *
+ * イベントペイロードの型は `@facet/contract`(`ig-publish-events.ts`)の zod スキーマから
+ * `z.infer` で導出する(Issue #93 パート B: 契約と Rust 実装の形状一致を型レベルでも
+ * 保証する)。型名はこのモジュールの既存の呼び出し側を変えないため維持する。
  */
 
 /** Rust 側 `IgPublishProgress`(`phase` タグの internally-tagged enum)と同形。 */
-export type IgPublishProgress =
-	| { phase: "uploading"; bytesSent: number; totalBytes: number; percent: number }
-	| { phase: "enqueuing" };
+export type IgPublishProgress = ContractIgPublishProgress;
 
 /** Rust 側 `IgPublishDone` と同形。 */
-export interface IgPublishDone {
-	schedulerJobId: string;
-	status: string;
-}
+export type IgPublishDone = ContractIgPublishDone;
 
 /** Rust 側 `IgPublishRuntimeError`(`kind` タグの internally-tagged enum)と同形。 */
-export type IgPublishRuntimeError =
-	| { kind: "upload_failed"; detail: string }
-	| { kind: "enqueue_unauthorized" }
-	| { kind: "enqueue_service_unavailable" }
-	| { kind: "enqueue_rejected"; detail: string }
-	| { kind: "network"; detail: string }
-	| { kind: "cancelled" }
-	| { kind: "internal"; detail: string };
+export type IgPublishRuntimeError = ContractIgPublishRuntimeError;
 
 /** `IgPublishRuntimeError` を日本語のユーザー向けメッセージへ変換する。 */
 export function describeIgPublishError(error: IgPublishRuntimeError): string {

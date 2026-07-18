@@ -159,7 +159,7 @@ pub async fn enqueue_job(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::jobs::manifest::JobManifest;
+	use crate::jobs::manifest;
 	use std::io::{Read, Write};
 	use std::net::TcpListener;
 
@@ -234,7 +234,7 @@ mod tests {
 	}
 
 	fn sample_manifest() -> JobManifest {
-		JobManifest::new(
+		manifest::new_job_manifest(
 			"11111111-2222-3333-4444-555555555555".to_string(),
 			"posts/2026-07-10/uuid.mp4".to_string(),
 			"caption".to_string(),
@@ -456,7 +456,7 @@ mod tests {
 			.unwrap()
 			.as_millis() as i64)
 			+ 365 * 24 * 60 * 60 * 1000;
-		let manifest = JobManifest::new(
+		let manifest = manifest::new_job_manifest(
 			uuid::Uuid::new_v4().to_string(),
 			"posts/manual-test/does-not-exist.mp4".to_string(),
 			"real scheduler enqueue test".to_string(),

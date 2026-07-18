@@ -3,10 +3,24 @@ name = "contract-rs"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
-description = "packages/contract の JSON Schema から生成する serde 型の re-export(Phase 0/2 で実装)"
+description = "packages/contract の JSON Schema から typify で生成する serde 型の re-export(Issue #93)"
+build = "build.rs"
 
 [lib]
 name = "contract_rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# jobManifest.idempotencyKey(`format: "uuid"`)を typify が `::uuid::Uuid` に
+# マップするため必要(build.rs 冒頭コメント参照)。"serde" feature は生成型の
+# Serialize/Deserialize 導出に要る。
+uuid = { version = "1", features = ["serde"] }
+
+[build-dependencies]
+# typify は codegen ドリフトを防ぐためバージョン固定する
+# (docs/desktop-migration-plan.md §6.1・§Phase0)。
+typify = "=0.7.0"
+schemars = "0.8"
+serde_json = "1"
+syn = "2"
+prettyplease = "0.2"
