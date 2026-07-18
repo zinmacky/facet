@@ -1,19 +1,41 @@
 name: Release
 
-# タグ v* の push でのみ起動する(Phase 4 Wave D)。
+# タグ v* の push で本番リリースが起動する(Phase 4 Wave D)。
 # バージョンの単一ソースは apps/desktop/src-tauri/tauri.conf.json。
 # タグはこの値と "v" プレフィックスで一致させる運用(scripts/check-release-version.ps1
 # が機械検証する。docs/phase4-packaging.md「リリース手順」参照)。
+#
+# workflow_dispatch はドライラン専用の手動起動口。PowerShell スクリプト群・LGPL FFmpeg
+# 取得・license-gate 二重検証・tauri-action という通常の CI(ci.yml)を通らない経路が
+# 本番タグ push で初めて検証される問題があり(v0.1.0 で実際に3回失敗した経緯が下の
+# コメントに残っている)、任意のブランチから同じ経路を事前検証できるようにする。
+# dry_run 入力(既定 true)は「署名鍵(TAURI_SIGNING_PRIVATE_KEY)を要する updater 署名と
+# GitHub Release の作成」だけをスキップし、それ以外(FFmpeg 取得・license-gate・
+# エディション分離ゲート・NSIS ビルド・成果物検査)は本番と同一の経路を通す。
+# dry_run=false は実タグの ref(例: `gh workflow run release.yml --ref v0.1.0`)に対して
+# 手動起動し、タグ再送なしに本番同様(署名 + draft release 作成)を再実行するための
+# 用途(CI インフラ起因の失敗からの復旧用)。ブランチ ref に対して dry_run=false で
+# 起動すると github.ref_name がタグ形式にならず、通常どおり手順3でバージョン整合
+# チェックが fail する(これは意図した安全側の挙動)。
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >-
+          true(既定): 署名鍵と GitHub Release 作成をスキップして検証のみ行う。
+          false: 実タグ ref に対して手動起動し、署名・draft release 作成まで本番同様に行う
+          (タグ再送なしの再実行用)。
+        type: boolean
+        default: true
 
 # GitHub Release(draft)の作成・アセットのアップロードに必要。
 permissions:
   contents: write
 
-# 同一タグに対する再 push(タグの付け直し)があれば実行中のものをキャンセルする。
+# 同一タグ(または同一 ref)に対する再実行があれば実行中のものをキャンセルする。
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
@@ -25,6 +47,11 @@ jobs:
     defaults:
       run:
         shell: pwsh
+    # workflow_dispatch かつ dry_run 入力が true(既定)の場合のみドライランとする。
+    # push(タグ)イベントでは inputs.dry_run は null になるが、&& の短絡評価で
+    # 左辺が false のため式全体が false となり、env は文字列 "false" になる。
+    env:
+      IS_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
     steps:
       # --- 1. checkout + pnpm/Node セットアップ + 依存インストール(ci.yml と同形) ---
       - uses: actions/checkout@v7
@@ -41,12 +68,30 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # --- 2. タグとバージョン単一ソース(tauri.conf.json)の一致チェック ---
-      # 不一致なら即 fail する(scripts/check-release-version.ps1、単体テスト済み)。
-      - name: Check tag matches version (tauri.conf.json / package.json / Cargo.toml)
-        run: ./scripts/check-release-version.ps1 -Tag "${{ github.ref_name }}"
+      # --- 2. バージョン整合チェック対象タグの決定 ---
+      # 通常(タグ push / タグ ref への手動起動)は github.ref_name(タグ名)をそのまま使う。
+      # ドライラン(ブランチからの workflow_dispatch)には実タグが存在しないため、
+      # tauri.conf.json(バージョン単一ソース)自身のバージョンから合成タグを組み立てる。
+      # これにより check-release-version.ps1 自体は変更せず、タグ形式検証はスキップしつつ
+      # tauri.conf.json / package.json / Cargo.toml 間の一致検証だけは実タグ push と同様に行う。
+      - name: Resolve version-check tag
+        id: version-check-tag
+        run: |
+          if ($env:IS_DRY_RUN -eq "true") {
+            $tauriConf = Get-Content -Raw "apps/desktop/src-tauri/tauri.conf.json" | ConvertFrom-Json
+            $tag = "v$($tauriConf.version)"
+            Write-Host "dry run: 実タグが無いため tauri.conf.json のバージョンから合成タグを使用します: $tag"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
 
-      # --- 3. Rust toolchain + rust-cache + LIBCLANG_PATH(rust-windows-check と同形) ---
+      # --- 3. タグとバージョン単一ソース(tauri.conf.json)の一致チェック ---
+      # 不一致なら即 fail する(scripts/check-release-version.ps1)。
+      - name: Check tag matches version (tauri.conf.json / package.json / Cargo.toml)
+        run: ./scripts/check-release-version.ps1 -Tag "${{ steps.version-check-tag.outputs.tag }}"
+
+      # --- 4. Rust toolchain + rust-cache + LIBCLANG_PATH(rust-windows-check と同形) ---
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -61,7 +106,7 @@ jobs:
       - name: Set LIBCLANG_PATH
         run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
-      # --- 4. LGPL FFmpeg 取得 + ffmpeg-dist ステージング + FFMPEG_DIR 設定 ---
+      # --- 5. LGPL FFmpeg 取得 + ffmpeg-dist ステージング + FFMPEG_DIR 設定 ---
       # scripts/fetch-ffmpeg-lgpl.ps1 は BtbN の日付固定タグ(pin)から win64-lgpl-shared
       # を取得し、apps/desktop/src-tauri/ffmpeg-dist/ に DLL のみをステージングする
       # (docs/phase4-packaging.md、THIRD_PARTY_NOTICES.md §1)。標準出力の最終行が
@@ -80,22 +125,22 @@ jobs:
           Write-Host "LGPL root: $lgplRoot"
           echo "FFMPEG_DIR=$lgplRoot" >> $env:GITHUB_ENV
 
-      # --- 5. ライセンス適合ゲート(tauri build より前。fail で全停止) ---
+      # --- 6. ライセンス適合ゲート(tauri build より前。fail で全停止) ---
       # PATH を ffmpeg-dist に絞って license-gate を実行し、実際に LGPL DLL に
       # リンクされ GPL/nonfree コンポーネントを含まないことを機械検証する
       # (apps/desktop/crates/license-gate、THIRD_PARTY_NOTICES.md 末尾)。
       - name: Run license gate (LGPL FFmpeg conformance)
         run: ./scripts/run-license-gate.ps1
 
-      # --- 6. ワークスペース依存(contract の schema/dist、core の dist)を先にビルド ---
+      # --- 7. ワークスペース依存(contract の schema/dist、core の dist)を先にビルド ---
       # apps/desktop の beforeBuildCommand(vite build)は @facet/contract /
       # @facet/core の dist/ を解決する。tauri-action は projectPath 配下でしか
       # コマンドを実行しないため、依存パッケージのビルドはここで事前に行う。
       - name: Build workspace dependencies (@facet/contract, @facet/core)
         run: pnpm --filter "@facet/desktop^..." build
 
-      # --- 7. エディション分離ゲート: マーカー実在の事前検査(tauri build より前) ---
-      # GHSA-39fc-vq56-xx99: 下(手順8)のビルド後 grep が使うマーカー文字列は
+      # --- 8. エディション分離ゲート: マーカー実在の事前検査(tauri build より前) ---
+      # GHSA-39fc-vq56-xx99: 下(手順9)のビルド後 grep が使うマーカー文字列は
       # リファクタで改名されると黙って空振り(常に「一致無し」= 合格)する。
       # ビルドの前にマーカーがソース側に実在することを検査し、改名時はここで
       # fail させて更新を強制する(ci.yml の同名ステップと同じ趣旨)。
@@ -111,12 +156,12 @@ jobs:
             }
           }
 
-      # --- 8. エディション分離ゲート(tauri build より前。fail で全停止) ---
+      # --- 9. エディション分離ゲート(tauri build より前。fail で全停止) ---
       # public(配布版)フロントビルドに投稿系コードが含まれないことを検査する
       # (edition-split, docs/desktop-migration-plan.md §6.6)。win-release は
       # tauri.conf.json の既定 beforeBuildCommand(`vite build --mode public`)を
       # そのまま使う(§tauri.conf.json)ため、ここで独立に同じ `--mode public` で
-      # ビルドした dist/ を検査すれば、直後の tauri-action(手順9)が生成する
+      # ビルドした dist/ を検査すれば、直後の tauri-action(手順10)が生成する
       # 実際のバンドルの中身と同一の内容を事前に確認できる。リフレーム画面
       # (features/upload/ReframeScreen.tsx)自体は両エディション共通で、投稿
       # (スケジュール・キャプション・IG/YT 連携)のみ private 専用ファイル群に分離
@@ -161,17 +206,35 @@ jobs:
           Write-Host "OK: public フロントビルドに投稿系マーカー/エンドポイント文字列は含まれていない"
           Remove-Item -Recurse -Force "apps/desktop/dist-edition-check"
 
-      # --- 9. tauri-action(署名付きビルド + GitHub Release draft 作成) ---
+      # --- 10. tauri-action(署名付きビルド + GitHub Release draft 作成。ドライラン時は署名/公開なしのビルド検証のみ) ---
       # tauri.win-release.conf.json をオーバーレイし、LGPL FFmpeg の DLL と
       # LICENSES/COPYING.LGPLv3 を exe 隣接にバンドルする(Wave A/B)。
       # TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) が未設定だとこのステップで失敗する
       # (初回リリース前チェックリスト、docs/phase4-packaging.md 参照)。
+      #
+      # ドライラン分岐(tauri-action@v1 の src/index.ts を確認: tagName / releaseId が
+      # 共に未指定なら getOrCreateRelease もアセットアップロードも呼ばれず、
+      # 「No releaseId or tagName provided, skipping all uploads...」でビルドのみ成功する。
+      # つまり GitHub Release 関連の入力を空文字にするだけで publish 系動作を安全に
+      # 抑止できるため、tauri-action 自体は分岐せず同じアクションを使う):
+      #   - args: 本番と同じ tauri.win-release.conf.json を常に使い、ドライラン時のみ
+      #     tauri.win-release-dryrun.conf.json(bundle.createUpdaterArtifacts=false のみ)を
+      #     追加でマージする(tauri CLI の --config は複数指定可で指定順にマージされる)。
+      #     updater 署名(.sig)を要求しないビルドになるが、NSIS ビルド自体・
+      #     bundle.resources(FFmpeg DLL / COPYING.LGPLv3)は本番と同一のまま。
+      #   - tagName / releaseName を空文字にし、publish 動作を止める。
+      #   - 署名鍵の env も空にする(createUpdaterArtifacts=false のため未使用だが、
+      #     不要な secrets 参照を避ける意図で明示的に空にする)。
+      #
+      # 式の注意: GitHub Actions の式では空文字 '' は falsy のため、
+      # `cond && '' || 'x'` は cond が真でも 'x' を返してしまう。三項の真側には
+      # 必ず非空(truthy)の値を置く形(`反転条件 && '非空値' || ''`)で書くこと。
       - name: Build & publish draft release (tauri-action)
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.IS_DRY_RUN != 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ env.IS_DRY_RUN != 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         with:
           projectPath: apps/desktop
           # tauri-action は projectPath 内の lockfile でパッケージマネージャを自動判定
@@ -179,9 +242,9 @@ jobs:
           # フォールバックし `npm run tauri` が Missing script で失敗する(v0.1.0 の
           # 2回目ビルドで実際に発生)。pnpm 経由で tauri CLI を起動するよう明示する。
           tauriScript: pnpm tauri
-          args: --config src-tauri/tauri.win-release.conf.json
-          tagName: v__VERSION__
-          releaseName: "Facet desktop v__VERSION__"
+          args: --config src-tauri/tauri.win-release.conf.json${{ env.IS_DRY_RUN == 'true' && ' --config src-tauri/tauri.win-release-dryrun.conf.json' || '' }}
+          tagName: ${{ env.IS_DRY_RUN != 'true' && 'v__VERSION__' || '' }}
+          releaseName: ${{ env.IS_DRY_RUN != 'true' && 'Facet desktop v__VERSION__' || '' }}
           releaseBody: |
             Facet desktop v__VERSION__
 
@@ -189,12 +252,12 @@ jobs:
             初回起動時に SmartScreen の警告が出る場合は「詳細情報」→「実行」を選択してください
             (署名なし配布のため。README.md 参照)。
           releaseDraft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ env.IS_DRY_RUN != 'true' && contains(github.ref_name, '-') }}
 
-      # --- 10. 成果物検査: NSIS インストーラ(setup.exe)を 7z で展開し、LGPL DLL のみが
+      # --- 11. 成果物検査: NSIS インストーラ(setup.exe)を 7z で展開し、LGPL DLL のみが
       #     同梱されていること(GPL 実行ファイルの混入がないこと)を機械検証する。
-      #     これは「配布物そのもの」に対する検査であり、5 のビルド前ゲートとは
-      #     独立した二重防御。
+      #     これは「配布物そのもの」に対する検査であり、6 のビルド前ゲートとは
+      #     独立した二重防御。ドライランでも(署名検証を除き)同じ検査をすべて実行する。
       #     注: Tauri v2 の createUpdaterArtifacts は setup.exe 自体に .sig を添える
       #     形式で、v1 の *.nsis.zip は生成されない(v0.1.0 の3回目ビルドで確認)。
       #     また cargo workspace のルートは apps/desktop のため、バンドル出力は
@@ -211,7 +274,11 @@ jobs:
           Write-Host "検査対象: $($setup.FullName)"
 
           # updater 署名(.sig)が生成されていることを確認(createUpdaterArtifacts)。
-          if (-not (Test-Path "$($setup.FullName).sig")) {
+          # ドライランは tauri.win-release-dryrun.conf.json で createUpdaterArtifacts を
+          # false にしており(署名鍵不要のため).sig は生成されない。ここのみスキップする。
+          if ($env:IS_DRY_RUN -eq "true") {
+            Write-Host "dry run: updater 署名 (.sig) の検証はスキップします(createUpdaterArtifacts=false)"
+          } elseif (-not (Test-Path "$($setup.FullName).sig")) {
             Write-Error "updater 署名 (.sig) が見つかりません: $($setup.FullName).sig"
             exit 1
           }
