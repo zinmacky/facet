@@ -1,6 +1,7 @@
 import type { EditSpec } from "@facet/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getErrorMessage } from "./getErrorMessage";
+import { cancelOrphanHandle, useKeyedJobLifecycle } from "./tauriJobLifecycle";
 import { cancelJob, type JobHandle, type RenderQuality, startPreview } from "./tauri";
 
 /**
@@ -53,34 +54,23 @@ export interface UsePreviewResult {
  * `quality` を省略するとプレビュー品質(2Mbps)。`"publish"` を渡すとフック
  * インスタンス全体が本書き出し品質(8Mbps・`publish-cache`)で動く
  * (UploadScreen の投稿フローが使う。`lib/tauri.ts` の `RenderQuality` 参照)。
+ *
+ * ライフサイクル不変条件(listen-before-invoke / 世代トークン / remove 時 cancel /
+ * アンマウント時 unsubscribe+cancel / stale ハンドル到着時の即時 cancel、Issue #95。
+ * GHSA-c4jj-6rmf-h7g3 対応)は `./tauriJobLifecycle.ts` の `useKeyedJobLifecycle` に
+ * 集約されている(`useReframeQueue.ts` も同じ土台を使う)。このフックは `states` Map
+ * (生成状態)の所有・`ensure()` 1回で reserve+run を兼ねる入口・`pendingRef` による
+ * 同一 key への重複呼び出しの合流に専念する。
  */
 export function usePreview(quality?: RenderQuality): UsePreviewResult {
 	const [states, setStates] = useState<Map<string, PreviewState>>(new Map());
 	const statesRef = useRef(states);
 	statesRef.current = states;
 
-	// key ごとの購読解除関数。
-	const unsubsRef = useRef<Map<string, () => void>>(new Map());
 	// key ごとに進行中の ensure Promise(同一 key への重複呼び出しを合流させる)。
 	const pendingRef = useRef<Map<string, Promise<string>>>(new Map());
 
-	// key ごとの「現在有効な」世代トークン(useReframeQueue.ts と同じ世代管理方式。
-	// GHSA-c4jj-6rmf-h7g3 対応)。ensure() が呼び出し開始時点で同期的に発行し、
-	// remove()/reset() が破棄する。startPreview() の `.then()`/onDone/onError の
-	// 各コールバックは、自分に発行された token が今もこの Map の値と一致する場合
-	// のみ states/unsubsRef を書き換える。不一致であれば「remove() 済み、または
-	// 後から ensure() し直された新しいジョブ」とみなし、状態を書き換えず購読解除
-	// (jobId が判明していれば明示的にキャンセルも)だけ行う。
-	//
-	// トークンは ensure() というただ 1 箇所(同期実行)でのみ発行・上書きされるため、
-	// 複数の非同期コールバックが「自分が最新か」を後から claim し合うような競合は
-	// 起きない(発行順は JS の単一スレッド実行で一意に決まる)。
-	const activeTokenRef = useRef<Map<string, string>>(new Map());
-	const tokenCounterRef = useRef(0);
-	const nextToken = useCallback((): string => {
-		tokenCounterRef.current += 1;
-		return String(tokenCounterRef.current);
-	}, []);
+	const lifecycle = useKeyedJobLifecycle();
 
 	const patch = useCallback((key: string, p: Partial<PreviewState>) => {
 		setStates((prev) => {
@@ -109,10 +99,9 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 
 			// この ensure() 呼び出し由来の世代トークン(同期発行。GHSA-c4jj-6rmf-h7g3
 			// 対応)。以降の非同期コールバックはこのクロージャで捕まえた `token` が
-			// activeTokenRef の現在値と一致する間だけ「自分が最新」とみなす。
-			const token = nextToken();
-			activeTokenRef.current.set(key, token);
-			const isCurrent = () => activeTokenRef.current.get(key) === token;
+			// 現在世代と一致する間だけ「自分が最新」とみなす(`isCurrent` 参照)。
+			const token = lifecycle.reserve(key);
+			const isCurrent = () => lifecycle.isCurrent(key, token);
 
 			const promise = new Promise<string>((resolve, reject) => {
 				patch(key, { rendering: true, error: undefined });
@@ -141,7 +130,7 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 								return;
 							}
 							pendingRef.current.delete(key);
-							unsubsRef.current.delete(key);
+							lifecycle.clearUnsubscribe(key);
 							patch(key, {
 								rendering: false,
 								outputPath: path,
@@ -158,7 +147,7 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 								return;
 							}
 							pendingRef.current.delete(key);
-							unsubsRef.current.delete(key);
+							lifecycle.clearUnsubscribe(key);
 							patch(key, { rendering: false, error: message });
 							reject(new Error(message));
 						},
@@ -173,17 +162,11 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 							// remove 対応)。孤児として走らせ続けないよう明示的にキャンセルし、
 							// リスナーも解放する(以降 onDone/onError は発火しないため、ここで
 							// ensure() の Promise を確定させる)。
-							h.unsubscribe();
-							void h.cancel().catch((err: unknown) => {
-								console.warn(
-									`孤児ジョブのキャンセルに失敗しました(jobId=${h.jobId})`,
-									err,
-								);
-							});
+							cancelOrphanHandle(h);
 							reject(new Error("プレビュー生成が中断されました(remove 済み)"));
 							return;
 						}
-						unsubsRef.current.set(key, h.unsubscribe);
+						lifecycle.setUnsubscribe(key, h.unsubscribe);
 						patch(key, { jobId: h.jobId });
 					})
 					.catch((err: unknown) => {
@@ -201,7 +184,7 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 			pendingRef.current.set(key, promise);
 			return promise;
 		},
-		[patch, quality, nextToken],
+		[patch, quality, lifecycle],
 	);
 
 	const trigger = useCallback(
@@ -216,27 +199,16 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 		if (jobId) void cancelJob(jobId);
 	}, []);
 
-	/** jobId が既知ならキャンセルを試みる(失敗は握りつぶさず warn に留める。バグ1)。 */
-	const cancelOrphan = useCallback((jobId: string | undefined) => {
-		if (!jobId) return;
-		void cancelJob(jobId).catch((err: unknown) => {
-			console.warn(`ジョブのキャンセルに失敗しました(jobId=${jobId})`, err);
-		});
-	}, []);
-
 	const remove = useCallback(
 		(key: string) => {
-			unsubsRef.current.get(key)?.();
-			unsubsRef.current.delete(key);
 			pendingRef.current.delete(key);
 			// key の世代トークンを破棄する(GHSA-c4jj-6rmf-h7g3 対応)。jobId 未確定
 			// (invoke 未 resolve)の窓で remove() が呼ばれても、ensure() の `.then()`/
-			// onDone/onError は isCurrent() が false になるため、states/unsubsRef への
+			// onDone/onError は isCurrent() が false になるため、states/購読への
 			// 再登録(ghost エントリの復活)が起きず、jobId 判明時点で明示的に
-			// unsubscribe + cancel される(useReframeQueue.ts と同じ世代管理方式)。
-			activeTokenRef.current.delete(key);
-			// jobId が既に確定していれば Rust 側のジョブへキャンセルを通知する(バグ1)。
-			cancelOrphan(statesRef.current.get(key)?.jobId);
+			// unsubscribe + cancel される。jobId が既に確定していれば Rust 側の
+			// ジョブへキャンセルを通知する(バグ1)。
+			void lifecycle.remove(key, statesRef.current.get(key)?.jobId);
 			setStates((prev) => {
 				if (!prev.has(key)) return prev;
 				const next = new Map(prev);
@@ -244,27 +216,21 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 				return next;
 			});
 		},
-		[cancelOrphan],
+		[lifecycle],
 	);
 
 	const reset = useCallback(() => {
-		for (const unsub of unsubsRef.current.values()) unsub();
-		unsubsRef.current.clear();
 		pendingRef.current.clear();
-		activeTokenRef.current.clear();
-		for (const state of statesRef.current.values()) cancelOrphan(state.jobId);
+		lifecycle.resetAll([...statesRef.current.values()].map((state) => state.jobId));
 		setStates(new Map());
-	}, [cancelOrphan]);
+	}, [lifecycle]);
 
 	// アンマウント時に全購読を解除し、jobId が確定しているジョブはキャンセルする(バグ1)。
 	useEffect(() => {
-		const unsubs = unsubsRef.current;
 		return () => {
-			for (const unsub of unsubs.values()) unsub();
-			unsubs.clear();
-			for (const state of statesRef.current.values()) cancelOrphan(state.jobId);
+			lifecycle.resetAll([...statesRef.current.values()].map((state) => state.jobId));
 		};
-	}, [cancelOrphan]);
+	}, [lifecycle]);
 
 	return { states, ensure, trigger, cancel, remove, reset };
 }
