@@ -31,3 +31,28 @@ updates:
       day: monday
     commit-message:
       prefix: "ci"
+
+  # apps/desktop の Rust workspace(crates/media-core, crates/contract-rs, src-tauri)。
+  # Cargo.lock を基準に更新する。
+  - package-ecosystem: cargo
+    directory: "/apps/desktop"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    # メジャー更新は自動 PR を出さない(npm の設定と同方針)。tauri 本体は破壊的変更を
+    # 伴いやすく計画的に手動更新するため、バージョン問わず ignore する。
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "tauri"
+      - dependency-name: "tauri-build"
+      - dependency-name: "tauri-plugin-*"
+    groups:
+      dev-dependencies:
+        dependency-type: development
+      production-dependencies:
+        dependency-type: production
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"

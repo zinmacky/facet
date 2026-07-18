@@ -11,7 +11,8 @@
 		"dev": "turbo run dev",
 		"test": "turbo run test",
 		"typecheck": "turbo run typecheck",
-		"lint": "biome lint .",
+		"lint": "turbo run lint:root",
+		"lint:root": "biome lint .",
 		"format": "biome format --write ."
 	},
 	"devDependencies": {
