@@ -16,6 +16,8 @@ interface OutputPublishSectionProps {
 	canPublish: boolean;
 	onPatch: (patch: Partial<UploadOutput>) => void;
 	onPublish: () => void;
+	/** 進行中(レンダリング/投稿中)の処理をキャンセルする(Issue #95、任意の UI 導線)。 */
+	onCancel: () => void;
 }
 
 /**
@@ -70,7 +72,12 @@ export function OutputPublishSection(props: OutputPublishSectionProps) {
 				</label>
 			)}
 
-			<div className="flex justify-end">
+			<div className="flex justify-end gap-2">
+				{(status?.kind === "rendering" || status?.kind === "publishing") && (
+					<Button variant="ghost" size="sm" onClick={props.onCancel}>
+						キャンセル
+					</Button>
+				)}
 				<Button
 					variant="primary"
 					size="sm"

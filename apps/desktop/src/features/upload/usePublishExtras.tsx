@@ -6,6 +6,7 @@ import { targetById } from "../../types";
 import { generateSchedule, msToLocalInput } from "../../lib/schedule";
 import { usePreview } from "../../lib/usePreview";
 import { getErrorMessage } from "../../lib/getErrorMessage";
+import { newJobId } from "../../lib/jobId";
 import { Button } from "../../components/ui/Button";
 import { usePublishGateContext } from "../publish-settings/PublishGateContext";
 import { describeIgPublishError, startIgPublish } from "./igPublish";
@@ -63,6 +64,57 @@ export function usePublishExtras({
 	// 満たす場合のみ Instagram への投稿ボタンを有効化する(`canPublishTarget` 参照)。
 	const publishGate = usePublishGateContext();
 
+	// startYoutubePublish/startIgPublish が返すハンドルの共通形(構造的に一致)。
+	type PublishHandle = {
+		jobId: string;
+		unsubscribe: () => void;
+		cancel: () => Promise<void>;
+	};
+	// output.id → 実行中の投稿ジョブのハンドル(GHSA-rrgf-h689-w639 対応)。
+	// 従来は publishTo() 内で `.catch` のみ握って破棄しており、投稿中(数十秒)に
+	// アンマウントされるとリスナ残留・アンマウント済みコンポーネントへの setState・
+	// キャンセル導線の欠如が起きていた。done/error で自身を Map から取り除く
+	// (settled 済みなら .then() 側で登録しない、useReframeQueue.ts と同じ順序保証)。
+	const inFlightRef = useRef<Map<string, PublishHandle>>(new Map());
+	// アンマウント後の setState を防ぐフラグ(setPubStatus 経由でのみ書き込むため
+	// ここ 1 箇所をガードすれば足りる)。
+	const mountedRef = useRef(true);
+	// output.id → Instagram 投稿の jobId(失敗時の再試行にのみ初回生成値を再利用する。
+	// 成功時は publishTo の onDone で削除する — 下記参照)。
+	// Rust 側(並行実装中)が jobId から idempotency_key を決定的に導出する設計と対に
+	// なる — 同一 output の再投稿(リトライ)が同一キーになり、scheduler 側での
+	// 二重公開を防げる。前提: 同一 jobId の再利用は「前回の試行が終了(done/error)
+	// している」場合のみ安全(Rust 側は実行中の同一 jobId を拒否する予定)。in-flight
+	// 中の再クリックは `busy`(publishPostMutation/publishAllMutation の isPending)で
+	// ボタンが disabled になるため既に防がれている。成功後は次回投稿(キャプション
+	// 編集後の再公開等、意図的な新規投稿)のために jobId を使い捨てる(同一キーの
+	// まま送ると Rust 側の idempotency_key 判定で無言破棄されうるため)。
+	const igJobIdsRef = useRef<Map<string, string>>(new Map());
+	const igJobIdFor = (outputId: string): string => {
+		const existing = igJobIdsRef.current.get(outputId);
+		if (existing) return existing;
+		const id = newJobId();
+		igJobIdsRef.current.set(outputId, id);
+		return id;
+	};
+
+	// アンマウント時に in-flight の投稿ジョブ購読を解除し、Rust 側ジョブもキャンセルする
+	// (GHSA-rrgf-h689-w639 対応)。cancel() の reject は握りつぶす(アンマウント後は
+	// 結果を誰も見ないため)。mount 時に true へ戻すのを忘れると、React StrictMode の
+	// mount→cleanup→remount(開発時のみ)で mountedRef が false に固定され、以降
+	// setPubStatus が恒久的に無視されてしまう。
+	useEffect(() => {
+		mountedRef.current = true;
+		return () => {
+			mountedRef.current = false;
+			for (const handle of inFlightRef.current.values()) {
+				handle.unsubscribe();
+				void handle.cancel().catch(() => undefined);
+			}
+			inFlightRef.current.clear();
+		};
+	}, []);
+
 	// 一括予約スケジュールの入力状態。
 	const [startDate, setStartDate] = useState("");
 	const [endDate, setEndDate] = useState("");
@@ -78,6 +130,7 @@ export function usePublishExtras({
 	useEffect(() => {
 		setPubStatuses(new Map());
 		publishRender.reset();
+		igJobIdsRef.current.clear();
 		setStartDate("");
 		setEndDate("");
 		setWeekdayTimes({});
@@ -102,7 +155,18 @@ export function usePublishExtras({
 			for (const id of removed) next.delete(id);
 			return next;
 		});
-		for (const id of removed) publishRender.remove(id);
+		for (const id of removed) {
+			publishRender.remove(id);
+			// in-flight の投稿ジョブが残っていれば購読解除 + キャンセルする
+			// (GHSA-rrgf-h689-w639 対応。output 自体が消えたので誰も結果を見ない)。
+			const handle = inFlightRef.current.get(id);
+			if (handle) {
+				handle.unsubscribe();
+				void handle.cancel().catch(() => undefined);
+				inFlightRef.current.delete(id);
+			}
+			igJobIdsRef.current.delete(id);
+		}
 	}, [posts, publishRender.remove]);
 
 	/** `target` への投稿がボタンとして有効化されるか(コード対応 + 実行時ゲート)。 */
@@ -115,11 +179,45 @@ export function usePublishExtras({
 	};
 
 	const setPubStatus = (outputId: string, status: PubStatus) => {
+		// アンマウント後に非同期コールバック(onProgress/onDone/onError)が届いても
+		// setState しない(GHSA-rrgf-h689-w639 対応)。
+		if (!mountedRef.current) return;
 		setPubStatuses((prev) => {
 			const next = new Map(prev);
 			next.set(outputId, status);
 			return next;
 		});
+	};
+
+	/**
+	 * `outputId` が今も有効(マウント中 かつ posts から消えていない)か。
+	 * `publishTo` の `.then((handle) => …)` が jobId 確定(=ハンドル取得)を待つ間に
+	 * アンマウント、または(pubStatuses だけでなく)posts 変化で当該 output が
+	 * 削除された場合に、孤児ジョブとして登録してしまわないためのガード
+	 * (GHSA-rrgf-h689-w639 対応。`usePreview.ts` の `isCurrent()` と同じレース対策 —
+	 * ただし世代トークンではなく mountedRef + knownOutputIdsRef の2軸で判定する)。
+	 */
+	const isOutputLive = (outputId: string): boolean =>
+		mountedRef.current && knownOutputIdsRef.current.has(outputId);
+
+	/**
+	 * `outputId` の投稿処理をキャンセルする(任意の UI 導線、Issue #95)。
+	 * "rendering"(投稿用レンダリング中)は `publishRender.cancel` が jobId ベースで
+	 * `reframe_cancel` を呼ぶ。"publishing"(アップロード中)は in-flight ハンドルの
+	 * `cancel()` を呼ぶ — Rust 側が `kind: "cancelled"` の onError を返し、
+	 * `describeIgPublishError`/`describeYoutubePublishError` が「キャンセルされました。」
+	 * に変換して `publishOutput` の catch 経由で pubStatuses へ反映される(新しい
+	 * PubStatusKind を増やさずに済む)。
+	 */
+	const cancelOutput = (outputId: string) => {
+		const status = pubStatuses.get(outputId);
+		if (status?.kind === "rendering") {
+			publishRender.cancel(outputId);
+			return;
+		}
+		if (status?.kind === "publishing") {
+			void inFlightRef.current.get(outputId)?.cancel().catch(() => undefined);
+		}
 	};
 
 	/**
@@ -213,6 +311,11 @@ export function usePublishExtras({
 	): Promise<void> => {
 		if (target.platform === "youtube") {
 			await new Promise<void>((resolve, reject) => {
+				// listen-before-invoke で登録された done/error は invoke() の resolve より
+				// 先に発火しうる(バグ2 と同じ順序保証)。その場合 `.then((h) => …)` が
+				// あとから inFlightRef へ登録してしまわないよう settled で防ぐ
+				// (GHSA-rrgf-h689-w639 対応)。
+				let settled = false;
 				startYoutubePublish(
 					{
 						inputPath: outputPath,
@@ -232,25 +335,56 @@ export function usePublishExtras({
 								message: `アップロード中 ${Math.round(progress.percent)}%`,
 							});
 						},
-						onDone: () => resolve(),
-						onError: (error) =>
-							reject(new Error(describeYoutubePublishError(error))),
+						onDone: () => {
+							settled = true;
+							inFlightRef.current.delete(output.id);
+							resolve();
+						},
+						onError: (error) => {
+							settled = true;
+							inFlightRef.current.delete(output.id);
+							reject(new Error(describeYoutubePublishError(error)));
+						},
 					},
-				).catch((err: unknown) => {
-					reject(err instanceof Error ? err : new Error(getErrorMessage(err)));
-				});
+				)
+					.then((handle) => {
+						if (settled) return;
+						if (!isOutputLive(output.id)) {
+							// jobId 確定(=このハンドル取得)が、アンマウント/output 削除
+							// (posts 変化)より後になった窓(GHSA-rrgf-h689-w639 対応。
+							// usePreview.ts の isCurrent() 分岐と同じレース)。孤児掃除
+							// effect/unmount cleanup は既に走った後なので inFlightRef へは
+							// 登録せず、ここで直接 unsubscribe + cancel する。
+							handle.unsubscribe();
+							void handle.cancel().catch(() => undefined);
+							resolve();
+							return;
+						}
+						inFlightRef.current.set(output.id, handle);
+					})
+					.catch((err: unknown) => {
+						if (settled) return;
+						reject(err instanceof Error ? err : new Error(getErrorMessage(err)));
+					});
 			});
 			return;
 		}
 
 		const publishAt = post.publishAt ?? Date.now();
+		// output.id ごとに安定な jobId を再利用する(初回生成値、リトライでも同じ値)。
+		// Rust 側(並行実装中)が jobId から idempotency_key を決定的に導出したとき、
+		// 同一 output の再投稿が同一キーになり scheduler 側の二重公開を防げる
+		// (再利用の前提は igJobIdFor の JSDoc 参照)。
+		const jobId = igJobIdFor(output.id);
 
 		await new Promise<void>((resolve, reject) => {
+			let settled = false;
 			startIgPublish(
 				{
 					inputPath: outputPath,
 					caption: output.caption,
 					publishAt,
+					jobId,
 				},
 				{
 					onProgress: (progress) => {
@@ -262,12 +396,39 @@ export function usePublishExtras({
 									: "投稿ジョブを登録中…",
 						});
 					},
-					onDone: () => resolve(),
-					onError: (error) => reject(new Error(describeIgPublishError(error))),
+					onDone: () => {
+						settled = true;
+						inFlightRef.current.delete(output.id);
+						// 成功後は jobId を使い捨てる。再利用するのは「失敗した試行のリトライ」
+						// (同一内容の再送、idempotency_key を一致させたい)であり、成功済みの
+						// output へユーザーが改めて「投稿」を押す(キャプション編集後の再公開等)
+						// のは意図的な新規投稿のはず — 同じ jobId のままだと Rust 側の
+						// idempotency_key 判定で無言破棄されかねないため、次回は新規採番する。
+						igJobIdsRef.current.delete(output.id);
+						resolve();
+					},
+					onError: (error) => {
+						settled = true;
+						inFlightRef.current.delete(output.id);
+						reject(new Error(describeIgPublishError(error)));
+					},
 				},
-			).catch((err: unknown) => {
-				reject(err instanceof Error ? err : new Error(getErrorMessage(err)));
-			});
+			)
+				.then((handle) => {
+					if (settled) return;
+					if (!isOutputLive(output.id)) {
+						// YouTube 分岐と同じレース対策(直前のコメント参照)。
+						handle.unsubscribe();
+						void handle.cancel().catch(() => undefined);
+						resolve();
+						return;
+					}
+					inFlightRef.current.set(output.id, handle);
+				})
+				.catch((err: unknown) => {
+					if (settled) return;
+					reject(err instanceof Error ? err : new Error(getErrorMessage(err)));
+				});
 		});
 	};
 
@@ -456,6 +617,7 @@ export function usePublishExtras({
 					canPublish={canPublishTarget(target)}
 					onPatch={onPatchOutput}
 					onPublish={() => void publishOutput(post, output).catch(() => undefined)}
+					onCancel={() => cancelOutput(output.id)}
 				/>
 			);
 		},
