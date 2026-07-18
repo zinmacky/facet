@@ -47,6 +47,14 @@ describe("jobManifest", () => {
 			false,
 		);
 	});
+
+	it("publishAt は 2020-01-01 未満(unix 秒値の誤送信)を弾く", () => {
+		// 1_752_000_000 は秒単位なら 2025 年頃だが、ms として解釈すると 1970 年になる。
+		// 単位取り違えのまま通すと即時公開ジョブとして処理されてしまうため拒否する。
+		expect(
+			jobManifest.safeParse({ ...valid, publishAt: 1_752_000_000 }).success,
+		).toBe(false);
+	});
 });
 
 describe("jobStatus", () => {
