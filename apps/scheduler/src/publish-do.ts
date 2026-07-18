@@ -105,6 +105,9 @@ export class PublishDO implements DurableObject {
 
 	async fetch(req: Request): Promise<Response> {
 		const url = new URL(req.url);
+		if (url.pathname === "/resume") {
+			return this.handleResume(req);
+		}
 		if (url.pathname !== "/start") {
 			return new Response("not found", { status: 404 });
 		}
@@ -145,6 +148,51 @@ export class PublishDO implements DurableObject {
 				headers: { "content-type": "application/json" },
 			});
 		}
+	}
+
+	/**
+	 * cron.ts の sweepStaleJobs から叩かれる。「D1 が非終端状態のまま updated_at が
+	 * 長時間更新されていない」候補に対して、実際に孤立しているか(alarm 未設定か)を
+	 * この DO 自身に判定させ、孤立していれば alarm 経路に載せて復帰させる。
+	 *
+	 * 二重起動安全性: alarm が既に張られている(=このインスタンスが生きていて
+	 * 通常どおり継続中)場合は何もしない。processing の reArm(下記 alarm() 内)は
+	 * ポーリングのたびに updated_at を更新するため、正常に長時間ポーリング中の
+	 * ジョブが stale 候補に乗ること自体がまず起きない。それでも乗った場合に備え、
+	 * alarm の有無という DO 自身の storage(durable、isolate 退避を跨いで残る)を
+	 * 最終ガードにする。
+	 *
+	 * alarm 未設定のときの再開は `this.alarm()` を直接呼ばず `setAlarm(Date.now())`
+	 * でプラットフォームの alarm ディスパッチ経路に載せる。直接呼び出しだと、
+	 * ちょうど自然発火した alarm() が実行中(alarm は発火時点で消費されるため
+	 * getAlarm() は既に null を返しうる)の場合に、このハンドラがもう一本
+	 * alarm() 相当の処理を並行実行してしまいうる。Durable Objects は alarm() を
+	 * 同時に1つしか実行しない保証を alarm ディスパッチ機構が担うため、
+	 * setAlarm 経由にすることでその保証に乗り、二重実行を避ける。
+	 */
+	private async handleResume(req: Request): Promise<Response> {
+		const { jobId } = (await req.json()) as { jobId?: string };
+		if (typeof jobId !== "string") {
+			return new Response("missing jobId", { status: 400 });
+		}
+		// JOB_ID_KEY が何らかの理由で未設定(/start が保存前に中断した等の極端なケース)
+		// でも自己回復できるよう、渡された jobId で補完しておく。
+		await this.state.storage.put(JOB_ID_KEY, jobId);
+
+		const existingAlarm = await this.state.storage.getAlarm();
+		if (existingAlarm !== null) {
+			// 正常進行中。二重起動を避けてここでは何もしない。
+			return new Response(JSON.stringify({ resumed: false }), {
+				headers: { "content-type": "application/json" },
+			});
+		}
+
+		// alarm 未設定 = 本当に孤立している可能性が高い。即時発火の alarm を
+		// 予約し、実際の復帰処理は通常の alarm() ディスパッチに委ねる。
+		await this.state.storage.setAlarm(Date.now());
+		return new Response(JSON.stringify({ resumed: true }), {
+			headers: { "content-type": "application/json" },
+		});
 	}
 
 	/**
@@ -224,6 +272,10 @@ export class PublishDO implements DurableObject {
 						await this.markFailed(jobId, "polling timeout");
 						return;
 					}
+					// updated_at を更新しておく(指摘1対応)。ここを更新しないと、
+					// 正常にポーリングを継続しているだけのジョブが sweepStaleJobs の
+					// stale 候補(updated_at 長時間無更新)に誤って乗り続けてしまう。
+					await this.touchUpdatedAt(jobId);
 					await this.state.storage.setAlarm(Date.now() + POLL_INTERVAL_MS);
 					return;
 				}
@@ -310,6 +362,13 @@ export class PublishDO implements DurableObject {
 			"UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
 		)
 			.bind(status, Date.now(), jobId)
+			.run();
+	}
+
+	/** status は変えず updated_at だけ進める(reArm で「生存」を D1 に反映するため)。 */
+	private async touchUpdatedAt(jobId: string): Promise<void> {
+		await this.env.DB.prepare("UPDATE jobs SET updated_at = ? WHERE id = ?")
+			.bind(Date.now(), jobId)
 			.run();
 	}
 
