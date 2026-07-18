@@ -88,16 +88,25 @@ export function cancelIgPublishJob(jobId: string): Promise<void> {
  * 未設定は `invoke()` 自体の reject(Err(String))として返る(ジョブは開始されない、
  * `commands/publish/ig.rs` 冒頭コメント参照)。R2 アップロード/scheduler 登録開始後の
  * 失敗(ネットワーク・401・503・キャンセル)は `onError` ハンドラに構造化 enum で届く。
+ *
+ * `params.jobId` は省略可能(省略時は従来どおり `newJobId()` で新規採番)。
+ * 呼び出し側(`usePublishExtras.tsx`)が output ごとに安定な jobId を再利用して渡すと、
+ * Rust 側(並行実装中)が jobId から idempotency_key を決定的に導出できるようになり、
+ * 同一 output の再投稿(リトライ)が同一キーになって二重公開を防げる
+ * (Issue #95 と対になる Rust 側変更)。再利用する場合、呼び出し側は「前回の試行が
+ * 終了(done/error)している」ことを保証する責任を負う — Rust 側は実行中の同一
+ * jobId を拒否する予定のため。
  */
 export async function startIgPublish(
 	params: {
 		inputPath: string;
 		caption: string;
 		publishAt: number;
+		jobId?: string;
 	},
 	handlers: IgPublishHandlers,
 ): Promise<IgPublishHandle> {
-	const jobId = newJobId();
+	const jobId = params.jobId ?? newJobId();
 
 	let unlisteners: UnlistenFn[] = [];
 	const unsubscribe = () => {
