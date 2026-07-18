@@ -8,7 +8,6 @@ import { usePreview } from "../../lib/usePreview";
 import { getErrorMessage } from "../../lib/getErrorMessage";
 import { Button } from "../../components/ui/Button";
 import { usePublishGateContext } from "../publish-settings/PublishGateContext";
-import { loadSchedulerUrl } from "../publish-settings/schedulerUrlStore";
 import { describeIgPublishError, startIgPublish } from "./igPublish";
 import {
 	describeYoutubePublishError,
@@ -244,7 +243,6 @@ export function usePublishExtras({
 			return;
 		}
 
-		const schedulerUrl = loadSchedulerUrl();
 		const publishAt = post.publishAt ?? Date.now();
 
 		await new Promise<void>((resolve, reject) => {
@@ -253,7 +251,6 @@ export function usePublishExtras({
 					inputPath: outputPath,
 					caption: output.caption,
 					publishAt,
-					schedulerUrl,
 				},
 				{
 					onProgress: (progress) => {

@@ -55,6 +55,13 @@ export const mockNewJobId = vi.fn((): string => {
 let mockSchedulerApiToken: string | null = null;
 
 /**
+ * scheduler URL のインメモリモック状態(§commands/publish/mod.rs の
+ * `KEY_SCHEDULER_URL`。GHSA-j74q-9v5x-87w3 対応で localStorage から invoke ベースへ
+ * 変わったため、`mockSchedulerApiToken` と同じ形の状態をここに追加した)。
+ */
+let mockSchedulerUrl: string | null = null;
+
+/**
  * R2(Cloudflare, S3 互換)資格情報のインメモリモック状態(§commands/publish/r2_credentials.rs)。
  * `mockSchedulerApiToken` と同じ「テストは個別に差し替え可能・既定実装は一貫した
  * シナリオを提供する」方針。
@@ -101,7 +108,20 @@ async function defaultInvokeImpl(cmd: string, args?: unknown): Promise<unknown> 
 		case "delete_scheduler_api_token":
 			mockSchedulerApiToken = null;
 			return undefined;
+		case "set_scheduler_url": {
+			const { url } = (args ?? {}) as { url?: string };
+			const trimmed = url?.trim();
+			if (!trimmed) throw new Error("scheduler_url が空です。");
+			mockSchedulerUrl = trimmed;
+			return undefined;
+		}
+		case "get_scheduler_url":
+			return mockSchedulerUrl;
+		case "delete_scheduler_url":
+			mockSchedulerUrl = null;
+			return undefined;
 		case "check_scheduler_connection":
+			if (mockSchedulerUrl === null) return { status: "no_url" };
 			return mockSchedulerApiToken === null
 				? { status: "no_token" }
 				: { status: "ok" };
@@ -257,6 +277,7 @@ export function resetTauriMocks(): void {
 	jobCounter = 0;
 
 	mockSchedulerApiToken = null;
+	mockSchedulerUrl = null;
 	mockR2Credentials = null;
 	mockYoutubeOauthClient = null;
 	mockYoutubeOauthConnected = false;

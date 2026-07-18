@@ -1,38 +1,75 @@
 /**
- * scheduler の URL の永続化(localStorage)。
+ * scheduler の URL の永続化。
  *
- * URL 自体は秘密情報ではない(Bearer トークンと違い、これ単体で scheduler を
- * 操作できるわけではない)ため OS キーチェーンには置かず、`lib/settings.tsx` と
- * 同じ localStorage パターンに素直に乗せる(§docs/desktop-migration-plan.md §11-3、
- * 保管場所の設計判断は最終報告に明記)。
+ * 旧実装は localStorage に保存し、renderer が invoke 引数として都度 Rust 側へ渡していた。
+ * この構造は WebView が侵害された場合、Bearer トークンの送信先(scheduler_url)を
+ * 任意ホストへ差し替えられてしまう(confused deputy, GHSA-j74q-9v5x-87w3)。
  *
- * `lib/settings.tsx` の `AppSettings` へは追加しない — この設定は public エディションの
- * バンドルから物理除外する対象(features/publish-settings/、virtual:publish-settings-entry)
- * であり、`AppSettings` は public/private 共通でロードされる共有モジュールのため、
- * 概念上もファイル構成上もここに閉じておく。
+ * 対策として、送信先は Rust 側の保存値(OS キーチェーン、
+ * `src-tauri/src/commands/publish/mod.rs` の `KEY_SCHEDULER_URL`)からのみ導出する
+ * 構造に変えた。renderer は invoke 経由でしか読み書きしない
+ * (`set_scheduler_url`/`get_scheduler_url`/`delete_scheduler_url`)。URL 自体は秘密
+ * 情報ではないため、値をそのまま取得する API を用意してよい(トークンとは異なる扱い、
+ * §publishSettingsClient.ts)。
  */
 
-const STORAGE_KEY = "facet.desktop.private.schedulerUrl";
+import { invoke } from "@tauri-apps/api/core";
 
-/** 保存済みの scheduler URL。未設定・取得不可なら空文字列。 */
-export function loadSchedulerUrl(): string {
+/** 旧実装(localStorage)のキー。移行専用に残す(下記 `getSchedulerUrl` 参照)。 */
+const LEGACY_STORAGE_KEY = "facet.desktop.private.schedulerUrl";
+
+/**
+ * 保存済みの scheduler URL を返す。未設定・取得不可なら空文字列。
+ *
+ * **一回性の移行**: Rust 側が未設定 かつ 旧 localStorage キーに値が残っている場合、
+ * その値を `set_scheduler_url` で保存しようと試みる。保存に成功すれば localStorage の
+ * キーを削除してその値を返す。保存が失敗した(不正 URL 等)場合もキーだけは削除し
+ * (無効な値を保持し続けても意味がないため)、空文字列を返す。
+ *
+ * 移行はゲートの初回チェック前に必ず走る — `usePublishGate.recheck()` が疎通チェックの
+ * 前にこの関数を await するため、設定ダイアログを開かない既存ユーザーでもアプリ起動時に
+ * 移行される(§usePublishGate.ts)。多重呼び出しされても2回目以降は旧キーが消えている
+ * ため no-op で安全。
+ */
+export async function getSchedulerUrl(): Promise<string> {
+	const stored = await invoke<string | null>("get_scheduler_url");
+	if (stored) return stored;
+
+	const legacy = readLegacyUrl();
+	if (!legacy) return "";
+	try {
+		await invoke<void>("set_scheduler_url", { url: legacy });
+		removeLegacyUrl();
+		return legacy;
+	} catch {
+		removeLegacyUrl();
+		return "";
+	}
+}
+
+/** scheduler URL を保存する。空文字列は「未設定」として扱い、保存済み値を削除する。 */
+export async function setSchedulerUrl(url: string): Promise<void> {
+	if (url) {
+		await invoke<void>("set_scheduler_url", { url });
+	} else {
+		await invoke<void>("delete_scheduler_url");
+	}
+}
+
+function readLegacyUrl(): string {
 	if (typeof window === "undefined") return "";
 	try {
-		return window.localStorage.getItem(STORAGE_KEY) ?? "";
+		return window.localStorage.getItem(LEGACY_STORAGE_KEY) ?? "";
 	} catch {
 		return "";
 	}
 }
 
-/** scheduler URL を保存する。空文字列は「未設定」として扱い、キー自体を削除する。 */
-export function saveSchedulerUrl(url: string): void {
+function removeLegacyUrl(): void {
+	if (typeof window === "undefined") return;
 	try {
-		if (url) {
-			window.localStorage.setItem(STORAGE_KEY, url);
-		} else {
-			window.localStorage.removeItem(STORAGE_KEY);
-		}
+		window.localStorage.removeItem(LEGACY_STORAGE_KEY);
 	} catch {
-		// localStorage が使えない環境では永続化を諦める(settings.tsx と同じ方針)。
+		// localStorage が使えない環境では何もしない。
 	}
 }

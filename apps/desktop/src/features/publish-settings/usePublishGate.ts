@@ -4,14 +4,16 @@ import {
 	hasSchedulerApiToken,
 	type ConnectionCheckResult,
 } from "./publishSettingsClient";
-import { loadSchedulerUrl } from "./schedulerUrlStore";
+import { getSchedulerUrl } from "./schedulerUrlStore";
 
 /**
- * `ConnectionCheckResult` に、フロント側のみで判定できる「URL 未設定」を加えた
- * 表示用の結果型。Rust 側には URL を渡していない(=疎通チェック自体を実行していない)
- * ケースを区別するため。
+ * 表示用の結果型。以前は「URL 未設定」をフロント側だけで判定していたため
+ * `ConnectionCheckResult` に `no_url` を加えた別の型だったが、GHSA-j74q-9v5x-87w3
+ * 対応で scheduler_url を Rust 側の保存値からのみ扱うようになり、`no_url` も
+ * Rust 側の `check_scheduler_connection` が返すようになったため、
+ * `ConnectionCheckResult` をそのまま使う型エイリアスに簡素化した。
  */
-export type PublishGateResult = ConnectionCheckResult | { status: "no_url" };
+export type PublishGateResult = ConnectionCheckResult;
 
 export interface PublishGateState {
 	/** 「設定が保存済み(URL + トークン)かつ疎通チェック成功」のときのみ true。 */
@@ -51,19 +53,17 @@ export function usePublishGate(): PublishGateState {
 			const tokenSaved = await hasSchedulerApiToken();
 			setHasToken(tokenSaved);
 
-			const url = loadSchedulerUrl();
-			if (!url) {
-				setReady(false);
-				setLastResult({ status: "no_url" });
-				return;
-			}
-			if (!tokenSaved) {
-				setReady(false);
-				setLastResult({ status: "no_token" });
-				return;
-			}
+			// 旧 localStorage → キーチェーンの一回性移行(§schedulerUrlStore.ts)を
+			// 疎通チェックの前に必ず走らせる(戻り値は捨てる — 移行の副作用が目的)。
+			// このフックは PublishGateContext 経由でアプリ起動時にマウントされるため、
+			// 「ゲートの初回チェックは必ず移行後の状態を見る」ことがここで保証される
+			// (設定ダイアログを開かない既存ユーザーでも移行される)。recheck の多重
+			// 呼び出しで移行が重複実行されても、2回目以降は旧キーが消えているため no-op。
+			await getSchedulerUrl();
 
-			const result = await checkSchedulerConnection(url);
+			// URL 未設定/トークン未設定の判定は Rust 側の `check_scheduler_connection` が
+			// 一元的に行う(§publishSettingsClient.ts)。
+			const result = await checkSchedulerConnection();
 			setLastResult(result);
 			setReady(result.status === "ok");
 		} catch {

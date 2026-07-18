@@ -24,8 +24,10 @@
 //!   inputPath: "/path/to/output.mp4",
 //!   caption: "...",
 //!   publishAt: Date.now() + 3600_000,
-//!   schedulerUrl: "https://your-scheduler.example.workers.dev",
 //! });
+//! // scheduler の送信先(scheduler_url)は renderer からは渡さない — Rust 側が
+//! // キーチェーンの保存値から読む(GHSA-j74q-9v5x-87w3 対応、confused deputy 防止。
+//! // §commands/publish/mod.rs モジュール冒頭コメント)。
 //!
 //! await invoke("ig_publish_cancel", { jobId });
 //! ```
@@ -65,7 +67,7 @@ use crate::jobs::sigv4::{self, R2Credentials};
 
 use super::credential_store::{CredentialStore, KeyringStore};
 use super::r2_credentials;
-use super::{KEY_SCHEDULER_API_TOKEN, SERVICE};
+use super::{KEY_SCHEDULER_API_TOKEN, KEY_SCHEDULER_URL, SERVICE};
 
 /// renderer が採番するジョブ ID(`reframe`/`preview` と同じ形の型エイリアス)。
 pub type JobId = String;
@@ -220,6 +222,13 @@ fn validate_enqueue_target(path: &Path, caption: &str) -> Result<(), String> {
 /// バリデーション(ファイルサイズ ≤300MB・尺 3秒〜15分・キャプション ≤2200 文字)と
 /// R2/scheduler の資格情報・URL の有無を先に確認し、いずれかが不正なら
 /// ジョブを開始せず `Err` を返す(R2 に一切アップロードしない)。
+///
+/// `scheduler_url` は引数ではなくキーチェーンの保存値から読む
+/// (GHSA-j74q-9v5x-87w3 対応: renderer が任意の送信先を指定できると、WebView 侵害時に
+/// Bearer トークンを任意ホストへ流出させられる。§commands/publish/mod.rs モジュール
+/// 冒頭コメント参照)。保存値は `set_scheduler_url_impl` で保存時に検証済みだが、
+/// 保存後に検証規則が変わった場合等に備えてここでも `parse_scheduler_base` で
+/// 防御的に再検証する。
 pub(crate) async fn start_impl(
 	app: AppHandle,
 	jobs: State<'_, IgJobsState>,
@@ -227,7 +236,6 @@ pub(crate) async fn start_impl(
 	input_path: String,
 	caption: String,
 	publish_at: i64,
-	scheduler_url: String,
 ) -> Result<(), String> {
 	// 1. 資格情報・URL の有無(同期チェック、R2 に一切触れない)。
 	let r2_credentials = r2_credentials::get_impl(&KeyringStore)?
@@ -235,9 +243,13 @@ pub(crate) async fn start_impl(
 	let scheduler_token = KeyringStore
 		.get(SERVICE, KEY_SCHEDULER_API_TOKEN)?
 		.ok_or_else(|| "scheduler の API トークンが未設定です。".to_string())?;
-	if scheduler_url.trim().is_empty() {
-		return Err("scheduler の URL が未設定です。".to_string());
-	}
+	let scheduler_url = KeyringStore
+		.get(SERVICE, KEY_SCHEDULER_URL)?
+		.ok_or_else(|| {
+			"scheduler の URL が未設定です。設定画面から入力してください。".to_string()
+		})?;
+	scheduler_client::parse_scheduler_base(&scheduler_url)
+		.map_err(|err| format!("保存済みの scheduler URL が不正です: {err}"))?;
 
 	// 2. バリデーション(ファイルサイズ・尺・キャプション長)。probe は libav の同期 API
 	//    のため spawn_blocking で実行する(`commands::probe::probe` と同じ方針)。
