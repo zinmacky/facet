@@ -1,6 +1,22 @@
-import { describe, expect, it } from "vitest";
-import { mockDialogOpen, mockDocumentDir } from "../test/tauri-mock";
-import { pickExportDirectory, sanitizeFileName } from "./tauri";
+import type { EditSpec } from "@facet/core";
+import { describe, expect, it, vi } from "vitest";
+import {
+	mockDialogOpen,
+	mockDocumentDir,
+	mockEventListenerCount,
+	mockListen,
+} from "../test/tauri-mock";
+import {
+	pickExportDirectory,
+	sanitizeFileName,
+	startPreview,
+	startReframe,
+} from "./tauri";
+
+const SPEC: EditSpec = {
+	source: { width: 1920, height: 1080 },
+	preset: { name: "free", width: 1080, height: 1920, fit: "crop" },
+};
 
 describe("sanitizeFileName", () => {
 	it("Windows で無効な文字を _ に置換する", () => {
@@ -97,5 +113,55 @@ describe("pickExportDirectory", () => {
 		const result = await pickExportDirectory();
 
 		expect(result).toBeNull();
+	});
+});
+
+describe("listen() の部分失敗時のクリーンアップ", () => {
+	// `startReframe`/`startPreview` はいずれも progress/done/error の3つを
+	// `listen()` で並行購読してから invoke する。3つのうち1つでも reject したら、
+	// 既に登録済み(resolve 済み)の listener の unlisten を必ず呼ぶこと
+	// (呼ばないと Tauri 側に購読が残ったままリークする)を検証する。
+
+	it("startReframe: done の listen() が reject したら、先に成功した progress/error の unlisten を呼ぶ", async () => {
+		const progressUnlisten = vi.fn();
+		const errorUnlisten = vi.fn();
+		mockListen
+			.mockImplementationOnce(async () => progressUnlisten) // reframe://progress/*
+			.mockImplementationOnce(async () => {
+				throw new Error("listen 失敗(done)");
+			}) // reframe://done/*
+			.mockImplementationOnce(async () => errorUnlisten); // reframe://error/*
+
+		await expect(
+			startReframe("in.mp4", "out.mp4", SPEC, {}),
+		).rejects.toThrow("listen 失敗(done)");
+
+		expect(progressUnlisten).toHaveBeenCalledTimes(1);
+		expect(errorUnlisten).toHaveBeenCalledTimes(1);
+	});
+
+	it("startPreview: progress の listen() が reject したら、先に成功した done/error の unlisten を呼ぶ", async () => {
+		const doneUnlisten = vi.fn();
+		const errorUnlisten = vi.fn();
+		mockListen
+			.mockImplementationOnce(async () => {
+				throw new Error("listen 失敗(progress)");
+			}) // preview://progress/*
+			.mockImplementationOnce(async () => doneUnlisten) // preview://done/*
+			.mockImplementationOnce(async () => errorUnlisten); // preview://error/*
+
+		await expect(startPreview("in.mp4", SPEC, {})).rejects.toThrow(
+			"listen 失敗(progress)",
+		);
+
+		expect(doneUnlisten).toHaveBeenCalledTimes(1);
+		expect(errorUnlisten).toHaveBeenCalledTimes(1);
+	});
+
+	it("startReframe: すべての listen() が成功すれば正常に JobHandle を返す(回帰確認)", async () => {
+		await expect(
+			startReframe("in.mp4", "out.mp4", SPEC, {}),
+		).resolves.toMatchObject({ jobId: expect.any(String) });
+		expect(mockEventListenerCount("reframe://progress/job-1")).toBe(1);
 	});
 });
