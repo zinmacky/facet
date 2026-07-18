@@ -8,17 +8,29 @@ import { fileURLToPath } from "node:url";
 export type Edition = "public" | "private";
 
 /**
- * vite の `mode` からエディションを解決する。既定は "private"
- * (`--mode public` を明示したときのみ "public")。
+ * vite の `mode` からエディションを解決する。既定は "public"
+ * (`--mode private` を明示したときのみ "private")。
  *
- * - `tauri dev`(mode="development", 素の `pnpm dev`)→ private(現行の全機能)
+ * GHSA-7jjf-233f-jmg8: 無指定の素の `vite build`(mode="production")が
+ * 特権的な private を生成する footgun だったため、既定を安全側(public)に
+ * 倒した(breaking change)。private が必要な呼び出し元は必ず `--mode private`
+ * を明示する(build:mac-private / build:win-private は
+ * scripts/build-private.mjs 経由でこれと cargo `--features publish` を
+ * ペアで発行する、Issue #96)。
+ *
+ * - `tauri dev`(素の `pnpm dev`。beforeDevCommand が明示的に
+ *   `vite --mode private` を発行)→ private(現行の全機能)
  * - `vite --mode public`(dev:public / build:win-release / build:mac-local)→ public
- * - `vite build --mode private`(build:mac-private)→ private
+ * - `vite build --mode private`(build:mac-private / build:win-private)→ private
+ * - 無指定の素の `vite build`(mode="production")→ public(既定)
  * - vitest(mode="test")→ private(vitest.config.ts は edition を固定値で渡すため
  *   このモード解決自体は経由しない)
+ * - dev:mock(mode="mock")→ vite.config.ts 側で明示的に private 相当を維持する
+ *   (ローカル専用のスクリーンショット用起動で配布物には混入しないため。
+ *   このモード解決自体は経由しない、§vite.config.ts の isMock 分岐)
  */
 export function resolveEdition(mode: string): Edition {
-	return mode === "public" ? "public" : "private";
+	return mode === "private" ? "private" : "public";
 }
 
 /**

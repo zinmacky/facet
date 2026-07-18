@@ -94,12 +94,29 @@ jobs:
       - name: Build workspace dependencies (@facet/contract, @facet/core)
         run: pnpm --filter "@facet/desktop^..." build
 
-      # --- 7. エディション分離ゲート(tauri build より前。fail で全停止) ---
+      # --- 7. エディション分離ゲート: マーカー実在の事前検査(tauri build より前) ---
+      # GHSA-39fc-vq56-xx99: 下(手順8)のビルド後 grep が使うマーカー文字列は
+      # リファクタで改名されると黙って空振り(常に「一致無し」= 合格)する。
+      # ビルドの前にマーカーがソース側に実在することを検査し、改名時はここで
+      # fail させて更新を強制する(ci.yml の同名ステップと同じ趣旨)。
+      - name: Verify upload-feature markers still exist in source
+        run: |
+          $ErrorActionPreference = "Stop"
+          $markers = "一括投稿", "APIトークン", "クライアントID", "YouTube の認可が無効"
+          $srcFiles = Get-ChildItem -Path "apps/desktop/src" -Recurse -File
+          foreach ($marker in $markers) {
+            if (-not ($srcFiles | Select-String -Pattern $marker -SimpleMatch -Quiet)) {
+              Write-Error "マーカー文字列「$marker」が apps/desktop/src に見つかりません(リネームされた場合は本ワークフローと ci.yml の検査対象も更新してください)"
+              exit 1
+            }
+          }
+
+      # --- 8. エディション分離ゲート(tauri build より前。fail で全停止) ---
       # public(配布版)フロントビルドに投稿系コードが含まれないことを検査する
       # (edition-split, docs/desktop-migration-plan.md §6.6)。win-release は
       # tauri.conf.json の既定 beforeBuildCommand(`vite build --mode public`)を
       # そのまま使う(§tauri.conf.json)ため、ここで独立に同じ `--mode public` で
-      # ビルドした dist/ を検査すれば、直後の tauri-action(手順8)が生成する
+      # ビルドした dist/ を検査すれば、直後の tauri-action(手順9)が生成する
       # 実際のバンドルの中身と同一の内容を事前に確認できる。リフレーム画面
       # (features/upload/ReframeScreen.tsx)自体は両エディション共通で、投稿
       # (スケジュール・キャプション・IG/YT 連携)のみ private 専用ファイル群に分離
@@ -107,26 +124,44 @@ jobs:
       # 使われる UI 文字列「一括投稿」を使う(JS 識別子は minify で読み替えられるため使わない)。
       # 資格情報設定 UI(features/publish-settings/、§11-3)も同様に、
       # PublishSettingsSection.tsx でのみ使われる UI 文字列「APIトークン」を見る。
+      # YouTube 連携(§6.5)も同様に「クライアントID」「YouTube の認可が無効」を見る。
+      # GHSA-39fc-vq56-xx99: ci.yml と非対称(こちらは *.js のみ・2マーカー)だった
+      # ため、ci.yml と同じ4マーカー・assets ディレクトリ全体(*.js に限らない)の
+      # 検査に揃え、release は ci に needs しない(v* タグ push では ci が起動しない)
+      # 運用でも同等の強度を持たせる。JP UI 文字列マーカーは改名で素通りし得るため、
+      # 投稿系エンドポイント文字列(R2/Cloudflare, IG Graph API, YouTube Data API)の
+      # 負ガードでも補強する。
       - name: Verify public frontend excludes upload-feature markers
         run: |
           $ErrorActionPreference = "Stop"
           pnpm --filter @facet/desktop exec vite build --mode public --outDir dist-edition-check
           $assetsDir = "apps/desktop/dist-edition-check/assets"
-          $jsFiles = Get-ChildItem -Path $assetsDir -Filter "*.js" -File -ErrorAction SilentlyContinue
-          # assets/*.js が1つも無い(ビルド構成が変わり生成先がずれた等)場合、直後の
-          # Select-String が単に「一致無し」と区別できず誤って合格扱いになるのを防ぐ。
-          if (-not $jsFiles) {
-            Write-Error "$assetsDir に *.js が見つかりません(vite build の出力構成を確認してください)"
+          if (-not (Test-Path $assetsDir)) {
+            Write-Error "$assetsDir が生成されていません(vite build の出力構成を確認してください)"
             exit 1
           }
-          if (Select-String -Path "$assetsDir/*.js" -Pattern "一括投稿", "APIトークン" -SimpleMatch -Quiet) {
-            Write-Error "public ビルドの成果物に投稿系マーカー(「一括投稿」/「APIトークン」)が含まれています"
+          $assetFiles = Get-ChildItem -Path $assetsDir -Recurse -File
+          # assets/ 配下にファイルが1つも無い(ビルド構成が変わり生成先がずれた等)
+          # 場合、直後の Select-String が単に「一致無し」と区別できず誤って合格
+          # 扱いになるのを防ぐ。
+          if (-not $assetFiles) {
+            Write-Error "$assetsDir にファイルが見つかりません(vite build の出力構成を確認してください)"
             exit 1
           }
-          Write-Host "OK: public フロントビルドに投稿系マーカーは含まれていない"
+          $uploadMarkers = "一括投稿", "APIトークン", "クライアントID", "YouTube の認可が無効"
+          if ($assetFiles | Select-String -Pattern $uploadMarkers -SimpleMatch -Quiet) {
+            Write-Error "public ビルドの成果物に投稿系マーカー(「一括投稿」/「APIトークン」/「クライアントID」/「YouTube の認可が無効」)が含まれています"
+            exit 1
+          }
+          $endpointMarkers = "googleapis", "cloudflarestorage", "graph.facebook"
+          if ($assetFiles | Select-String -Pattern $endpointMarkers -SimpleMatch -Quiet) {
+            Write-Error "public ビルドの成果物に投稿系エンドポイント文字列(googleapis/cloudflarestorage/graph.facebook)が含まれています"
+            exit 1
+          }
+          Write-Host "OK: public フロントビルドに投稿系マーカー/エンドポイント文字列は含まれていない"
           Remove-Item -Recurse -Force "apps/desktop/dist-edition-check"
 
-      # --- 8. tauri-action(署名付きビルド + GitHub Release draft 作成) ---
+      # --- 9. tauri-action(署名付きビルド + GitHub Release draft 作成) ---
       # tauri.win-release.conf.json をオーバーレイし、LGPL FFmpeg の DLL と
       # LICENSES/COPYING.LGPLv3 を exe 隣接にバンドルする(Wave A/B)。
       # TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) が未設定だとこのステップで失敗する
@@ -156,7 +191,7 @@ jobs:
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
 
-      # --- 9. 成果物検査: NSIS インストーラ(setup.exe)を 7z で展開し、LGPL DLL のみが
+      # --- 10. 成果物検査: NSIS インストーラ(setup.exe)を 7z で展開し、LGPL DLL のみが
       #     同梱されていること(GPL 実行ファイルの混入がないこと)を機械検証する。
       #     これは「配布物そのもの」に対する検査であり、5 のビルド前ゲートとは
       #     独立した二重防御。
