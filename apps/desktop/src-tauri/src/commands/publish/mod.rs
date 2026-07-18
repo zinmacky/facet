@@ -51,7 +51,7 @@ mod youtube_oauth;
 use credential_store::{CredentialStore, KeyringStore};
 use scheduler_check::perform_check;
 
-pub use ig::IgJobsState;
+pub use ig::{IgJobStatusOutcome, IgJobsState};
 pub use scheduler_check::ConnectionCheckResult;
 pub use youtube::YoutubeJobsState;
 pub use youtube_oauth::YoutubeOauthStatus;
@@ -232,6 +232,16 @@ pub fn ig_publish_cancel(
 	jobs: tauri::State<'_, IgJobsState>,
 ) -> Result<(), String> {
 	ig::cancel_impl(job_id, jobs)
+}
+
+/// `scheduler_job_id` の現在のジョブ状態(scheduler の `GET /jobs/:id` 応答を分類した
+/// [`IgJobStatusOutcome`])を返す(ロジック本体は `ig::job_status_impl`。desktop が
+/// IG 予約投稿の最終成否を追跡しない問題への対応、§ig.rs `job_status_impl`/
+/// `IgJobStatusOutcome` 冒頭コメント)。`ig_publish_start` と同様 `scheduler_url`/
+/// トークンはキーチェーンの保存値からのみ導出し、renderer からは受け取らない。
+#[tauri::command]
+pub async fn ig_job_status(scheduler_job_id: String) -> Result<IgJobStatusOutcome, String> {
+	ig::job_status_impl(scheduler_job_id).await
 }
 
 /// YouTube の OAuth クライアント(ユーザー自身の Google Cloud アプリの

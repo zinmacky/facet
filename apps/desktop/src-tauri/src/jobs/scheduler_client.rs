@@ -14,7 +14,7 @@ use reqwest::{Client, StatusCode, Url};
 use thiserror::Error;
 use url::Host;
 
-use super::manifest::{JobCreateResponse, JobManifest};
+use super::manifest::{JobCreateResponse, JobManifest, JobRecord};
 use super::r2_upload::wait_for_cancel;
 
 /// `enqueue_job` の 1 リクエストあたりの上限時間。scheduler が無応答でも
@@ -26,6 +26,13 @@ use super::r2_upload::wait_for_cancel;
 /// 緩め: enqueue は R2 アップロード後の一発 POST で Workers のコールドスタートを
 /// 含みうる。
 pub const ENQUEUE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `fetch_job`(`GET /jobs/:id`)の1リクエストあたりの上限時間。desktop が IG 予約投稿の
+/// 最終成否を追跡しない問題(アーキテクチャレビュー指摘)への対応で追加した。
+/// `commands::publish::scheduler_check::REQUEST_TIMEOUT`(疎通チェック、10秒)と同じ値に
+/// 揃える — こちらも `enqueue_job` のような長時間処理(R2 アップロード後の一発 POST)では
+/// なく、単発の軽い GET のため。
+pub const FETCH_JOB_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum EnqueueError {
@@ -47,6 +54,25 @@ pub enum EnqueueError {
 	/// `tokio::select!` でのレース、GHSA-q37v-7xpp-x229 残作業対応)。
 	#[error("キャンセルされました")]
 	Cancelled,
+}
+
+/// [`fetch_job`] のエラー分類。[`EnqueueError`] と同じ考え方(401/503/network)に
+/// 加え、`GET /jobs/:id` 固有の 404(ジョブ未存在)を持つ。`enqueue_job` と異なり
+/// キャンセル対象になる長時間処理ではないため `Cancelled` は無い。
+#[derive(Debug, Error)]
+pub enum FetchJobError {
+	/// Bearer トークンが scheduler 側と一致しない(401)。
+	#[error("scheduler の API トークンが無効です。")]
+	Unauthorized,
+	/// scheduler 側で `SCHEDULER_API_TOKEN` が未設定(503, fail-closed)。
+	#[error("scheduler が未設定です(503)。")]
+	ServiceUnavailable,
+	/// 指定した job_id のジョブが scheduler 側に存在しない(404)。
+	#[error("指定されたジョブが見つかりません。")]
+	NotFound,
+	/// 接続不可・タイムアウト・応答の解析失敗・想定外のステータスコード等。
+	#[error("scheduler への通信に失敗しました: {0}")]
+	Network(String),
 }
 
 /// `base`(scheduler のベース URL)を http/https の絶対 URL として検証する。
@@ -153,6 +179,79 @@ pub async fn enqueue_job(
 			let detail = response.text().await.unwrap_or_default();
 			Err(EnqueueError::Rejected(format!("{other}: {detail}")))
 		}
+	}
+}
+
+/// `base`(scheduler のベース URL)+ `/jobs/<job_id>` の URL を組み立てる。
+/// `join_jobs_url` と同じ考え方の純関数だが、`job_id` は renderer から invoke 引数
+/// として渡ってくる値(`commands::publish::ig::job_status_impl` 参照)のため、パス
+/// セグメントを混入させて意図しないパスへ誘導できないよう検証する(scheduler_url
+/// 自体は既にキーチェーンの保存値のみを使う設計 — GHSA-j74q-9v5x-87w3 対応 —
+/// のため、ここでの懸念は送信先ホストではなくパスのみ)。
+///
+/// 許可文字の allowlist(英数字・`-`・`_`)で検証する — scheduler が発行する job_id は
+/// 実際には UUID 形式のみのため許容範囲を絞れる。`/` のみを拒否する denylist だと、
+/// `.`/`..` のような dot セグメントが `Url::set_path` の正規化で意図しないパスへ
+/// 畳まれる余地が残る(code review 指摘)ため、より狭い allowlist にした。
+fn join_job_url(base: &str, job_id: &str) -> Result<Url, String> {
+	let is_valid_job_id = !job_id.is_empty()
+		&& job_id
+			.chars()
+			.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+	if !is_valid_job_id {
+		return Err("job_id が不正です。".to_string());
+	}
+	let mut url = parse_scheduler_base(base)?;
+	let base_path = url.path().trim_end_matches('/');
+	url.set_path(&format!("{base_path}/jobs/{job_id}"));
+	Ok(url)
+}
+
+/// `job_id`(scheduler が発行したジョブ ID。`JobCreateResponse.id`/`IgPublishDone.scheduler_job_id`)
+/// の現在の状態を scheduler から取得する(`GET /jobs/:id`)。desktop が IG 予約投稿の
+/// 最終成否を追跡しない問題(アーキテクチャレビュー指摘)への対応で追加した。
+///
+/// `enqueue_job` と異なり `CancelToken` を取らない — 呼び出し元
+/// (`commands::publish::ig::job_status_impl`)は実行中ジョブの一部ではなく、
+/// ポーリング/手動更新のたびに単発で呼ばれる軽い GET のため、協調キャンセルの対象に
+/// なる長時間処理ではない。
+pub async fn fetch_job(
+	client: &Client,
+	scheduler_url: &str,
+	token: &str,
+	job_id: &str,
+	timeout: Duration,
+) -> Result<JobRecord, FetchJobError> {
+	let url = join_job_url(scheduler_url, job_id).map_err(FetchJobError::Network)?;
+
+	let response = client
+		.get(url)
+		.bearer_auth(token)
+		.timeout(timeout)
+		.send()
+		.await
+		.map_err(|err| {
+			if err.is_timeout() {
+				FetchJobError::Network(format!(
+					"scheduler が {} 秒以内に応答しませんでした。",
+					timeout.as_secs()
+				))
+			} else {
+				FetchJobError::Network(err.to_string())
+			}
+		})?;
+
+	match response.status() {
+		StatusCode::OK => response
+			.json::<JobRecord>()
+			.await
+			.map_err(|err| FetchJobError::Network(format!("応答の解析に失敗しました: {err}"))),
+		StatusCode::UNAUTHORIZED => Err(FetchJobError::Unauthorized),
+		StatusCode::SERVICE_UNAVAILABLE => Err(FetchJobError::ServiceUnavailable),
+		StatusCode::NOT_FOUND => Err(FetchJobError::NotFound),
+		other => Err(FetchJobError::Network(format!(
+			"想定外のステータスです: {other}"
+		))),
 	}
 }
 
@@ -429,6 +528,161 @@ mod tests {
 			elapsed < Duration::from_secs(2),
 			"cancel should short-circuit well before the 5s timeout, took {elapsed:?}"
 		);
+	}
+
+	// ---- fetch_job(loopback 上の最小 HTTP サーバでモック) --------------------------
+	// desktop が IG 予約投稿の最終成否を追跡しない問題(アーキテクチャレビュー指摘)への
+	// 対応で追加。`enqueue_job` のテストと同じ流儀(`spawn_mock_server`/`spawn_stalling_server`
+	// を再利用)。
+
+	/// `GET /jobs/:id` が返す `JobRecord` の JSON フィクスチャ(status: "published")。
+	/// `spawn_mock_server` が `body: &'static str` を要求するため、`format!` を使わず
+	/// リテラルとして持つ。
+	const SAMPLE_JOB_RECORD_PUBLISHED_JSON: &str = r#"{"id":"job-1","idempotencyKey":"11111111-2222-3333-4444-555555555555","platform":"instagram","r2Key":"posts/2026-07-10/uuid.mp4","mediaType":"REELS","caption":"caption","publishAt":1783686896000,"status":"published","igContainerId":null,"igMediaId":null,"attempts":0,"lastError":null,"createdAt":1783686896000,"updatedAt":1783686896000}"#;
+
+	#[tokio::test]
+	async fn fetch_job_returns_record_on_200() {
+		let base = spawn_mock_server("HTTP/1.1 200 OK", SAMPLE_JOB_RECORD_PUBLISHED_JSON);
+		let client = Client::new();
+		let record = fetch_job(&client, &base, "valid-token", "job-1", TEST_TIMEOUT)
+			.await
+			.unwrap();
+		assert_eq!(record.id, "job-1");
+		assert_eq!(record.status, "published");
+	}
+
+	#[tokio::test]
+	async fn fetch_job_unauthorized_on_401() {
+		let base = spawn_mock_server("HTTP/1.1 401 Unauthorized", "{}");
+		let client = Client::new();
+		let err = fetch_job(&client, &base, "wrong-token", "job-1", TEST_TIMEOUT)
+			.await
+			.unwrap_err();
+		assert!(matches!(err, FetchJobError::Unauthorized));
+	}
+
+	#[tokio::test]
+	async fn fetch_job_service_unavailable_on_503() {
+		let base = spawn_mock_server("HTTP/1.1 503 Service Unavailable", "{}");
+		let client = Client::new();
+		let err = fetch_job(&client, &base, "any-token", "job-1", TEST_TIMEOUT)
+			.await
+			.unwrap_err();
+		assert!(matches!(err, FetchJobError::ServiceUnavailable));
+	}
+
+	#[tokio::test]
+	async fn fetch_job_not_found_on_404() {
+		let base = spawn_mock_server("HTTP/1.1 404 Not Found", r#"{"error":"job not found"}"#);
+		let client = Client::new();
+		let err = fetch_job(&client, &base, "any-token", "job-1", TEST_TIMEOUT)
+			.await
+			.unwrap_err();
+		assert!(matches!(err, FetchJobError::NotFound));
+	}
+
+	#[tokio::test]
+	async fn fetch_job_network_error_on_connection_refused() {
+		let client = Client::new();
+		let err = fetch_job(
+			&client,
+			"http://127.0.0.1:1",
+			"any-token",
+			"job-1",
+			TEST_TIMEOUT,
+		)
+		.await
+		.unwrap_err();
+		assert!(matches!(err, FetchJobError::Network(_)));
+	}
+
+	#[tokio::test]
+	async fn fetch_job_times_out_when_server_never_responds() {
+		let base = spawn_stalling_server();
+		let client = Client::new();
+		let err = fetch_job(
+			&client,
+			&base,
+			"any-token",
+			"job-1",
+			Duration::from_millis(300),
+		)
+		.await
+		.unwrap_err();
+		match err {
+			FetchJobError::Network(msg) => assert!(msg.contains("応答しませんでした")),
+			other => panic!("expected Network timeout error, got {other:?}"),
+		}
+	}
+
+	#[tokio::test]
+	async fn fetch_job_rejects_job_id_with_path_separator() {
+		// job_id は invoke 引数として renderer から渡ってくる値のため、パス区切りの
+		// 混入で意図しないパスへ誘導できないことを固定する(join_job_url 冒頭コメント参照)。
+		// サーバを起動しないため、接続自体が発生していないことも併せて確認する
+		// (実在しないアドレスでも到達前にエラーになる)。
+		let client = Client::new();
+		let err = fetch_job(
+			&client,
+			"http://127.0.0.1:1",
+			"any-token",
+			"../health",
+			TEST_TIMEOUT,
+		)
+		.await
+		.unwrap_err();
+		match err {
+			FetchJobError::Network(msg) => assert!(msg.contains("job_id が不正です")),
+			other => panic!("expected Network(job_id validation) error, got {other:?}"),
+		}
+	}
+
+	#[tokio::test]
+	async fn fetch_job_rejects_job_id_with_bare_dot_segments() {
+		// allowlist(英数字・-・_)により、`/` を含まない `.`/`..` も拒否されることを
+		// 固定する(denylist だと `Url::set_path` の正規化で意図しないパスへ畳まれる
+		// 余地が残る、という code review 指摘への対応)。
+		let client = Client::new();
+		for job_id in ["..", "."] {
+			let err = fetch_job(
+				&client,
+				"http://127.0.0.1:1",
+				"any-token",
+				job_id,
+				TEST_TIMEOUT,
+			)
+			.await
+			.unwrap_err();
+			match err {
+				FetchJobError::Network(msg) => assert!(msg.contains("job_id が不正です")),
+				other => panic!(
+					"expected Network(job_id validation) error for {job_id:?}, got {other:?}"
+				),
+			}
+		}
+	}
+
+	#[tokio::test]
+	async fn fetch_job_network_error_on_unexpected_status() {
+		let base = spawn_mock_server("HTTP/1.1 500 Internal Server Error", "{}");
+		let client = Client::new();
+		let err = fetch_job(&client, &base, "any-token", "job-1", TEST_TIMEOUT)
+			.await
+			.unwrap_err();
+		assert!(matches!(err, FetchJobError::Network(_)));
+	}
+
+	#[tokio::test]
+	async fn fetch_job_network_error_on_malformed_json_body() {
+		let base = spawn_mock_server("HTTP/1.1 200 OK", "not json");
+		let client = Client::new();
+		let err = fetch_job(&client, &base, "any-token", "job-1", TEST_TIMEOUT)
+			.await
+			.unwrap_err();
+		match err {
+			FetchJobError::Network(msg) => assert!(msg.contains("応答の解析に失敗しました")),
+			other => panic!("expected Network(parse failure) error, got {other:?}"),
+		}
 	}
 
 	/// 実 scheduler(Cloudflare Workers)へ実際にジョブ登録する実機テスト

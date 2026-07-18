@@ -4,6 +4,7 @@ import type {
 	IgPublishDone as ContractIgPublishDone,
 	IgPublishProgress as ContractIgPublishProgress,
 	IgPublishRuntimeError as ContractIgPublishRuntimeError,
+	JobRecord,
 } from "@facet/contract";
 import { newJobId } from "../../lib/jobId";
 
@@ -71,6 +72,75 @@ export interface IgPublishHandle {
 /** `ig_publish_cancel` を呼ぶ。 */
 export function cancelIgPublishJob(jobId: string): Promise<void> {
 	return invoke<void>("ig_publish_cancel", { jobId });
+}
+
+/**
+ * Rust 側 `IgJobStatusOutcome`(`outcome` タグの internally-tagged enum)と同形。
+ * `found` の場合のみ `JobRecord`(`@facet/contract` の `jobRecord` から `z.infer`)の
+ * フィールドがタグと並んでフラットに乗る(Rust 側の newtype variant の serde 表現)。
+ *
+ * `not_found`(404)と `unauthorized`/`service_unavailable`/`network`(一過性)を型上も
+ * 区別する — レビュー指摘対応: 当初は成功時の `JobRecord` のみを返し、失敗は
+ * すべて `invoke()` の reject に一律まとめていたが、それだと 404(scheduler 側で
+ * ジョブが見つからない、恒久的に回復しない事象)と一過性エラー(ネットワーク瞬断・
+ * 401・503、再試行で回復しうる)を呼び出し側が区別できず、404 でもポーリングを
+ * 永久に続けてしまっていた(`usePublishExtras.tsx` の `pollIgJobStatus` 参照)。
+ */
+export type IgJobStatusOutcome =
+	| ({ outcome: "found" } & JobRecord)
+	| { outcome: "not_found" }
+	| { outcome: "unauthorized" }
+	| { outcome: "service_unavailable" }
+	| { outcome: "network"; detail: string };
+
+/**
+ * `ig_job_status` を呼び、scheduler 側の現在のジョブ状態を取得する。
+ *
+ * アーキテクチャレビュー指摘対応: `startIgPublish` の `onDone` は「scheduler がジョブ
+ * 登録を受理した」ことしか意味せず、実際の IG 側公開成否(`published`/`failed`)は
+ * 別途この関数で確認する必要がある(`usePublishExtras.tsx` がポーリング/手動更新の
+ * 両方からこれを呼ぶ)。
+ *
+ * scheduler URL/トークン未設定等の想定外ケースのみ `invoke()` の reject(Error)として
+ * 返る(`commands/publish/ig.rs` の `IgJobStatusOutcome`/`job_status_impl` 冒頭コメント
+ * 参照)。401/503/404/ネットワークエラーは reject ではなく `IgJobStatusOutcome` の
+ * タグ付き variant として解決する。
+ */
+export function fetchIgJobStatus(
+	schedulerJobId: string,
+): Promise<IgJobStatusOutcome> {
+	return invoke<IgJobStatusOutcome>("ig_job_status", { schedulerJobId });
+}
+
+/**
+ * `JobRecord.status`(終端に達していない途中経過)を日本語の短い説明へ変換する。
+ * `published`/`failed`(終端)は呼び出し側(`usePublishExtras.tsx`)が
+ * success/error として個別に扱うため、ここでは非終端の値のみを主に想定するが、
+ * 呼び出し側の分岐漏れに備えて全 variant を網羅する。
+ *
+ * scheduler(`packages/contract` の `jobStatus`)が将来値を追加した場合に備え、
+ * 網羅性チェック(`never` アサーション)はせず `default` でそのまま返す
+ * (`describeIgPublishError` と異なり、`JobRecord.status` は Rust 側で意図的に
+ * `String` として扱う値 — `crates/contract-rs/build.rs` 冒頭コメント参照 — のため、
+ * 型上の網羅集合と実際に届きうる値の集合が一致する保証がない)。
+ */
+export function describeIgJobStatus(status: JobRecord["status"]): string {
+	switch (status) {
+		case "pending":
+			return "公開時刻を待機中…";
+		case "creating":
+			return "投稿コンテナを生成中…";
+		case "processing":
+			return "処理完了を確認中…";
+		case "publishing":
+			return "公開処理を実行中…";
+		case "published":
+			return "公開完了";
+		case "failed":
+			return "公開に失敗しました";
+		default:
+			return status;
+	}
 }
 
 /**

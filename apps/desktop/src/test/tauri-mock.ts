@@ -1,5 +1,7 @@
 import { vi } from "vitest";
+import type { JobRecord } from "@facet/contract";
 import type {
+	IgJobStatusOutcome,
 	IgPublishDone,
 	IgPublishProgress,
 	IgPublishRuntimeError,
@@ -59,6 +61,34 @@ export const MOCK_IG_PUBLISH_PROGRESS: IgPublishProgress = {
  */
 export const MOCK_IG_PUBLISH_ERROR: IgPublishRuntimeError = {
 	kind: "enqueue_unauthorized",
+};
+
+/**
+ * `mockInvoke("ig_job_status", …)` の既定応答(`IgJobStatusOutcome` の `found` variant)が
+ * 包む `JobRecord` 本体(アーキテクチャレビュー指摘対応: desktop が IG 予約投稿の
+ * 最終成否を追跡しない問題)。`id` は呼び出し側が渡した `schedulerJobId`
+ * (通常 `MOCK_IG_PUBLISH_DONE.schedulerJobId`)を引き継ぐ(`defaultInvokeImpl` の
+ * `ig_job_status` ケース参照)。既定の `status` は "published"(終端・無害)—
+ * ポーリング/手動更新を検証しないテストで余計な副作用が出ないようにするため。
+ * `failed`/中間状態/`not_found` 等を検証するテストは `mockInvoke.mockImplementation` で
+ * `{ outcome: "found", ...MOCK_IG_JOB_RECORD, status: "failed", … }` のように個別に
+ * 差し替える(`outcome` タグを含めるのを忘れないこと)。
+ */
+export const MOCK_IG_JOB_RECORD: JobRecord = {
+	id: "scheduler-job-1",
+	idempotencyKey: "11111111-2222-3333-4444-555555555555",
+	platform: "instagram",
+	r2Key: "posts/2026-07-10/uuid.mp4",
+	mediaType: "REELS",
+	caption: "",
+	publishAt: 1_783_686_896_000,
+	status: "published",
+	igContainerId: "container-1",
+	igMediaId: "media-1",
+	attempts: 1,
+	lastError: null,
+	createdAt: 1_783_686_896_000,
+	updatedAt: 1_783_686_896_000,
 };
 
 /**
@@ -196,6 +226,14 @@ async function defaultInvokeImpl(cmd: string, args?: unknown): Promise<unknown> 
 			return undefined;
 		case "ig_publish_cancel":
 			return undefined;
+		case "ig_job_status": {
+			const { schedulerJobId } = (args ?? {}) as { schedulerJobId?: string };
+			return {
+				outcome: "found",
+				...MOCK_IG_JOB_RECORD,
+				id: schedulerJobId ?? MOCK_IG_JOB_RECORD.id,
+			} satisfies IgJobStatusOutcome;
+		}
 		case "set_youtube_oauth_client": {
 			const { clientId, clientSecret } = (args ?? {}) as {
 				clientId?: string;

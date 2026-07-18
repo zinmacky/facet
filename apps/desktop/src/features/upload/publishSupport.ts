@@ -6,11 +6,22 @@ import type { OutputTarget } from "../../types";
  * public ビルドの import グラフには一切含まれない(§features/upload/entry.public.ts)。
  */
 
-/** 投稿処理の進行状態。 */
+/**
+ * 投稿処理の進行状態。
+ *
+ * - `scheduled`: Instagram 専用。scheduler がジョブ登録を受理した(`ig_publish_start`
+ *   の done イベント)後、公開時刻到来〜IG 側公開処理の完了までの間の状態。
+ *   アーキテクチャレビュー指摘(desktop が IG 予約投稿の最終成否を追跡しない)への
+ *   対応で追加した — 従来はこの時点で即座に `success` としていたが、scheduler が
+ *   受理しただけで実際の IG 公開が成功したとは限らない(`usePublishExtras.tsx` の
+ *   ポーリング/手動更新導線を参照)。YouTube は `ig_publish_start` を経由しないため
+ *   この状態を通らず、直接 `success` になる(既存挙動を維持)。
+ */
 export type PubStatusKind =
 	| "idle"
 	| "rendering"
 	| "publishing"
+	| "scheduled"
 	| "success"
 	| "error";
 

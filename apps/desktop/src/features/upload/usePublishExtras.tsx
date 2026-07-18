@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import type { Source } from "../../App";
 import type { Clip, OutputTarget } from "../../types";
@@ -15,7 +15,12 @@ import {
 } from "../../lib/tauriJobLifecycle";
 import { Button } from "../../components/ui/Button";
 import { usePublishGateContext } from "../publish-settings/PublishGateContext";
-import { describeIgPublishError, startIgPublish } from "./igPublish";
+import {
+	describeIgJobStatus,
+	describeIgPublishError,
+	fetchIgJobStatus,
+	startIgPublish,
+} from "./igPublish";
 import {
 	describeYoutubePublishError,
 	startYoutubePublish,
@@ -38,6 +43,14 @@ interface UsePublishExtrasArgs {
 	posts: UploadPost[];
 	resetToken: number;
 }
+
+/**
+ * IG ジョブ状態ポーリングの間隔(アーキテクチャレビュー指摘対応)。
+ * 単一の `setInterval` を毎 tick ごとに全 output を走査する設計(下記 effect 参照)
+ * のため、この値は「1 output あたりの再確認間隔」であり、ハンドル数はジョブ数に
+ * 比例しない(far-future の予約でも待機コストは1本のタイマーのみ)。
+ */
+const IG_JOB_STATUS_POLL_INTERVAL_MS = 60_000;
 
 /**
  * リフレーム画面の private 専用部分(投稿: スケジュール・キャプション・IG/YT 連携)を
@@ -105,6 +118,17 @@ export function usePublishExtras({
 		return id;
 	};
 
+	// output.id → scheduler が受理した IG ジョブ(schedulerJobId + publishAt)。
+	// アーキテクチャレビュー指摘(desktop が IG 予約投稿の最終成否を追跡しない)への対応。
+	// `igJobIdsRef`(renderer 採番の jobId、idempotency_key 導出用)とは別の ID 空間
+	// (schedulerJobId は scheduler が発番する `JobRecord.id`)。エントリは
+	// `publishTo` の IG onDone で追加し、ポーリング/手動更新が終端状態
+	// (published/failed)を検出した時点、または output 自体が消えた時点で削除する
+	// (下記 `pollIgJobStatus`・posts 変化 effect 参照)。
+	const igSchedulerJobsRef = useRef<
+		Map<string, { schedulerJobId: string; publishAt: number }>
+	>(new Map());
+
 	// アンマウント時に in-flight の投稿ジョブ購読を解除し、Rust 側ジョブもキャンセルする
 	// (GHSA-rrgf-h689-w639 対応)。cancel() の reject は握りつぶす(アンマウント後は
 	// 結果を誰も見ないため)。mount 時に true へ戻すのを忘れると、React StrictMode の
@@ -134,6 +158,7 @@ export function usePublishExtras({
 		setPubStatuses(new Map());
 		publishRender.reset();
 		igJobIdsRef.current.clear();
+		igSchedulerJobsRef.current.clear();
 		setStartDate("");
 		setEndDate("");
 		setWeekdayTimes({});
@@ -164,6 +189,7 @@ export function usePublishExtras({
 			// (GHSA-rrgf-h689-w639 対応。output 自体が消えたので誰も結果を見ない)。
 			detachJobHandle(inFlightRef.current, id);
 			igJobIdsRef.current.delete(id);
+			igSchedulerJobsRef.current.delete(id);
 		}
 	}, [posts, publishRender.remove]);
 
@@ -176,7 +202,12 @@ export function usePublishExtras({
 		return false;
 	};
 
-	const setPubStatus = (outputId: string, status: PubStatus) => {
+	// useCallback で安定させる(`[]` — 参照するのは stable な ref/setState のみ)。
+	// `pollIgJobStatus` がこれを exhaustive-deps 経由で依存配列に含める必要があるため
+	// (毎レンダー再生成される素の関数のままだと、後述のポーリング用 `useEffect` が
+	// 依存配列に `pollIgJobStatus` を含めた際に 60 秒ごとの `setInterval` を毎レンダー
+	// 再構築してしまう)。
+	const setPubStatus = useCallback((outputId: string, status: PubStatus) => {
 		// アンマウント後に非同期コールバック(onProgress/onDone/onError)が届いても
 		// setState しない(GHSA-rrgf-h689-w639 対応)。
 		if (!mountedRef.current) return;
@@ -185,7 +216,103 @@ export function usePublishExtras({
 			next.set(outputId, status);
 			return next;
 		});
-	};
+	}, []);
+
+	/**
+	 * `outputId` に紐づく IG ジョブの現在状態を scheduler から取得し、pubStatuses へ
+	 * 反映する(アーキテクチャレビュー指摘対応)。60秒間隔の自動ポーリング
+	 * (下記 effect)・OutputPublishSection の「状態更新」ボタンの両方から呼ぶ共通ロジック。
+	 *
+	 * `fetchIgJobStatus` の戻り値(`IgJobStatusOutcome`)で分岐する:
+	 * - `found` + `status: "published"`(終端): success に確定し、以後の追跡対象から外す。
+	 * - `found` + `status: "failed"`(終端): error に確定し(`lastError` をメッセージに
+	 *   反映)、以後の追跡対象から外す。
+	 * - `found` + それ以外(pending/creating/processing/publishing): `scheduled` の
+	 *   まま、メッセージのみ現在の細かい段階に更新する。
+	 * - `not_found`(404、終端): scheduler 側でジョブが見つからない = 恒久的に回復
+	 *   しない事象として error に確定し、以後の追跡対象から外す(code review 指摘:
+	 *   これを他の一過性エラーと同列に扱うと、404 のまま「予約済み」表示で永久に
+	 *   ポーリングし続けてしまう)。
+	 * - `unauthorized`/`service_unavailable`/`network`(一過性): pubStatuses は変更せず
+	 *   console.warn に留める(次回のポーリング/手動更新で回復しうるため、
+	 *   「予約済み」表示を勝手に消さない)。
+	 * - `invoke()` 自体の reject(scheduler URL/トークン未設定等の想定外ケース)も同様に
+	 *   一過性扱いで console.warn に留める。
+	 */
+	const pollIgJobStatus = useCallback(
+		async (outputId: string): Promise<void> => {
+			const entry = igSchedulerJobsRef.current.get(outputId);
+			if (!entry) return;
+			try {
+				const outcome = await fetchIgJobStatus(entry.schedulerJobId);
+				switch (outcome.outcome) {
+					case "found":
+						if (outcome.status === "published") {
+							igSchedulerJobsRef.current.delete(outputId);
+							setPubStatus(outputId, { kind: "success" });
+						} else if (outcome.status === "failed") {
+							igSchedulerJobsRef.current.delete(outputId);
+							setPubStatus(outputId, {
+								kind: "error",
+								message:
+									outcome.lastError ?? "Instagram への公開に失敗しました。",
+							});
+						} else {
+							setPubStatus(outputId, {
+								kind: "scheduled",
+								message: describeIgJobStatus(outcome.status),
+							});
+						}
+						return;
+					case "not_found":
+						igSchedulerJobsRef.current.delete(outputId);
+						setPubStatus(outputId, {
+							kind: "error",
+							message: "scheduler 側でジョブが見つかりませんでした。",
+						});
+						return;
+					case "unauthorized":
+					case "service_unavailable":
+					case "network":
+						console.warn(
+							`IG ジョブ状態の取得に失敗しました(outputId=${outputId}, outcome=${outcome.outcome})`,
+						);
+						return;
+					default: {
+						// 型の網羅性チェック(将来 Rust 側に variant が追加されたら型エラーで気付ける)。
+						const exhaustive: never = outcome;
+						console.warn("未知の ig_job_status outcome です", exhaustive);
+					}
+				}
+			} catch (err) {
+				console.warn(
+					`IG ジョブ状態の取得に失敗しました(outputId=${outputId})`,
+					err,
+				);
+			}
+		},
+		[setPubStatus],
+	);
+
+	// 60秒間隔の単一タイマーで、公開時刻を過ぎた未追跡完了(scheduled)の IG ジョブのみを
+	// 走査してポーリングする(アーキテクチャレビュー指摘対応)。output ごとに個別の
+	// タイマーを持たない設計のため、far-future の予約(数時間〜数日後)があっても
+	// ハンドル数・無駄なリクエストは増えない — tick のたびに `igSchedulerJobsRef` を
+	// 見て「公開時刻を過ぎているもの」だけ実際に fetch する。マウント中のみ動作し、
+	// アンマウントで `clearInterval` により確実に破棄する(tauriJobLifecycle.ts の
+	// 「ハンドルリーク禁止」方針と同じ)。
+	useEffect(() => {
+		const tick = () => {
+			const now = Date.now();
+			for (const [outputId, entry] of igSchedulerJobsRef.current) {
+				if (now >= entry.publishAt) {
+					void pollIgJobStatus(outputId);
+				}
+			}
+		};
+		const intervalId = window.setInterval(tick, IG_JOB_STATUS_POLL_INTERVAL_MS);
+		return () => window.clearInterval(intervalId);
+	}, [pollIgJobStatus]);
 
 	/**
 	 * `outputId` が今も有効(マウント中 かつ posts から消えていない)か。
@@ -284,7 +411,14 @@ export function usePublishExtras({
 			setPubStatus(output.id, { kind: "publishing" });
 			await publishTo(target, post, output, outputPath);
 
-			setPubStatus(output.id, { kind: "success" });
+			// Instagram は `publishTo` 内の IG onDone で `scheduled` へ遷移させる
+			// (scheduler が受理しただけで IG 側公開が成功したとは限らないため、
+			// アーキテクチャレビュー指摘対応。§igSchedulerJobsRef 冒頭コメント)。
+			// YouTube は resumable upload の done = 実際のアップロード完了のため、
+			// 従来通りここで success に確定する。
+			if (target.platform === "youtube") {
+				setPubStatus(output.id, { kind: "success" });
+			}
 		} catch (err) {
 			setPubStatus(output.id, {
 				kind: "error",
@@ -393,7 +527,7 @@ export function usePublishExtras({
 									: "投稿ジョブを登録中…",
 						});
 					},
-					onDone: () => {
+					onDone: (done) => {
 						settled = true;
 						inFlightRef.current.delete(output.id);
 						// 成功後は jobId を使い捨てる。再利用するのは「失敗した試行のリトライ」
@@ -402,6 +536,23 @@ export function usePublishExtras({
 						// のは意図的な新規投稿のはず — 同じ jobId のままだと Rust 側の
 						// idempotency_key 判定で無言破棄されかねないため、次回は新規採番する。
 						igJobIdsRef.current.delete(output.id);
+						// scheduler がジョブ登録を受理しただけで、実際の IG 側公開成否
+						// (published/failed)はまだ分からない(アーキテクチャレビュー指摘
+						// 対応)。schedulerJobId を追跡対象として記録し、`success` ではなく
+						// `scheduled` を表示する。以降の成否確定はポーリング/手動更新に委ねる
+						// (§igSchedulerJobsRef・pollIgJobStatus 冒頭コメント)。
+						// isOutputLive で確認するのは、jobId 確定(=このハンドル取得)を待つ間に
+						// output が posts から削除/アンマウントされていた場合、誰も見ない
+						// output.id を追跡対象として登録し続け孤児ポーリングを起こさないため
+						// (`.then((handle) => …)` 側の同種チェックと同じレース対策、
+						// code review 指摘対応)。
+						if (isOutputLive(output.id)) {
+							igSchedulerJobsRef.current.set(output.id, {
+								schedulerJobId: done.schedulerJobId,
+								publishAt,
+							});
+							setPubStatus(output.id, { kind: "scheduled" });
+						}
 						resolve();
 					},
 					onError: (error) => {
@@ -614,6 +765,7 @@ export function usePublishExtras({
 					onPatch={onPatchOutput}
 					onPublish={() => void publishOutput(post, output).catch(() => undefined)}
 					onCancel={() => cancelOutput(output.id)}
+					onRefreshStatus={() => void pollIgJobStatus(output.id)}
 				/>
 			);
 		},
