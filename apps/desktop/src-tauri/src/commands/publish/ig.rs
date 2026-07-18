@@ -57,19 +57,27 @@
 //! ライフサイクル(HTTP アップロード vs libav エンコード)が大きく異なり、
 //! `commands::reframe::run_media_job` の同期 `catch_unwind` 前提の骨格とは噛み合わない
 //! (本体は async タスクであり、tokio がタスク境界でパニックを既に分離しているため
-//! `catch_unwind` 自体が不要)。そのため [`IgJobsState`] は独立した小さな型として持つ
-//! (共有は「2つ目の実装が現れてから」の YAGNI 方針、docs/desktop-migration-plan.md 外の
-//! グローバルルール参照)。
+//! `catch_unwind` 自体が不要)。そのため [`IgJobsState`] は `reframe`/`preview` とは
+//! 別のジョブ ID 空間を持つ専用の型として存在する。
+//!
+//! `HashMap<JobId, CancelToken>` の登録/取得/削除そのものの実装は
+//! [`crate::commands::job_state`] に集約されている。当初(本コメント旧版)は
+//! 「共有は2つ目の実装が現れてから」の YAGNI 方針で `IgJobsState` を独立した型として
+//! 持っていたが、YouTube 公開(`commands::publish::youtube`)が3つ目の実質同一実装として
+//! 追加されたことに加え、GHSA-6cx9-j28r-f866 対応の `try_register`(TOCTOU 安全な
+//! 二重登録拒否)が本ファイルにしか入らず reframe/preview・YouTube に伝播しなかった
+//! という実害が生じたため、共通部分を `job_state` へ統一した(詳細は同モジュール冒頭
+//! コメント「統一した経緯」参照)。[`IgJobsState`] 自体はジョブ ID 空間を分離するための
+//! 薄い newtype として残る。
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use media_core::CancelToken;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
+use crate::commands::job_state;
 use crate::jobs::manifest::{self, JobRecord};
 use crate::jobs::r2_upload::{self, R2UploadError};
 use crate::jobs::scheduler_client::{self, EnqueueError};
@@ -80,55 +88,22 @@ use super::r2_credentials;
 use super::{KEY_SCHEDULER_API_TOKEN, KEY_SCHEDULER_URL, SERVICE};
 
 /// renderer が採番するジョブ ID(`reframe`/`preview` と同じ形の型エイリアス)。
-pub type JobId = String;
+pub type JobId = job_state::JobId;
 
 /// 実行中の IG 公開ジョブの [`CancelToken`] を保持する State。
-/// `commands::reframe::JobsState` と同じ形(`Mutex<HashMap<JobId, CancelToken>>`)だが、
-/// ジョブ ID 空間は共有しない(モジュール冒頭コメント参照)。
+///
+/// 共通実装は [`job_state::JobsState`] に集約されており、本 struct はジョブ ID 空間を
+/// `reframe`/`preview`・`youtube` と分離するための薄い newtype(`Deref` で
+/// `try_register`/`get`/`cancel`/`remove` をそのまま委譲する。モジュール冒頭コメント
+/// 「ジョブ管理」参照)。
 #[derive(Default)]
-pub struct IgJobsState(Mutex<HashMap<JobId, CancelToken>>);
+pub struct IgJobsState(job_state::JobsState);
 
-impl IgJobsState {
-	fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<JobId, CancelToken>> {
-		self.0
-			.lock()
-			.unwrap_or_else(|poisoned| poisoned.into_inner())
-	}
+impl std::ops::Deref for IgJobsState {
+	type Target = job_state::JobsState;
 
-	/// `job_id` が未登録なら `token` を登録して `true` を返す。既に登録済み(=同じ
-	/// job_id のジョブが実行中)なら何もせず `false` を返す(GHSA-6cx9-j28r-f866 対応:
-	/// 同一 job_id の並行 `ig_publish_start` を防ぐ)。「未登録か確認してから登録する」の
-	/// 2手順に分けると、その間に別呼び出しが割り込んで二重登録できてしまう(TOCTOU)ため、
-	/// `HashMap::entry` で 1 回のロック区間内にアトミックに行う。
-	fn try_register(&self, job_id: JobId, token: CancelToken) -> bool {
-		match self.lock().entry(job_id) {
-			std::collections::hash_map::Entry::Occupied(_) => false,
-			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert(token);
-				true
-			}
-		}
-	}
-
-	fn get(&self, job_id: &str) -> Option<CancelToken> {
-		self.lock().get(job_id).cloned()
-	}
-
-	fn remove(&self, job_id: &str) {
-		self.lock().remove(job_id);
-	}
-}
-
-/// [`run_ig_publish`] 終了時に必ず `jobs.remove(job_id)` を呼ぶ RAII ガード
-/// (`commands::reframe::JobGuard` と同じ考え方)。
-struct JobGuard<'a> {
-	jobs: &'a IgJobsState,
-	job_id: &'a str,
-}
-
-impl Drop for JobGuard<'_> {
-	fn drop(&mut self) {
-		self.jobs.remove(self.job_id);
+	fn deref(&self) -> &Self::Target {
+		&self.0
 	}
 }
 
@@ -384,15 +359,7 @@ pub(crate) async fn start_impl(
 /// 同じ job_id での再試行は scheduler 側の冪等性により同一ジョブへ束ねられ、二重公開は
 /// しない(詳細は `jobs::scheduler_client::enqueue_job` のドキュメントコメント参照)。
 pub(crate) fn cancel_impl(job_id: JobId, jobs: State<'_, IgJobsState>) -> Result<(), String> {
-	match jobs.get(&job_id) {
-		Some(token) => {
-			token.cancel();
-			Ok(())
-		}
-		None => Err(format!(
-			"未知のジョブです(既に完了した可能性があります): {job_id}"
-		)),
-	}
+	jobs.cancel(&job_id)
 }
 
 /// [`job_status_impl`] の結果。`commands::publish::scheduler_check::ConnectionCheckResult`
@@ -498,10 +465,7 @@ async fn run_ig_publish(
 	scheduler_token: String,
 ) {
 	let jobs = app.state::<IgJobsState>();
-	let _guard = JobGuard {
-		jobs: &jobs,
-		job_id: &job_id,
-	};
+	let _guard = job_state::JobGuard::new(&jobs, &job_id);
 
 	// r2_key と idempotency_key は job_id から決定的に導出する(GHSA-6cx9-j28r-f866 対応)。
 	// 旧実装は `Uuid::new_v4()` を毎回呼んでいたため、enqueue 失敗後に同じジョブを
@@ -628,14 +592,14 @@ mod tests {
 
 	#[test]
 	fn ig_publish_cancel_unknown_job_returns_error() {
+		// `cancel_impl` は `jobs.cancel(&job_id)`(`job_state::JobsState::cancel`)への
+		// 薄いラッパのため、`State<'_, T>` を構築せずここで直接検証できる。
 		let jobs = IgJobsState::default();
 		let token = CancelToken::new();
 		assert!(jobs.try_register("job-1".to_string(), token.clone()));
 		jobs.remove("job-1");
 
-		// State<'_, T> を直接構築できないため、内部ロジック(cancel 相当)を
-		// IgJobsState::get 経由で検証する(`ig_publish_cancel` 自体は薄いラッパ)。
-		assert!(jobs.get("job-1").is_none());
+		assert!(jobs.cancel("job-1").is_err());
 	}
 
 	#[test]
