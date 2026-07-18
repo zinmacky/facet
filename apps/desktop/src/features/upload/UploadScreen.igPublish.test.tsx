@@ -7,7 +7,11 @@ import {
 	DEFAULT_MEDIA_INFO,
 	emitMockEvent,
 	invokeJobId,
+	mockEventListenerCount,
 	mockInvoke,
+	MOCK_IG_PUBLISH_DONE,
+	MOCK_IG_PUBLISH_ERROR,
+	MOCK_IG_PUBLISH_PROGRESS,
 } from "../../test/tauri-mock";
 import { UploadScreen } from "./UploadScreenPrivate";
 
@@ -38,12 +42,11 @@ beforeEach(() => {
 
 /** ゲートが開く前提条件(scheduler URL + トークン + R2 資格情報)を作る。 */
 async function setUpReadyGate() {
-	window.localStorage.setItem(
-		"facet.desktop.private.schedulerUrl",
-		SCHEDULER_URL,
-	);
 	// tauri-mock の defaultInvokeImpl のインメモリ状態を直接構築する
 	// (render 前に呼ぶことで、PublishGateProvider のマウント時チェックが ready になる)。
+	// scheduler URL は GHSA-j74q-9v5x-87w3 対応で invoke ベースへ変わった
+	// (旧: localStorage 直接設定)。
+	await mockInvoke("set_scheduler_url", { url: SCHEDULER_URL });
 	await mockInvoke("set_scheduler_api_token", { token: "test-token" });
 	await mockInvoke("set_r2_credentials", {
 		accountId: "acc",
@@ -180,7 +183,6 @@ describe("UploadScreen: IG 投稿フロー", () => {
 				expect.objectContaining({
 					inputPath: "/publish-cache/out.mp4",
 					caption: "",
-					schedulerUrl: SCHEDULER_URL,
 					publishAt: expect.any(Number),
 				}),
 			),
@@ -191,21 +193,13 @@ describe("UploadScreen: IG 投稿フロー", () => {
 		const igJobId = invokeJobId(igCallIndex);
 
 		// 3. アップロード進捗がステータスバッジに反映される。
-		emitMockEvent(`ig_publish://progress/${igJobId}`, {
-			phase: "uploading",
-			bytesSent: 42,
-			totalBytes: 100,
-			percent: 42,
-		});
+		emitMockEvent(`ig_publish://progress/${igJobId}`, MOCK_IG_PUBLISH_PROGRESS);
 		await waitFor(() =>
 			expect(screen.getByText(/アップロード中 42%/)).toBeInTheDocument(),
 		);
 
 		// 4. done で「完了」。
-		emitMockEvent(`ig_publish://done/${igJobId}`, {
-			schedulerJobId: "scheduler-job-1",
-			status: "pending",
-		});
+		emitMockEvent(`ig_publish://done/${igJobId}`, MOCK_IG_PUBLISH_DONE);
 		await waitFor(() => expect(screen.getByText("完了")).toBeInTheDocument());
 	});
 
@@ -236,9 +230,7 @@ describe("UploadScreen: IG 投稿フロー", () => {
 			expect(index).toBeGreaterThanOrEqual(0);
 			return index;
 		});
-		emitMockEvent(`ig_publish://error/${invokeJobId(igCallIndex)}`, {
-			kind: "enqueue_unauthorized",
-		});
+		emitMockEvent(`ig_publish://error/${invokeJobId(igCallIndex)}`, MOCK_IG_PUBLISH_ERROR);
 
 		await waitFor(() =>
 			expect(
@@ -285,5 +277,118 @@ describe("UploadScreen: IG 投稿フロー", () => {
 				screen.getByText(/ファイルサイズが上限を超えています/),
 			).toBeInTheDocument(),
 		);
+	});
+});
+
+describe("UploadScreen: IG 投稿ジョブのライフサイクル(Issue #95, GHSA-rrgf-h689-w639)", () => {
+	it("投稿中(ig_publish_start 後)にアンマウントすると、購読解除 + ig_publish_cancel が呼ばれる", async () => {
+		await setUpReadyGate();
+		const user = userEvent.setup();
+		const { unmount } = renderScreen();
+
+		const publishButton = await openIgPublishButton(user);
+		await waitFor(() => expect(publishButton).toBeEnabled());
+		await user.click(publishButton);
+
+		const previewCallIndex = await waitFor(() => {
+			const index = mockInvoke.mock.calls.findIndex(
+				([cmd]) => cmd === "preview_start",
+			);
+			expect(index).toBeGreaterThanOrEqual(0);
+			return index;
+		});
+		emitMockEvent(`preview://done/${invokeJobId(previewCallIndex)}`, {
+			path: "/publish-cache/out.mp4",
+		});
+
+		const igCallIndex = await waitFor(() => {
+			const index = mockInvoke.mock.calls.findIndex(
+				([cmd]) => cmd === "ig_publish_start",
+			);
+			expect(index).toBeGreaterThanOrEqual(0);
+			return index;
+		});
+		const igJobId = invokeJobId(igCallIndex);
+		expect(igJobId).toBeDefined();
+		await waitFor(() =>
+			expect(mockEventListenerCount(`ig_publish://done/${igJobId}`)).toBe(1),
+		);
+
+		// 投稿(数十秒かかりうる)の途中でアンマウントする(旧実装は `.catch` のみで
+		// ハンドルを握り潰しており、リスナ残留・キャンセル導線の欠如が起きていた)。
+		unmount();
+
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith("ig_publish_cancel", {
+				jobId: igJobId,
+			}),
+		);
+		// unsubscribe まで済んでいるので、購読は残らない。
+		expect(mockEventListenerCount(`ig_publish://done/${igJobId}`)).toBe(0);
+
+		// アンマウント後に done イベントが届いても(購読解除済みのため実際には配送
+		// されないが)、念のため例外が起きない・setState されないことを確認する。
+		expect(() =>
+			emitMockEvent(`ig_publish://done/${igJobId}`, {
+				schedulerJobId: "scheduler-job-1",
+				status: "pending",
+			}),
+		).not.toThrow();
+	});
+
+	it("同一 output への再投稿(リトライ)は同じ jobId を ig_publish_start に渡す(idempotency_key 決定化との対、Issue #95)", async () => {
+		await setUpReadyGate();
+		const user = userEvent.setup();
+		renderScreen();
+
+		// 1 回目: enqueue_rejected で失敗させる。
+		const publishButton = await openIgPublishButton(user);
+		await waitFor(() => expect(publishButton).toBeEnabled());
+		await user.click(publishButton);
+
+		const firstPreviewIndex = await waitFor(() => {
+			const index = mockInvoke.mock.calls.findIndex(
+				([cmd]) => cmd === "preview_start",
+			);
+			expect(index).toBeGreaterThanOrEqual(0);
+			return index;
+		});
+		emitMockEvent(`preview://done/${invokeJobId(firstPreviewIndex)}`, {
+			path: "/publish-cache/out.mp4",
+		});
+
+		const firstIgIndex = await waitFor(() => {
+			const index = mockInvoke.mock.calls.findIndex(
+				([cmd]) => cmd === "ig_publish_start",
+			);
+			expect(index).toBeGreaterThanOrEqual(0);
+			return index;
+		});
+		const firstJobId = invokeJobId(firstIgIndex);
+		emitMockEvent(`ig_publish://error/${firstJobId}`, {
+			kind: "enqueue_rejected",
+			detail: "duplicate",
+		});
+		await waitFor(() =>
+			expect(screen.getByText(/scheduler にジョブ登録を拒否されました/)).toBeInTheDocument(),
+		);
+
+		// 2 回目(リトライ): 前回の試行は done/error で終了済みなので、ボタンは
+		// 再度有効になっている。投稿用レンダリングは sig 一致のキャッシュ再利用のため
+		// preview_start は再発火しない(usePreview.ensure のキャッシュ挙動どおり)。
+		await waitFor(() => expect(publishButton).toBeEnabled());
+		await user.click(publishButton);
+
+		await waitFor(() => {
+			const calls = mockInvoke.mock.calls.filter(
+				([cmd]) => cmd === "ig_publish_start",
+			);
+			expect(calls.length).toBe(2);
+		});
+		const secondJobId = mockInvoke.mock.calls.filter(
+			([cmd]) => cmd === "ig_publish_start",
+		)[1]?.[1] as { jobId: string };
+		// output.id ごとに安定な jobId が再利用される(Rust 側の idempotency_key 決定化と対)。
+		expect(secondJobId.jobId).toBe(firstJobId);
 	});
 });

@@ -11,6 +11,7 @@ import { invoke } from "@tauri-apps/api/core";
 /** Rust 側 `ConnectionCheckResult`(serde の internally-tagged enum)と同形。 */
 export type ConnectionCheckResult =
 	| { status: "ok" }
+	| { status: "no_url" }
 	| { status: "no_token" }
 	| { status: "unreachable"; detail: string }
 	| { status: "unauthorized" }
@@ -34,14 +35,13 @@ export function deleteSchedulerApiToken(): Promise<void> {
 
 /**
  * scheduler への疎通を2段階(health → Bearer 認証)で確認する。
- * トークンは Rust 側がキーチェーンから読み出す(renderer からは渡さない)。
+ * URL・トークンいずれも Rust 側がキーチェーンから読み出す(renderer からは渡さない —
+ * GHSA-j74q-9v5x-87w3 対応: renderer が任意の URL を指定できると、WebView 侵害時に
+ * 任意ホストへの疎通チェックを誘発できてしまう)。URL 未設定時は `{ status: "no_url" }`
+ * が返る。
  */
-export function checkSchedulerConnection(
-	schedulerUrl: string,
-): Promise<ConnectionCheckResult> {
-	return invoke<ConnectionCheckResult>("check_scheduler_connection", {
-		schedulerUrl,
-	});
+export function checkSchedulerConnection(): Promise<ConnectionCheckResult> {
+	return invoke<ConnectionCheckResult>("check_scheduler_connection");
 }
 
 /** R2(Cloudflare, S3 互換)資格情報の入力(§6.4)。 */

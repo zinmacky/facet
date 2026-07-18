@@ -41,6 +41,7 @@ publish = [
 	"dep:chrono",
 	"dep:mime",
 	"dep:async-trait",
+	"dep:contract-rs",
 ]
 
 [build-dependencies]
@@ -77,9 +78,11 @@ rusty-s3 = { version = "0.10", default-features = false, features = [
 # 再エクスポートしているが(`reqwest::Url` == `url::Url`)、`jobs::sigv4` は reqwest に
 # 依存しない層のため明示的に直接依存させる。
 url = { version = "2", optional = true }
-# r2Key(`posts/<date>/<uuid>.mp4`)・idempotencyKey の採番用(旧 TS 実装の
-# `randomUUID()` に対応、§jobs/manifest.rs)。
-uuid = { version = "1", features = ["v4"], optional = true }
+# r2Key(`posts/<date>/<uuid>.mp4`)・idempotencyKey の採番用。job_id からの決定的導出
+# (UUIDv5、GHSA-6cx9-j28r-f866 対応、§commands/publish/ig.rs)に "v5" feature が必要。
+# "v4" は手動実行テスト(§jobs/scheduler_client.rs `real_scheduler_enqueue_is_idempotent`)
+# 用に残す。
+uuid = { version = "1", features = ["v4", "v5"], optional = true }
 # jobs/ 配下のエラー型(ValidationError 等)の Display 導出用。media-core と同じ
 # クレート(バージョンも合わせる)を使う。
 thiserror = { version = "2", optional = true }
@@ -159,6 +162,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # reframe/probe コマンドの実処理(Wave 5: コマンド境界の配線)。
 media-core = { path = "../crates/media-core" }
+# `jobs::manifest` の `JobManifest`/`JobCreateResponse`(typify 配線、Issue #93)。
+# `jobs`(ひいてはこの依存)は `publish` feature 限定 — `jobs/mod.rs` が
+# `#[cfg(feature = "publish")]` で各サブモジュールを丸ごとゲートしている。
+contract-rs = { path = "../crates/contract-rs", optional = true }
 
 [dev-dependencies]
 # `commands::publish::scheduler_check` / `jobs::r2_upload` / `jobs::scheduler_client` の
