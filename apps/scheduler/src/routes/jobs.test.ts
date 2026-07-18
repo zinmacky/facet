@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../env.js";
 import { jobsRoutes } from "./jobs.js";
 
@@ -237,5 +237,34 @@ describe("GET /jobs/:id", () => {
 			attempts: 0,
 			lastError: null,
 		});
+	});
+
+	it("status が enum 外の不正な行は 500(スキーマ検証で弾く)", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const id = crypto.randomUUID();
+		const now = Date.now();
+		db.__rows.set(id, {
+			id,
+			idempotency_key: crypto.randomUUID(),
+			platform: "instagram",
+			r2_key: "posts/2026-07-18/reel.mp4",
+			media_type: "REELS",
+			caption: "hello",
+			publish_at: now + 60_000,
+			status: "not-a-real-status",
+			ig_container_id: null,
+			ig_media_id: null,
+			attempts: 0,
+			last_error: null,
+			created_at: now,
+			updated_at: now,
+		});
+
+		const res = await app.request(`/jobs/${id}`, {}, envWithDB(db));
+		expect(res.status).toBe(500);
+		expect(console.error).toHaveBeenCalled();
+
+		vi.restoreAllMocks();
 	});
 });

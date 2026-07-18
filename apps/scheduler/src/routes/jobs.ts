@@ -1,4 +1,4 @@
-import { jobManifest } from "@facet/contract";
+import { jobManifest, jobRecord } from "@facet/contract";
 import type { JobRecord } from "@facet/contract";
 import { Hono } from "hono";
 import type { Env } from "../env.js";
@@ -21,17 +21,24 @@ interface JobRowFull {
 	updated_at: number;
 }
 
-/** D1 行を contract の JobRecord 形状へ変換する。 */
-function toJobRecord(row: JobRowFull): JobRecord {
-	return {
+/**
+ * D1 行を contract の JobRecord 形状へ変換し、`jobRecord` zod スキーマで検証する。
+ * D1 は素の SQLite であり列値の型・enum 値を保証しないため、ここで unchecked な
+ * `as` キャストのまま返すと不正な行(例: status が enum 外の文字列)がそのまま
+ * クライアントへ流出しうる。スキーマ不適合は行データの破損・想定外の書き込みを
+ * 示すバグシグナルなので、ここでは黙って握りつぶさず null を返し、呼び出し側で
+ * ログを残した上で 500 とする(サービスを止めてでも不正なレスポンスを返さない)。
+ */
+function toJobRecord(row: JobRowFull): JobRecord | null {
+	const candidate = {
 		id: row.id,
 		idempotencyKey: row.idempotency_key,
 		platform: "instagram",
 		r2Key: row.r2_key,
-		mediaType: row.media_type as JobRecord["mediaType"],
+		mediaType: row.media_type,
 		caption: row.caption ?? "",
 		publishAt: row.publish_at,
-		status: row.status as JobRecord["status"],
+		status: row.status,
 		igContainerId: row.ig_container_id,
 		igMediaId: row.ig_media_id,
 		attempts: row.attempts,
@@ -39,6 +46,15 @@ function toJobRecord(row: JobRowFull): JobRecord {
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	};
+	const parsed = jobRecord.safeParse(candidate);
+	if (!parsed.success) {
+		console.error(
+			`toJobRecord: D1 行が JobRecord スキーマに適合しません(id=${row.id}):`,
+			parsed.error.issues,
+		);
+		return null;
+	}
+	return parsed.data;
 }
 
 /** /jobs 配下のルータを組み立てて返す。 */
@@ -100,7 +116,11 @@ export function jobsRoutes() {
 		if (!row) {
 			return c.json({ error: "job not found" }, 404);
 		}
-		return c.json(toJobRecord(row), 200);
+		const record = toJobRecord(row);
+		if (!record) {
+			return c.json({ error: "internal error: invalid job record" }, 500);
+		}
+		return c.json(record, 200);
 	});
 
 	return app;
