@@ -185,6 +185,7 @@ impl From<EnqueueError> for IgPublishRuntimeError {
 			EnqueueError::ServiceUnavailable => IgPublishRuntimeError::EnqueueServiceUnavailable,
 			EnqueueError::Rejected(detail) => IgPublishRuntimeError::EnqueueRejected { detail },
 			EnqueueError::Network(detail) => IgPublishRuntimeError::Network { detail },
+			EnqueueError::Cancelled => IgPublishRuntimeError::Cancelled,
 		}
 	}
 }
@@ -351,12 +352,18 @@ pub(crate) async fn start_impl(
 }
 
 /// `job_id` の IG 公開ジョブをキャンセルする(ロジック本体。`#[tauri::command]` は
-/// `mod.rs` 側に付ける — 理由は [`start_impl`] 冒頭コメント参照)。アップロード中なら
-/// HTTP リクエストが中断され(`jobs::r2_upload` の `tokio::select!`)、
-/// `ig_publish://error/{jobId}` が `Cancelled` で発火する。scheduler 登録(POST /jobs)
-/// フェーズは 1 リクエストのみで短時間のため、キャンセルは次のフェーズ境界チェックまで
-/// 反映が遅れることがある(`media_core::reframe` のパケット単位キャンセルと同じ
-/// 「協調的キャンセル」の性質)。
+/// `mod.rs` 側に付ける — 理由は [`start_impl`] 冒頭コメント参照)。アップロード中
+/// (`jobs::r2_upload::upload_file`)・scheduler 登録中(`jobs::scheduler_client::enqueue_job`)
+/// のどちらも `tokio::select!` で `CancelToken` とレースしているため、HTTP リクエストが
+/// 中断され `ig_publish://error/{jobId}` が速やかに `Cancelled` で発火する
+/// (GHSA-q37v-7xpp-x229 残作業対応。旧実装は enqueue フェーズを素の `await` で待っており、
+/// `ENQUEUE_TIMEOUT`(30秒)いっぱいまでキャンセルが反映されなかった)。
+///
+/// **注意:** enqueue リクエストが scheduler に届いた「後」にキャンセルされた場合、
+/// scheduler 側には既にジョブが登録されている可能性がある(半端な状態)。
+/// `idempotency_key` は job_id から決定的に導出される([`derive_idempotency_key`])ため、
+/// 同じ job_id での再試行は scheduler 側の冪等性により同一ジョブへ束ねられ、二重公開は
+/// しない(詳細は `jobs::scheduler_client::enqueue_job` のドキュメントコメント参照)。
 pub(crate) fn cancel_impl(job_id: JobId, jobs: State<'_, IgJobsState>) -> Result<(), String> {
 	match jobs.get(&job_id) {
 		Some(token) => {
@@ -466,6 +473,7 @@ async fn run_ig_publish(
 		&scheduler_token,
 		&manifest,
 		scheduler_client::ENQUEUE_TIMEOUT,
+		&token,
 	)
 	.await
 	{
