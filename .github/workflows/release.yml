@@ -193,13 +193,41 @@ jobs:
             Write-Error "$assetsDir にファイルが見つかりません(vite build の出力構成を確認してください)"
             exit 1
           }
+
+          # 失敗時の調査用に、一致したマーカーごとにファイル・行番号・一致箇所前後80文字を
+          # 出力する(バンドル JS は1行が巨大なため、Select-String の結果をそのまま
+          # 出すと数百KB出力されてしまう)。あわせて成果物ファイル一覧(名前・サイズ)も
+          # 出力する。$ErrorActionPreference = "Stop" の下では Write-Error 呼び出し時点で
+          # スクリプトが即終了する(以降の行は実行されない)ため、必ず Write-Error より
+          # 前に呼び出すこと。
+          function Write-MarkerDiagnostics($selectMatches, $files) {
+            Write-Host "--- 一致箇所(前後80文字) ---"
+            foreach ($m in $selectMatches) {
+              foreach ($match in $m.Matches) {
+                $start = [Math]::Max(0, $match.Index - 80)
+                $end = [Math]::Min($m.Line.Length, $match.Index + $match.Length + 80)
+                $snippet = $m.Line.Substring($start, $end - $start)
+                Write-Host "  [$($match.Value)] $($m.Path):$($m.LineNumber) ...${snippet}..."
+              }
+            }
+            Write-Host "--- 成果物ファイル一覧 ---"
+            foreach ($f in $files) {
+              Write-Host ("  {0}  {1} bytes" -f $f.Name, $f.Length)
+            }
+          }
+
           $uploadMarkers = "一括投稿", "APIトークン", "クライアントID", "YouTube の認可が無効"
-          if ($assetFiles | Select-String -Pattern $uploadMarkers -SimpleMatch -Quiet) {
+          # -AllMatches: 巨大な1行に複数マーカーが出現しても取りこぼさず全て診断に出す
+          $uploadMatches = $assetFiles | Select-String -Pattern $uploadMarkers -SimpleMatch -AllMatches
+          if ($uploadMatches) {
+            Write-MarkerDiagnostics $uploadMatches $assetFiles
             Write-Error "public ビルドの成果物に投稿系マーカー(「一括投稿」/「APIトークン」/「クライアントID」/「YouTube の認可が無効」)が含まれています"
             exit 1
           }
           $endpointMarkers = "googleapis", "cloudflarestorage", "graph.facebook"
-          if ($assetFiles | Select-String -Pattern $endpointMarkers -SimpleMatch -Quiet) {
+          $endpointMatches = $assetFiles | Select-String -Pattern $endpointMarkers -SimpleMatch -AllMatches
+          if ($endpointMatches) {
+            Write-MarkerDiagnostics $endpointMatches $assetFiles
             Write-Error "public ビルドの成果物に投稿系エンドポイント文字列(googleapis/cloudflarestorage/graph.facebook)が含まれています"
             exit 1
           }
