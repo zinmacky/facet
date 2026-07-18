@@ -76,13 +76,18 @@ jobs:
       # tauri.conf.json / package.json / Cargo.toml 間の一致検証だけは実タグ push と同様に行う。
       - name: Resolve version-check tag
         id: version-check-tag
+        # github.ref_name を pwsh ソースへ直接文字列展開せず env 経由で渡す
+        # (ref 名は攻撃者が制御しうる入力であり、直接展開するとスクリプト
+        # インジェクションが成立しうるため)。
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
           if ($env:IS_DRY_RUN -eq "true") {
             $tauriConf = Get-Content -Raw "apps/desktop/src-tauri/tauri.conf.json" | ConvertFrom-Json
             $tag = "v$($tauriConf.version)"
             Write-Host "dry run: 実タグが無いため tauri.conf.json のバージョンから合成タグを使用します: $tag"
           } else {
-            $tag = "${{ github.ref_name }}"
+            $tag = $env:REF_NAME
           }
           echo "tag=$tag" >> $env:GITHUB_OUTPUT
 
