@@ -22,6 +22,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum ConnectionCheckResult {
 	/// 疎通 OK(health 到達 + Bearer 認証つきで 200)。
 	Ok,
+	/// ローカルに scheduler_url が保存されていない(疎通チェック自体を行わなかった)。
+	NoUrl,
 	/// ローカルに scheduler_api_token が保存されていない(疎通チェック自体を行わなかった)。
 	NoToken,
 	/// health エンドポイントに到達できない(ネットワークエラー・タイムアウト・非 200 応答)。
@@ -46,13 +48,11 @@ pub fn build_root_url(base: &str) -> Result<reqwest::Url, String> {
 
 /// `base` を http/https の絶対 URL として検証し、末尾に `segment` を足す。
 /// `Url::join` は相対解決の都合上、末尾セグメントの扱いが直感に反する場合があるため、
-/// パス文字列を直接組み立てる。
+/// パス文字列を直接組み立てる。URL 自体の妥当性検証(http はループバック限定、
+/// GHSA-j74q-9v5x-87w3)は `jobs::scheduler_client::parse_scheduler_base` に委ねる
+/// (`commands` → `jobs` の依存方向は `ig.rs` と同じで問題ない)。
 fn join_path(base: &str, segment: &str) -> Result<reqwest::Url, String> {
-	let mut url = reqwest::Url::parse(base.trim())
-		.map_err(|_| "scheduler_url が不正な URL です。".to_string())?;
-	if !matches!(url.scheme(), "http" | "https") {
-		return Err("scheduler_url は http/https のみ対応です。".to_string());
-	}
+	let mut url = crate::jobs::scheduler_client::parse_scheduler_base(base)?;
 	let base_path = url.path().trim_end_matches('/');
 	url.set_path(&format!("{base_path}/{segment}"));
 	Ok(url)

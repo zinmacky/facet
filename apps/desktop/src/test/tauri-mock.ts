@@ -1,4 +1,9 @@
 import { vi } from "vitest";
+import type {
+	IgPublishDone,
+	IgPublishProgress,
+	IgPublishRuntimeError,
+} from "../features/upload/igPublish";
 import type { MediaInfo } from "../lib/tauri";
 
 /**
@@ -21,6 +26,39 @@ export const DEFAULT_MEDIA_INFO: MediaInfo = {
 	fps: 30,
 	hasAudio: true,
 	codec: "h264",
+};
+
+/**
+ * `emitMockEvent("ig_publish://done/<jobId>", ...)` に渡す既定の done ペイロード。
+ * `UploadScreen.igPublish.test.tsx` が実際に emit する値そのもので、
+ * `test/contract-boundary.test.ts` がこれを import して `@facet/contract` の
+ * `jobCreateResponse` スキーマへの適合を検証する(GHSA-6w5m-8gcr-rf63 / Issue #93)。
+ * ここを直接変更すると契約検証テストも連動して確認できる(手打ちの重複を避ける)。
+ */
+export const MOCK_IG_PUBLISH_DONE: IgPublishDone = {
+	schedulerJobId: "scheduler-job-1",
+	status: "pending",
+};
+
+/**
+ * `emitMockEvent("ig_publish://progress/<jobId>", ...)` に渡す既定の progress
+ * ペイロード。`MOCK_IG_PUBLISH_DONE` と同じ理由で `UploadScreen.igPublish.test.tsx` /
+ * `test/contract-boundary.test.ts` の双方から参照する(Issue #93 パート B-4)。
+ */
+export const MOCK_IG_PUBLISH_PROGRESS: IgPublishProgress = {
+	phase: "uploading",
+	bytesSent: 42,
+	totalBytes: 100,
+	percent: 42,
+};
+
+/**
+ * `emitMockEvent("ig_publish://error/<jobId>", ...)` に渡す既定の error ペイロード。
+ * `MOCK_IG_PUBLISH_DONE` と同じ理由で `UploadScreen.igPublish.test.tsx` /
+ * `test/contract-boundary.test.ts` の双方から参照する(Issue #93 パート B-4)。
+ */
+export const MOCK_IG_PUBLISH_ERROR: IgPublishRuntimeError = {
+	kind: "enqueue_unauthorized",
 };
 
 /**
@@ -53,6 +91,13 @@ export const mockNewJobId = vi.fn((): string => {
  * 返す、という単純な既定シナリオ)。
  */
 let mockSchedulerApiToken: string | null = null;
+
+/**
+ * scheduler URL のインメモリモック状態(§commands/publish/mod.rs の
+ * `KEY_SCHEDULER_URL`。GHSA-j74q-9v5x-87w3 対応で localStorage から invoke ベースへ
+ * 変わったため、`mockSchedulerApiToken` と同じ形の状態をここに追加した)。
+ */
+let mockSchedulerUrl: string | null = null;
 
 /**
  * R2(Cloudflare, S3 互換)資格情報のインメモリモック状態(§commands/publish/r2_credentials.rs)。
@@ -101,7 +146,20 @@ async function defaultInvokeImpl(cmd: string, args?: unknown): Promise<unknown> 
 		case "delete_scheduler_api_token":
 			mockSchedulerApiToken = null;
 			return undefined;
+		case "set_scheduler_url": {
+			const { url } = (args ?? {}) as { url?: string };
+			const trimmed = url?.trim();
+			if (!trimmed) throw new Error("scheduler_url が空です。");
+			mockSchedulerUrl = trimmed;
+			return undefined;
+		}
+		case "get_scheduler_url":
+			return mockSchedulerUrl;
+		case "delete_scheduler_url":
+			mockSchedulerUrl = null;
+			return undefined;
 		case "check_scheduler_connection":
+			if (mockSchedulerUrl === null) return { status: "no_url" };
 			return mockSchedulerApiToken === null
 				? { status: "no_token" }
 				: { status: "ok" };
@@ -257,6 +315,7 @@ export function resetTauriMocks(): void {
 	jobCounter = 0;
 
 	mockSchedulerApiToken = null;
+	mockSchedulerUrl = null;
 	mockR2Credentials = null;
 	mockYoutubeOauthClient = null;
 	mockYoutubeOauthConnected = false;

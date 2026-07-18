@@ -11,8 +11,10 @@ import { PublishSettingsSection } from "./PublishSettingsSection";
  * `renderWithProviders`(`test/render.tsx`)は不要だが、`usePublishGateContext()` を
  * 使うため `PublishGateProvider` では包む必要がある(Provider 外での呼び出しは
  * 例外を投げる、§PublishGateContext.tsx)。
- * localStorage(scheduler URL の保存先、§schedulerUrlStore.ts)はテスト間で
- * 引きずらないよう毎回クリアする(SettingsDialog.test.tsx と同じ方針)。
+ * scheduler URL は GHSA-j74q-9v5x-87w3 対応で invoke ベース(`tauri-mock.ts` の
+ * インメモリ状態)へ変わったため、localStorage は旧キーからの移行テスト以外では
+ * 触れない。念のため各テスト間で引きずらないようクリアする(SettingsDialog.test.tsx
+ * と同じ方針)。
  */
 beforeEach(() => {
 	window.localStorage.clear();
@@ -37,16 +39,68 @@ async function saveToken(user: ReturnType<typeof userEvent.setup>, token: string
 }
 
 describe("PublishSettingsSection: scheduler URL", () => {
-	it("入力して保存すると localStorage に保存される", async () => {
+	it("入力して保存すると set_scheduler_url が呼ばれる", async () => {
 		const user = userEvent.setup();
 		render(<PublishSettingsSection />);
 
 		await saveSchedulerUrl(user, "https://scheduler.example.workers.dev");
 
 		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith("set_scheduler_url", {
+				url: "https://scheduler.example.workers.dev",
+			}),
+		);
+	});
+
+	it("旧 localStorage キーの URL は初回ゲートチェック時に移行され、疎通結果へ反映される", async () => {
+		// 旧バージョンで URL 設定済みの既存ユーザーを再現する(§schedulerUrlStore.ts の
+		// 一回性移行)。設定ダイアログを開かなくても、PublishGateProvider マウント時の
+		// 初回 recheck が移行を先に走らせるため、no_url ではなく no_token 側になる。
+		window.localStorage.setItem(
+			"facet.desktop.private.schedulerUrl",
+			"https://legacy.example.workers.dev",
+		);
+		render(<PublishSettingsSection />);
+
+		await waitFor(() =>
+			expect(screen.getByText("トークン未設定")).toBeInTheDocument(),
+		);
+		expect(mockInvoke).toHaveBeenCalledWith("set_scheduler_url", {
+			url: "https://legacy.example.workers.dev",
+		});
+		// 移行後、旧キーは削除される(再実行は no-op)。
+		expect(
+			window.localStorage.getItem("facet.desktop.private.schedulerUrl"),
+		).toBeNull();
+		// 表示用の入力欄にも移行済みの URL がロードされる。
+		await waitFor(() =>
 			expect(
-				window.localStorage.getItem("facet.desktop.private.schedulerUrl"),
-			).toBe("https://scheduler.example.workers.dev"),
+				screen.getByDisplayValue("https://legacy.example.workers.dev"),
+			).toBeInTheDocument(),
+		);
+	});
+
+	it("不正な URL を保存しようとするとエラーメッセージを表示する", async () => {
+		const user = userEvent.setup();
+		render(<PublishSettingsSection />);
+
+		// マウント時の自動疎通チェック一巡(初期表示「scheduler URL 未設定」)が
+		// 完了するのを待ってから、次の1回(= 保存ボタン押下で呼ばれる
+		// set_scheduler_url)だけを失敗させる。
+		await waitFor(() =>
+			expect(screen.getByText("scheduler URL 未設定")).toBeInTheDocument(),
+		);
+		mockInvoke.mockImplementationOnce(async () => {
+			throw new Error(
+				"http:// はループバック(localhost)のみ許可されます。リモートの scheduler には https:// を使ってください。",
+			);
+		});
+		await saveSchedulerUrl(user, "http://evil.example.com");
+
+		await waitFor(() =>
+			expect(
+				screen.getByText(/ループバック\(localhost\)のみ許可されます/),
+			).toBeInTheDocument(),
 		);
 	});
 });
@@ -136,9 +190,7 @@ describe("PublishSettingsSection: 疎通チェック", () => {
 		await user.click(screen.getByRole("button", { name: "疎通チェック" }));
 
 		await waitFor(() => expect(screen.getByText("接続OK")).toBeInTheDocument());
-		expect(mockInvoke).toHaveBeenCalledWith("check_scheduler_connection", {
-			schedulerUrl: "https://scheduler.example.workers.dev",
-		});
+		expect(mockInvoke).toHaveBeenCalledWith("check_scheduler_connection");
 	});
 
 	it("認証エラー(401 相当)の場合は理由を表示する", async () => {
@@ -149,8 +201,12 @@ describe("PublishSettingsSection: 疎通チェック", () => {
 		await saveToken(user, "wrong-token");
 
 		// 「疎通チェック」ボタンの recheck() は has_scheduler_api_token →
-		// check_scheduler_connection の順で invoke するため、2回分をこの順で差し替える。
+		// get_scheduler_url(移行の副作用のための読み出し、§usePublishGate.ts)→
+		// check_scheduler_connection の順で invoke するため、3回分をこの順で差し替える。
 		mockInvoke.mockImplementationOnce(async () => true);
+		mockInvoke.mockImplementationOnce(
+			async () => "https://scheduler.example.workers.dev",
+		);
 		mockInvoke.mockImplementationOnce(async () => ({ status: "unauthorized" }));
 		await user.click(screen.getByRole("button", { name: "疎通チェック" }));
 

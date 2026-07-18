@@ -15,8 +15,8 @@
 		"format": "biome format --write ."
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.5.2",
-		"turbo": "^2.1.1",
+		"@biomejs/biome": "^2.5.4",
+		"turbo": "^2.10.5",
 		"typescript": "^6.0.3"
 	},
 	"pnpm": {

@@ -1,7 +1,6 @@
 {
 	"$defs": {
 		"jobCreateResponse": {
-			"additionalProperties": false,
 			"properties": {
 				"id": {
 					"type": "string"
@@ -17,7 +16,6 @@
 			"type": "object"
 		},
 		"jobManifest": {
-			"additionalProperties": false,
 			"properties": {
 				"caption": {
 					"maxLength": 2200,
@@ -54,7 +52,6 @@
 			"type": "object"
 		},
 		"jobRecord": {
-			"additionalProperties": false,
 			"properties": {
 				"attempts": {
 					"minimum": 0,

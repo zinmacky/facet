@@ -8,6 +8,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import {
+	igPublishDone,
+	igPublishProgress,
+	igPublishRuntimeError,
 	jobCreateResponse,
 	jobManifest,
 	jobRecord,
@@ -16,7 +19,6 @@ import {
 } from "../dist/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const outputPath = resolve(__dirname, "../schema/job-manifest.json");
 
 // zod-to-json-schema@3.25.2 は target が文字列 "jsonSchema7" のときのみ
 // exclusiveMinimum を数値形式で出力する(parsers/number.js の実装依存)。
@@ -67,13 +69,37 @@ function toJsonSchemaDef(name, schema, sharedEnumDefinitions) {
 		target: TARGET,
 		definitionPath: DEFINITION_PATH,
 		definitions: sharedEnumDefinitions,
+		// 本パッケージの z.object() は .strict() を使っていない = zod の実行時挙動は
+		// 「未知キーを strip して許容する」。ところが zod-to-json-schema の既定
+		// (removeAdditionalStrategy: "passthrough")は、この strip モードを
+		// `additionalProperties: false` として出力してしまい、zod の意味論より厳しい
+		// スキーマになる(受信側 codegen — contract-rs の typify — が
+		// `#[serde(deny_unknown_fields)]` を生成し、送信元の将来のフィールド追加で
+		// デシリアライズが壊れる後方互換性の後退を招いていた)。
+		// "strict" を指定すると strip モードの出力が allowedAdditionalProperties に
+		// 切り替わり(parsers/object.js の decideAdditionalProperties 参照。
+		// オプション名は紛らわしいが「.strict() のときだけ false を出す」の意)、
+		// さらにそれを undefined にすることで additionalProperties キー自体を
+		// 出力しない(JSON Schema の既定 = 未知キー許容、と zod の実挙動が一致する)。
+		removeAdditionalStrategy: "strict",
+		allowedAdditionalProperties: undefined,
 	});
 	return result[DEFINITION_PATH][name];
 }
 
+/** `$defs` 群を 1 ファイルとして書き出す(呼び出し元ごとに出力先を変える)。 */
+function writeSchemaFile(outputPath, defs) {
+	const schema = {
+		$schema: "https://json-schema.org/draft/2019-09/schema#",
+		$defs: defs,
+	};
+	const output = `${JSON.stringify(sortKeysDeep(schema), null, "\t")}\n`;
+	writeFileSync(outputPath, output);
+}
+
 const sharedEnums = { mediaType, jobStatus };
 
-const defs = {
+writeSchemaFile(resolve(__dirname, "../schema/job-manifest.json"), {
 	// 列挙型は他スキーマから共有参照されるため先に単独生成する。
 	mediaType: toJsonSchemaDef("mediaType", mediaType, {}),
 	jobStatus: toJsonSchemaDef("jobStatus", jobStatus, {}),
@@ -84,12 +110,18 @@ const defs = {
 		jobCreateResponse,
 		sharedEnums,
 	),
-};
+});
 
-const schema = {
-	$schema: "https://json-schema.org/draft/2019-09/schema#",
-	$defs: defs,
-};
-
-const output = `${JSON.stringify(sortKeysDeep(schema), null, "\t")}\n`;
-writeFileSync(outputPath, output);
+// `ig_publish://*` イベント(desktop の Rust⇄renderer 境界、§ig-publish-events.ts
+// 冒頭コメント)は POST /jobs の契約(job-manifest.json)とは別の関心事のため、
+// 別ファイルに分ける。3スキーマ間で共有する列挙型は無いため sharedEnumDefinitions は
+// 各々 {} でよい。
+writeSchemaFile(resolve(__dirname, "../schema/ig-publish-events.json"), {
+	igPublishProgress: toJsonSchemaDef("igPublishProgress", igPublishProgress, {}),
+	igPublishDone: toJsonSchemaDef("igPublishDone", igPublishDone, {}),
+	igPublishRuntimeError: toJsonSchemaDef(
+		"igPublishRuntimeError",
+		igPublishRuntimeError,
+		{},
+	),
+});
