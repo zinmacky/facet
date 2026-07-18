@@ -1,15 +1,23 @@
 //! `EditSpec` とその依存型の JSON 互換 serde 構造体。
 //!
-//! **暫定手書き型**: `crates/contract-rs` は将来 `packages/contract` の JSON Schema
-//! から生成する型の re-export を担う想定だが、`EditSpec` は現状
-//! `packages/core/src/types.ts`(TS 側の「真実の源」)にのみ定義されており、
-//! contract のスキーマ生成対象ではない。将来 contract-rs 側に生成型が追加され
-//! 次第、本モジュールはそちらへ差し替える前提の暫定実装。
+//! **手書き型(typify 生成なし)**: `crates/contract-rs` が typify でコード生成する
+//! のは `packages/contract/schema/job-manifest.json` のみで、`EditSpec` は
+//! `packages/core/src/types.ts`(TS 側の「真実の源」)と本モジュールの手書き型を
+//! 両方保つ設計を維持している(`ig_publish://*` イベントと同じ判断 — 同一プロセス内
+//! (desktop の Rust⇄renderer)境界であり、複数言語間の真の共有契約ではないため
+//! codegen までのコストは払わない。理由の詳細は
+//! `apps/desktop/src-tauri/src/commands/publish/ig.rs` の
+//! 「typify によるコード生成は見送る」コメント参照)。
 //!
 //! フィールド名・optional 性は `packages/core/src/types.ts` に厳密に合わせている
 //! (TS 側の optional プロパティ = `undefined` は JSON.stringify でキー自体が
 //! 落ちるため、Rust 側は `Option<T>` + `#[serde(default)]` でキー欠落を
-//! `None` として受け付ける)。
+//! `None` として受け付ける)。この整合は手動同期に留まらず、
+//! `packages/contract/src/edit-spec.ts`(zod スキーマ)・
+//! `apps/desktop/src/test/editSpec-contract-types.test.ts`(TS 型レベルの相互代入
+//! 可能性)・`apps/desktop/src-tauri/src/commands/edit_spec_contract.rs`
+//! (本型のシリアライズ結果と `packages/contract/schema/edit-spec.json` の突き合わせ)
+//! の3テストで CI 上強制される(アーキテクチャレビュー指摘対応)。
 
 use serde::{Deserialize, Serialize};
 
