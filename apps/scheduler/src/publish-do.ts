@@ -32,12 +32,46 @@ function isAlreadyPublishedError(err: unknown): boolean {
 	);
 }
 
-/** ポーリング / リトライの間隔(ms)。 */
+/** ポーリング間隔(ms)。コンテナ処理完了待ち(IN_PROGRESS の reArm)専用。 */
 const POLL_INTERVAL_MS = 15_000;
 
 /**
+ * transient 失敗(handleFailure 経由。createContainer/getContainerStatus/publishContainer
+ * の例外や network エラーなど)の再試行バックオフ(ms)。attempts(1始まり)に対応する
+ * インデックスの待ち時間を使い、配列の長さを超える attempts は最後の値(上限)に固定する。
+ * IG API / ネットワークの短時間障害(数分〜小一時間程度)を乗り切れるよう指数的に伸ばす:
+ * 30秒 → 1分 → 2分 → 5分 → 10分 → 15分(以降15分固定)。
+ * maxAttempts の既定値8と組み合わせると、7回分のバックオフ合計は約48.5分となり、
+ * 「30〜60分程度は粘ってから failed 確定する」という設計目標に収まる
+ * (旧: 線形 15秒×n で 5 回、合計 150 秒 ≈ 2.5分では短時間の障害でも即 failed 化していた)。
+ *
+ * 恒久失敗(IG が明確に ERROR/EXPIRED を返したコンテナ)は decideNext の
+ * ERROR/EXPIRED 分岐がこの handleFailure を経由せず直接 markFailed するため、
+ * この配列はあくまで「原因不明の例外 = transient とみなして粘る」経路にのみ効く。
+ */
+const BACKOFF_SCHEDULE_MS = [
+	30_000, // 1回目
+	60_000, // 2回目
+	120_000, // 3回目
+	300_000, // 4回目
+	600_000, // 5回目
+	900_000, // 6回目以降(上限)
+];
+
+/** attempts(1始まり)に対応するバックオフ待ち時間を返す。配列超過分は最後の値で頭打ち。 */
+export function backoffDelayMs(attempts: number): number {
+	const idx = Math.min(
+		Math.max(attempts, 1) - 1,
+		BACKOFF_SCHEDULE_MS.length - 1,
+	);
+	// idx は Math.min/max により必ず [0, length-1] に収まるため non-null 断定は安全
+	// (noUncheckedIndexedAccess 対策。範囲外になり得ないので `??` フォールバックは書かない)。
+	return BACKOFF_SCHEDULE_MS[idx] as number;
+}
+
+/**
  * コンテナ処理の完了待ちポーリングを打ち切る上限(ms)。attempts ベースの
- * maxAttempts(既定5)は「正常処理でも数分かかる」ポーリングには小さすぎるため、
+ * maxAttempts(既定8)は「正常処理でも数分かかる」ポーリングには小さすぎるため、
  * ポーリング専用の別上限を設ける。この時間内に FINISHED/ERROR/EXPIRED のいずれにも
  * ならなければ timeout として failed 確定する(コンテナ自体は約24時間で失効するため、
  * それより十分手前で見切る)。
@@ -359,7 +393,8 @@ export class PublishDO implements DurableObject {
 
 	private maxAttempts(): number {
 		const n = Number.parseInt(this.env.MAX_ATTEMPTS, 10);
-		return Number.isFinite(n) && n > 0 ? n : 5;
+		// 既定8: BACKOFF_SCHEDULE_MS と組み合わせて合計約48.5分粘る設計(上のコメント参照)。
+		return Number.isFinite(n) && n > 0 ? n : 8;
 	}
 
 	private async loadJob(jobId: string): Promise<JobRow | null> {
@@ -439,7 +474,7 @@ export class PublishDO implements DurableObject {
 		)
 			.bind(attempts, message, now, jobId)
 			.run();
-		// 線形バックオフ(attempts に比例)で再 alarm。
-		await this.state.storage.setAlarm(now + POLL_INTERVAL_MS * attempts);
+		// 指数バックオフ(BACKOFF_SCHEDULE_MS)で再 alarm。
+		await this.state.storage.setAlarm(now + backoffDelayMs(attempts));
 	}
 }

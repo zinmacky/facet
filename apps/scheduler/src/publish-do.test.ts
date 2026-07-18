@@ -6,7 +6,7 @@ import {
 	InstagramError,
 	publishContainer,
 } from "./instagram.js";
-import { decideNext, PublishDO } from "./publish-do.js";
+import { backoffDelayMs, decideNext, PublishDO } from "./publish-do.js";
 
 // instagram の外部 API 呼び出しはスタブ化する。InstagramError は実クラスを残し、
 // isAlreadyPublishedError の instanceof 判定が効くようにする。
@@ -119,10 +119,12 @@ function applyWrite(row: FakeJob, sql: string, args: unknown[]): void {
  *   「loadJob 時点では pending だったが claim 実行時には既に他インスタンスが奪っていた」
  *   という同時発火の競合を模せる(row 自体は変更しない = 競合相手側の状態はこの
  *   フェイクの外側の出来事として扱う)。
+ * @param options.maxAttempts env.MAX_ATTEMPTS に渡す文字列(既定 "8")。maxAttempts()
+ *   のパース fallback(未設定/不正値なら 8)を検証するテスト用に上書きできる。
  */
 function makeHarness(
 	initial: Partial<FakeJob>,
-	options?: { claimSucceeds?: boolean },
+	options?: { claimSucceeds?: boolean; maxAttempts?: string },
 ) {
 	const row: FakeJob & { last_error?: string } = {
 		id: "job-1",
@@ -187,7 +189,9 @@ function makeHarness(
 	};
 	const env = {
 		R2_PUBLIC_BASE: "https://r2.example",
-		MAX_ATTEMPTS: "5",
+		// 既定8: BACKOFF_SCHEDULE_MS(30秒〜15分の指数バックオフ)と組み合わせて
+		// 合計約48.5分粘る本番デフォルトに合わせる。
+		MAX_ATTEMPTS: options?.maxAttempts ?? "8",
 		DB: db,
 	};
 	// storage に jobId を退避しておく(alarm は storage 経由で job を引く)。
@@ -232,14 +236,14 @@ describe("PublishDO.alarm: creating リトライ(H-1)", () => {
 
 	it("creating で attempts が上限に達すると failed 確定し alarm/deadline を掃除する", async () => {
 		mockCreateContainer.mockRejectedValueOnce(new InstagramError("transient"));
-		// MAX_ATTEMPTS=5。attempts=4 で失敗すると 5 に達し終端。
-		const { DO, row, store } = makeHarness({ status: "creating", attempts: 4 });
+		// MAX_ATTEMPTS=8(既定)。attempts=7 で失敗すると 8 に達し終端。
+		const { DO, row, store } = makeHarness({ status: "creating", attempts: 7 });
 		store.set("pollDeadline", Date.now() + 60_000);
 
 		await DO.alarm();
 
 		expect(row.status).toBe("failed");
-		expect(row.attempts).toBe(5);
+		expect(row.attempts).toBe(8);
 		expect(store.get("__alarm")).toBeUndefined();
 		expect(store.get("pollDeadline")).toBeUndefined();
 	});
@@ -291,7 +295,7 @@ describe("PublishDO.alarm: publish 冪等化(S-2)", () => {
 		const { DO, row } = makeHarness({
 			status: "publishing",
 			ig_container_id: "container-1",
-			attempts: 4, // 上限到達で failed 確定させ、終端を観測する
+			attempts: 7, // MAX_ATTEMPTS=8。上限到達で failed 確定させ、終端を観測する
 		});
 
 		await DO.alarm();
@@ -347,6 +351,102 @@ describe("PublishDO.fetch /start: pending → creating の原子的 claim(指摘
 		// claim に失敗しているので row 自体もこのインスタンス側からは変更されない
 		// (勝った側の別インスタンスが進める前提で、こちらは何もしない)。
 		expect(row.status).toBe("pending");
+	});
+});
+
+/**
+ * handleFailure の指数バックオフ(指摘2)の回帰テスト。旧: 線形 15秒×n backoff
+ * (5 attempts で合計 150 秒 ≈ 2.5分)は短時間の IG/ネットワーク障害でも
+ * 即座に恒久失敗させてしまっていた。新スケジュールは 30秒 → 1分 → 2分 → 5分 →
+ * 10分 → 15分(以降15分固定)で、maxAttempts の既定値8と組み合わせて
+ * 合計約48.5分粘ってから failed 確定する。
+ */
+describe("backoffDelayMs: 指数バックオフのスケジュール", () => {
+	it("attempts 1〜6 は 30秒, 1分, 2分, 5分, 10分, 15分の順に伸びる", () => {
+		expect(backoffDelayMs(1)).toBe(30_000);
+		expect(backoffDelayMs(2)).toBe(60_000);
+		expect(backoffDelayMs(3)).toBe(120_000);
+		expect(backoffDelayMs(4)).toBe(300_000);
+		expect(backoffDelayMs(5)).toBe(600_000);
+		expect(backoffDelayMs(6)).toBe(900_000);
+	});
+
+	it("attempts が配列長を超えても 15分で頭打ちになる(無制限には伸びない)", () => {
+		expect(backoffDelayMs(7)).toBe(900_000);
+		expect(backoffDelayMs(20)).toBe(900_000);
+	});
+});
+
+describe("PublishDO.handleFailure: 指数バックオフの適用と恒久失敗の即時 fail", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mockGetIgToken.mockResolvedValue("token");
+	});
+
+	it("transient 失敗(creating)の再試行は backoffDelayMs のとおりに alarm を張る", async () => {
+		mockCreateContainer.mockRejectedValueOnce(new InstagramError("transient"));
+		const { DO, row, store } = makeHarness({ status: "creating", attempts: 2 });
+		const before = Date.now();
+
+		await DO.alarm();
+
+		expect(row.status).toBe("creating");
+		expect(row.attempts).toBe(3);
+		const alarmAt = store.get("__alarm") as number;
+		// attempts=3 回目の失敗 → backoffDelayMs(3) = 120秒後に再試行。
+		expect(alarmAt - before).toBeGreaterThanOrEqual(120_000);
+		expect(alarmAt - before).toBeLessThan(120_000 + 5_000); // テスト実行の揺れを許容
+	});
+
+	it("恒久失敗(container status ERROR)は backoff を経由せず即座に failed 確定する", async () => {
+		mockGetContainerStatus.mockResolvedValue("ERROR");
+		const { DO, row, store } = makeHarness({
+			status: "processing",
+			ig_container_id: "container-1",
+			attempts: 0,
+		});
+		store.set("pollDeadline", Date.now() + 60_000);
+
+		await DO.alarm();
+
+		expect(row.status).toBe("failed");
+		// decideNext の ERROR 分岐は markFailed に直行するため、handleFailure による
+		// attempts++ は起きない(恒久失敗は再試行しない)。
+		expect(row.attempts).toBe(0);
+		expect(store.get("__alarm")).toBeUndefined();
+		expect(store.get("pollDeadline")).toBeUndefined();
+	});
+
+	it("恒久失敗(container status EXPIRED)も同様に即座に failed 確定する", async () => {
+		mockGetContainerStatus.mockResolvedValue("EXPIRED");
+		const { DO, row, store } = makeHarness({
+			status: "processing",
+			ig_container_id: "container-1",
+			attempts: 0,
+		});
+		store.set("pollDeadline", Date.now() + 60_000);
+
+		await DO.alarm();
+
+		expect(row.status).toBe("failed");
+		expect(row.attempts).toBe(0);
+		expect(store.get("__alarm")).toBeUndefined();
+	});
+
+	it("MAX_ATTEMPTS が未設定/不正値なら既定の8で失敗確定する(maxAttempts() の fallback)", async () => {
+		mockCreateContainer.mockRejectedValueOnce(new InstagramError("transient"));
+		const { DO, row } = makeHarness(
+			{ status: "creating", attempts: 7 },
+			{ maxAttempts: "not-a-number" },
+		);
+
+		await DO.alarm();
+
+		// fallback の 8 に達するので failed 確定(5 のままなら既に上限超過で挙動が
+		// 変わらないため、7→8 で初めて閾値を跨ぐこの attempts 値が fallback 値の
+		// 検証になる)。
+		expect(row.status).toBe("failed");
+		expect(row.attempts).toBe(8);
 	});
 });
 

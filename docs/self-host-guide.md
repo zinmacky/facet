@@ -154,7 +154,8 @@ pnpm migrate:remote   # = wrangler d1 migrations apply facet-jobs --remote
   `https://media.dysalgia.com` は作者自身のカスタムドメインなので、自分の
   バケットの URL に必ず差し替える)
 - `GRAPH_VERSION`: Graph API のバージョン(既定 `v21.0` のままで通常問題ない)
-- `MAX_ATTEMPTS`: ポーリング失敗時の最大リトライ回数(既定 5)
+- `MAX_ATTEMPTS`: transient 失敗時の最大リトライ回数(既定 8。指数バックオフ
+  [30秒, 1分, 2分, 5分, 10分, 15分(以降15分固定)] と組み合わせて合計約48.5分粘る)
 
 ### 2.3 シークレットの投入
 
