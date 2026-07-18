@@ -26,13 +26,15 @@
 //! ## ジョブ管理・進捗・キャンセル
 //!
 //! `commands::publish::ig` と同じ形(`job_id → CancelToken` の State、RAII
-//! `JobGuard`)を踏襲する。進捗・キャンセルは `google_youtube3::common::Delegate` の
-//! `cancel_chunk_upload`(resumable upload がチャンク境界ごとに呼ぶ)をフックして実装する
+//! `JobGuard`)を踏襲する。実装そのものは [`crate::commands::job_state`] に集約されて
+//! おり、[`YoutubeJobsState`] は `reframe`/`preview`・`ig` とジョブ ID 空間を分離する
+//! ための薄い newtype(`commands::publish::ig` モジュール冒頭コメント「ジョブ管理」
+//! 参照 — 3つ目の重複実装として YouTube が加わったことが統一のきっかけになった)。
+//! 進捗・キャンセルは `google_youtube3::common::Delegate` の `cancel_chunk_upload`
+//! (resumable upload がチャンク境界ごとに呼ぶ)をフックして実装する
 //! (`ProgressDelegate` 参照)。
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use google_youtube3::api::{Video, VideoSnippet, VideoStatus};
 use google_youtube3::common::{ContentRange, Delegate};
@@ -41,48 +43,29 @@ use media_core::CancelToken;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::commands::job_state;
+
 use super::credential_store::KeyringStore;
 use super::youtube_oauth::{self, YOUTUBE_UPLOAD_SCOPE};
 
 /// renderer が採番するジョブ ID(`ig`/`reframe`/`preview` と同じ形の型エイリアス)。
-pub type JobId = String;
+pub type JobId = job_state::JobId;
 
 /// 実行中の YouTube 公開ジョブの [`CancelToken`] を保持する State。
-/// `IgJobsState` とは別のジョブ ID 空間(§`commands::publish::ig` 冒頭コメントと同じ理由:
-/// IG と YouTube はライフサイクルが異なる独立した実装のため共有しない、YAGNI)。
+///
+/// `IgJobsState` とは別のジョブ ID 空間(IG と YouTube はライフサイクルが異なる独立した
+/// 実装のため共有しない)。共通実装は [`job_state::JobsState`] に集約されており、本
+/// struct はジョブ ID 空間を分離するための薄い newtype(`Deref` で
+/// `try_register`/`get`/`cancel`/`remove` をそのまま委譲する。
+/// `commands::publish::ig` モジュール冒頭コメント「ジョブ管理」参照)。
 #[derive(Default)]
-pub struct YoutubeJobsState(Mutex<HashMap<JobId, CancelToken>>);
+pub struct YoutubeJobsState(job_state::JobsState);
 
-impl YoutubeJobsState {
-	fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<JobId, CancelToken>> {
-		self.0
-			.lock()
-			.unwrap_or_else(|poisoned| poisoned.into_inner())
-	}
+impl std::ops::Deref for YoutubeJobsState {
+	type Target = job_state::JobsState;
 
-	fn register(&self, job_id: JobId, token: CancelToken) {
-		self.lock().insert(job_id, token);
-	}
-
-	fn get(&self, job_id: &str) -> Option<CancelToken> {
-		self.lock().get(job_id).cloned()
-	}
-
-	fn remove(&self, job_id: &str) {
-		self.lock().remove(job_id);
-	}
-}
-
-/// [`run_youtube_publish`] 終了時に必ず `jobs.remove(job_id)` を呼ぶ RAII ガード
-/// (`commands::publish::ig::JobGuard` と同じ考え方)。
-struct JobGuard<'a> {
-	jobs: &'a YoutubeJobsState,
-	job_id: &'a str,
-}
-
-impl Drop for JobGuard<'_> {
-	fn drop(&mut self) {
-		self.jobs.remove(self.job_id);
+	fn deref(&self) -> &Self::Target {
+		&self.0
 	}
 }
 
@@ -157,7 +140,9 @@ const PROGRESS_EMIT_STEP_PERCENT: f64 = 1.0;
 ///
 /// OAuth クライアント・トークンの有無を先に確認し、いずれかが未設定ならジョブを
 /// 開始せず `Err` を返す(アップロード開始前に判明できる失敗は同期エラーとして返す、
-/// `ig::start_impl` と同じ方針)。
+/// `ig::start_impl` と同じ方針)。同じ `job_id` のジョブが既に実行中の場合も
+/// `try_register` が拒否し、ジョブを開始せず `Err` を返す(`ig::start_impl` と同じ
+/// GHSA-6cx9-j28r-f866 対応の挙動。`commands::job_state` へ統一した際に揃えた)。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_impl(
 	app: AppHandle,
@@ -184,7 +169,9 @@ pub(crate) async fn start_impl(
 	let authenticator = youtube_oauth::build_authenticator_for_publish(&KeyringStore).await?;
 
 	let token = CancelToken::new();
-	jobs.register(job_id.clone(), token.clone());
+	if !jobs.try_register(job_id.clone(), token.clone()) {
+		return Err("このジョブは既に実行中です".to_string());
+	}
 
 	let handle = tauri::async_runtime::spawn(run_youtube_publish(
 		app.clone(),
@@ -223,15 +210,7 @@ pub(crate) async fn start_impl(
 /// チャンク境界(`ProgressDelegate::cancel_chunk_upload`)でのみ反映されるため、
 /// `ig.rs` の R2 アップロードと同じ「協調的キャンセル」の性質を持つ。
 pub(crate) fn cancel_impl(job_id: JobId, jobs: State<'_, YoutubeJobsState>) -> Result<(), String> {
-	match jobs.get(&job_id) {
-		Some(token) => {
-			token.cancel();
-			Ok(())
-		}
-		None => Err(format!(
-			"未知のジョブです(既に完了した可能性があります): {job_id}"
-		)),
-	}
+	jobs.cancel(&job_id)
 }
 
 /// resumable upload のチャンク境界ごとに呼ばれ、進捗イベントの発火とキャンセル反映を行う
@@ -289,10 +268,7 @@ async fn run_youtube_publish(
 	authenticator: youtube_oauth::YoutubeAuthenticator,
 ) {
 	let jobs = app.state::<YoutubeJobsState>();
-	let _guard = JobGuard {
-		jobs: &jobs,
-		job_id: &job_id,
-	};
+	let _guard = job_state::JobGuard::new(&jobs, &job_id);
 
 	// アップロード前にアクセストークンを先行取得する。期限切れなら refresh され、
 	// refresh 不能(失効・取り消し)の場合は yup-oauth2 が対話フロー(ブラウザでの
@@ -529,14 +505,38 @@ mod tests {
 	}
 
 	#[test]
-	fn youtube_jobs_state_register_get_remove_roundtrip() {
+	fn youtube_jobs_state_try_register_get_remove_roundtrip() {
 		let jobs = YoutubeJobsState::default();
 		let token = CancelToken::new();
-		jobs.register("job-1".to_string(), token.clone());
+		assert!(jobs.try_register("job-1".to_string(), token.clone()));
 
 		assert!(jobs.get("job-1").is_some());
 		jobs.remove("job-1");
 		assert!(jobs.get("job-1").is_none());
+	}
+
+	#[test]
+	fn youtube_jobs_state_try_register_rejects_duplicate_job_id() {
+		// アーキテクチャレビュー指摘対応: IG (GHSA-6cx9-j28r-f866) にのみ入っていた
+		// 二重登録拒否を YouTube にも展開した(`commands::job_state` への統一)。
+		let jobs = YoutubeJobsState::default();
+		let token_a = CancelToken::new();
+		let token_b = CancelToken::new();
+
+		assert!(jobs.try_register("job-1".to_string(), token_a));
+		assert!(!jobs.try_register("job-1".to_string(), token_b));
+
+		// remove 後は同じ job_id を再登録できる(完了済みジョブの再試行は妨げない)。
+		jobs.remove("job-1");
+		assert!(jobs.try_register("job-1".to_string(), CancelToken::new()));
+	}
+
+	#[test]
+	fn youtube_publish_cancel_unknown_job_returns_error() {
+		// `cancel_impl` は `jobs.cancel(&job_id)`(`job_state::JobsState::cancel`)への
+		// 薄いラッパのため、`State<'_, T>` を構築せずここで直接検証できる。
+		let jobs = YoutubeJobsState::default();
+		assert!(jobs.cancel("no-such-job").is_err());
 	}
 
 	#[test]

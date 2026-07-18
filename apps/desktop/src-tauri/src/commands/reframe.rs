@@ -4,6 +4,10 @@
 //! `reframe_cancel` はジョブ ID 空間を [`crate::commands::preview`] と共有しており、
 //! `preview_start` が受け取った `jobId` に対しても同じコマンドでキャンセルできる
 //! (両モジュールとも同一の [`JobsState`] に登録するため。`preview.rs` 冒頭コメント参照)。
+//! [`JobsState`] 自体の実装(try_register/get/cancel/remove 等)は
+//! [`crate::commands::job_state`] に集約されている(アーキテクチャレビュー指摘対応。
+//! `commands::publish::ig`/`commands::publish::youtube` と重複していた3実装を統一した。
+//! 詳細は `job_state` モジュール冒頭コメント参照)。
 //!
 //! ## renderer 向け API
 //!
@@ -91,10 +95,15 @@
 //!
 //! ## State / スレッド設計
 //!
-//! - [`JobsState`] は `Mutex<HashMap<JobId, CancelToken>>` を保持する(`lib.rs` の
-//!   `.manage(JobsState::default())` でアプリ全体に 1 つ登録する)。
-//! - `reframe_start` は renderer から渡された `job_id` に対して [`CancelToken`] を発行して
-//!   State に挿入し、同じトークンの clone(`Arc<AtomicBool>` の共有、安価)を
+//! - [`JobsState`] は [`crate::commands::job_state::JobsState`]
+//!   (`Mutex<HashMap<JobId, CancelToken>>`)をラップした newtype(`lib.rs` の
+//!   `.manage(JobsState::default())` でアプリ全体に 1 つ登録する)。共通実装は
+//!   `job_state` に集約しているが、Tauri の `State<T>` は型ごとにインスタンスを管理する
+//!   ため、`preview`/`ig`/`youtube` とジョブ ID 空間を分離するために newtype で包んでいる
+//!   (`job_state` モジュール冒頭コメント参照)。
+//! - `reframe_start` は renderer から渡された `job_id` に対して [`CancelToken`] を発行し、
+//!   `try_register` で State に挿入する(既に同じ `job_id` が登録済みなら `Err` を返し
+//!   ジョブを開始しない)。同じトークンの clone(`Arc<AtomicBool>` の共有、安価)を
 //!   ブロッキングタスクへ渡す。
 //! - `reframe_cancel` は State からトークンを取得して `cancel()` を呼ぶだけ
 //!   (トークン自体はブロッキングタスク側が `is_cancelled()` をループ境界で見ている
@@ -128,10 +137,8 @@
 //! `cache_dir` 配下に書かれ、ユーザーから見える場所には出ないため
 //! (`media_core::preview::render_preview` は `staging_dir: None` のまま呼ぶ)。
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use media_core::encoder_select::{self, EncoderChoice};
@@ -140,63 +147,27 @@ use media_core::{encode, fit, CancelToken, EncoderSelection, Progress, ReframeOp
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::commands::job_state;
+
 /// renderer が採番し `reframe_start`/`preview_start` へ渡すジョブ ID。
 /// 進捗/完了イベント名の組み立てにも使う。
-pub type JobId = String;
+pub type JobId = job_state::JobId;
 
-/// 実行中ジョブの [`CancelToken`] を保持する State。
+/// 実行中ジョブの [`CancelToken`] を保持する State(reframe/preview 共有のジョブ ID
+/// 空間)。
 ///
-/// `Mutex` は libav 側の重い処理とは無関係な単純な map 操作にのみ使うため、
-/// 非同期 Mutex(`tokio::sync::Mutex`)ではなく `std::sync::Mutex` で十分
-/// (ロック区間はごく短く、await をまたがない)。
+/// 共通実装は [`job_state::JobsState`] に集約しており、本 struct はジョブ ID 空間を
+/// `publish::ig`/`publish::youtube` と分離するための薄い newtype(`Deref` で
+/// `try_register`/`get`/`cancel`/`remove` をそのまま委譲する。`job_state` モジュール
+/// 冒頭コメント「統一した経緯」参照)。
 #[derive(Default)]
-pub struct JobsState(Mutex<HashMap<JobId, CancelToken>>);
+pub struct JobsState(job_state::JobsState);
 
-impl JobsState {
-	/// `Mutex` がポイズンされていても(他スレッドの panic 後でも)復旧してロックを取る。
-	/// `unwrap`/`expect` を使わずに済ませるための薄いラッパ。
-	fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<JobId, CancelToken>> {
-		self.0
-			.lock()
-			.unwrap_or_else(|poisoned| poisoned.into_inner())
-	}
+impl std::ops::Deref for JobsState {
+	type Target = job_state::JobsState;
 
-	/// 呼び出し側(renderer)が採番した `job_id` に対して新しい [`CancelToken`] を登録する。
-	///
-	/// jobId は Rust 側では採番しない(renderer 側で `crypto.randomUUID()` 等により
-	/// 採番する。理由はモジュール冒頭コメント「jobId 採番をフロントエンドへ移した理由」
-	/// 参照)。同じ `job_id` で複数回 `register` を呼ぶと既存のトークンを上書きする
-	/// (renderer 側は毎回新しい UUID を採番するため、通常はこの経路を通らない)。
-	///
-	/// `pub(crate)`: `commands::preview` がジョブ ID 空間を共有する
-	/// (`preview_start` も同じ [`JobsState`] に登録し、`reframe_cancel` を
-	/// そのままキャンセルコマンドとして再利用できるようにするため)。
-	pub(crate) fn register(&self, job_id: JobId, token: CancelToken) {
-		self.lock().insert(job_id, token);
-	}
-
-	/// `job_id` に紐づく [`CancelToken`] の clone を返す(`Arc` 共有なので安価)。
-	pub(crate) fn get(&self, job_id: &str) -> Option<CancelToken> {
-		self.lock().get(job_id).cloned()
-	}
-
-	/// `job_id` の [`CancelToken`] に `cancel()` を呼ぶ。未登録(既に完了済み含む)なら
-	/// `Err` を返す。
-	pub(crate) fn cancel(&self, job_id: &str) -> Result<(), String> {
-		match self.lock().get(job_id) {
-			Some(token) => {
-				token.cancel();
-				Ok(())
-			}
-			None => Err(format!(
-				"未知のジョブです(既に完了した可能性があります): {job_id}"
-			)),
-		}
-	}
-
-	/// ジョブ完了時にエントリを削除する。
-	pub(crate) fn remove(&self, job_id: &str) {
-		self.lock().remove(job_id);
+	fn deref(&self) -> &Self::Target {
+		&self.0
 	}
 }
 
@@ -375,7 +346,10 @@ fn encoder_choice_from_param(
 ///
 /// `encoder` は省略可能(省略時は `None`)。[`encoder_choice_from_param`] で解決し、
 /// 無効な値であればジョブを登録せずに `Err` を返す(モジュール doc §renderer 向け API
-/// 参照)。
+/// 参照)。同じ `job_id` のジョブが既に実行中の場合も `try_register` が拒否し、
+/// ジョブを開始せず `Err` を返す(`commands::job_state` へ統一した際に IG と同じ
+/// 安全側の挙動に揃えた。renderer は毎回新しい UUID を採番するため通常この経路は
+/// 通らない)。
 #[tauri::command]
 pub async fn reframe_start(
 	app: AppHandle,
@@ -391,7 +365,9 @@ pub async fn reframe_start(
 	let staging_dir = resolve_staging_dir(&app)?;
 
 	let token = CancelToken::new();
-	jobs.register(job_id.clone(), token);
+	if !jobs.try_register(job_id.clone(), token) {
+		return Err("このジョブは既に実行中です".to_string());
+	}
 
 	let app_for_task = app.clone();
 	let job_id_for_task = job_id;
@@ -488,22 +464,6 @@ fn run_job(
 	);
 }
 
-/// [`run_job`] 終了時に必ず `jobs.remove(job_id)` を呼ぶ RAII ガード(P1-5)。
-///
-/// `pub(crate)`: [`run_media_job`] が保持し、`commands::preview` からも
-/// (`run_media_job` 経由で間接的に)使われる。`JobsState` 自体を共有しているのと
-/// 同じ理由で、ガードもここで一元定義する。
-pub(crate) struct JobGuard<'a> {
-	pub(crate) jobs: &'a JobsState,
-	pub(crate) job_id: &'a str,
-}
-
-impl Drop for JobGuard<'_> {
-	fn drop(&mut self) {
-		self.jobs.remove(self.job_id);
-	}
-}
-
 /// `reframe://error/{jobId}` / `preview://error/{jobId}` イベント共通のペイロード
 /// (キャンセルも含む。`MediaError` の `Display` をそのまま文字列化する。P2)。
 #[derive(Debug, Clone, Serialize)]
@@ -513,7 +473,8 @@ pub(crate) struct JobErrorPayload {
 }
 
 /// [`reframe::run_job`] と [`crate::commands::preview::run_job`] に共通する
-/// ジョブ実行の骨格を集約する(P2: Wave A で共有した [`JobGuard`] の続き)。
+/// ジョブ実行の骨格を集約する(P2: Wave A で共有した
+/// [`job_state::JobGuard`](crate::commands::job_state::JobGuard) の続き)。
 ///
 /// 両モジュールの `run_job` は「State からトークンを取得 → [`JobGuard`] で RAII 解放を
 /// 予約 → 進捗 emit クロージャを組み立て → 本体処理を `catch_unwind` で包んで実行 →
@@ -554,10 +515,7 @@ pub(crate) fn run_media_job<T, D>(
 
 	// `jobs.remove(job_id)` を関数を抜けるあらゆる経路(正常終了・catch_unwind 後の
 	// 通常 return・将来の早期 return 追加)で保証する RAII ガード。
-	let _remove_on_exit = JobGuard {
-		jobs: &jobs,
-		job_id,
-	};
+	let _remove_on_exit = job_state::JobGuard::new(&jobs, job_id);
 
 	let app_for_progress = app.clone();
 	let on_progress = move |progress: Progress| {
@@ -611,15 +569,17 @@ pub fn reframe_cancel(job_id: String, jobs: State<'_, JobsState>) -> Result<(), 
 mod tests {
 	use super::*;
 
-	// --- JobsState: 登録 -> キャンセル -> トークンが cancelled になることの確認
-	//     (App ハンドルに依存しないロジック部分のユニットテスト)。
+	// --- JobsState: newtype 越しに job_state::JobsState の try_register/cancel/remove が
+	//     問題なく委譲されることの確認。共通実装の網羅的なテストは `job_state` モジュール
+	//     側にもあるが(集約前からの回帰確認として)本モジュールの既存アサーションは
+	//     `try_register` への追随のみ行い、意図は変えずに残してある。
 
 	#[test]
-	fn register_then_cancel_marks_token_cancelled() {
+	fn try_register_then_cancel_marks_token_cancelled() {
 		let jobs = JobsState::default();
 		let token = CancelToken::new();
 		let job_id = "job-a".to_string();
-		jobs.register(job_id.clone(), token.clone());
+		assert!(jobs.try_register(job_id.clone(), token.clone()));
 
 		assert!(!token.is_cancelled(), "登録直後はキャンセルされていない");
 
@@ -640,6 +600,22 @@ mod tests {
 	}
 
 	#[test]
+	fn try_register_rejects_duplicate_job_id() {
+		// アーキテクチャレビュー指摘対応: reframe/preview 側もIG と同じく二重開始を
+		// 拒否する(GHSA-6cx9-j28r-f866 の修正を reframe/preview にも展開)。
+		let jobs = JobsState::default();
+		let token_a = CancelToken::new();
+		let token_b = CancelToken::new();
+		let job_id = "job-a".to_string();
+
+		assert!(jobs.try_register(job_id.clone(), token_a));
+		assert!(
+			!jobs.try_register(job_id.clone(), token_b),
+			"同じ job_id での2回目の登録は拒否される"
+		);
+	}
+
+	#[test]
 	fn cancel_unknown_job_returns_error() {
 		let jobs = JobsState::default();
 		let result = jobs.cancel("no-such-job");
@@ -651,7 +627,7 @@ mod tests {
 		let jobs = JobsState::default();
 		let token = CancelToken::new();
 		let job_id = "job-a".to_string();
-		jobs.register(job_id.clone(), token);
+		jobs.try_register(job_id.clone(), token);
 
 		jobs.remove(&job_id);
 
@@ -669,8 +645,8 @@ mod tests {
 		let token_b = CancelToken::new();
 		let job_a = "job-a".to_string();
 		let job_b = "job-b".to_string();
-		jobs.register(job_a.clone(), token_a.clone());
-		jobs.register(job_b.clone(), token_b.clone());
+		jobs.try_register(job_a.clone(), token_a.clone());
+		jobs.try_register(job_b.clone(), token_b.clone());
 
 		jobs.cancel(&job_a).expect("job_a must exist");
 

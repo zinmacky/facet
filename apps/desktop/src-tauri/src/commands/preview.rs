@@ -9,8 +9,10 @@
 //! **キャンセルは専用コマンドを持たず、`reframe_cancel` をそのまま使う** —
 //! `preview_start` も [`JobsState`](super::reframe::JobsState) にジョブを登録するため、
 //! ジョブ ID 空間が `reframe_start` と共有されており、`reframe_cancel(jobId)` は
-//! どちらのジョブに対しても機能する(`reframe.rs` の `JobsState::register`/`get`/`remove`
-//! を `pub(crate)` にして本モジュールから再利用している)。
+//! どちらのジョブに対しても機能する(`JobsState` の実装は
+//! [`crate::commands::job_state`] に集約されており、`reframe.rs` の newtype が
+//! `try_register`/`get`/`remove`/`cancel` を委譲している。本モジュールはその newtype を
+//! そのまま再利用する)。
 //!
 //! ## renderer 向け API
 //!
@@ -163,6 +165,10 @@ fn resolve_cache_dir(app: &AppHandle, quality: RenderQuality) -> Result<PathBuf,
 /// この関数はジョブ登録後すぐに返る(完了を待たない)。進捗・完了は上記モジュール doc の
 /// Tauri イベントで通知する。キャッシュヒット時は再エンコードせず、ほぼ即座に `done`
 /// イベントが発火する。
+///
+/// 同じ `job_id` のジョブ(`reframe_start` 経由のものも含む — ジョブ ID 空間を共有する)
+/// が既に実行中の場合は `try_register` が拒否し、ジョブを開始せず `Err` を返す
+/// (`reframe_start` と同じ挙動。`reframe.rs` の doc コメント参照)。
 #[tauri::command]
 pub async fn preview_start(
 	app: AppHandle,
@@ -176,7 +182,9 @@ pub async fn preview_start(
 	let cache_dir = resolve_cache_dir(&app, quality)?;
 
 	let token = CancelToken::new();
-	jobs.register(job_id.clone(), token);
+	if !jobs.try_register(job_id.clone(), token) {
+		return Err("このジョブは既に実行中です".to_string());
+	}
 
 	let app_for_task = app.clone();
 	let job_id_for_task = job_id;
@@ -297,11 +305,28 @@ mod tests {
 		let jobs = JobsState::default();
 		let token = CancelToken::new();
 		let job_id = "job-a".to_string();
-		jobs.register(job_id.clone(), token.clone());
+		assert!(jobs.try_register(job_id.clone(), token.clone()));
 
 		// reframe_cancel が使う cancel() を preview 側で登録したジョブに対して呼べる。
 		jobs.cancel(&job_id)
 			.expect("shared job must be cancellable");
 		assert!(token.is_cancelled());
+	}
+
+	#[test]
+	fn preview_try_register_rejects_job_id_already_used_by_reframe() {
+		// アーキテクチャレビュー指摘対応: reframe/preview はジョブ ID 空間を共有するため、
+		// 片方が登録した job_id はもう片方の try_register からも拒否されるべきこと
+		// (どちらの呼び出し元から見ても「二重開始」であることに変わりはない)を確認する。
+		let jobs = JobsState::default();
+		let token_from_reframe = CancelToken::new();
+		let token_from_preview = CancelToken::new();
+		let job_id = "job-a".to_string();
+
+		assert!(jobs.try_register(job_id.clone(), token_from_reframe));
+		assert!(
+			!jobs.try_register(job_id.clone(), token_from_preview),
+			"reframe 側が登録済みの job_id は preview_start からも拒否される"
+		);
 	}
 }
