@@ -68,6 +68,27 @@ pub const AAC_MAX_SAMPLE_RATE: u32 = 48_000;
 /// 必要に応じてバッファを再確保するため、あくまで初期ヒントでしかない)。
 const FLUSH_SAMPLE_HINT: usize = 4096;
 
+/// FFmpeg の `AVFrame.data` は `[*mut u8; 8]` の固定長配列(`AVFrame` 定義由来)。
+/// 8ch を超える(= 9ch 以上の)planar 音声は 9 番目以降のプレーンへのポインタが
+/// `data` に収まらず `extended_data` 側にのみ格納されるため、
+/// [`audio_plane_bytes`]/[`audio_plane_bytes_mut`] の `data[index]` 直接添字
+/// アクセスは 9ch 以上の planar 音声に対して未対応(範囲外アクセス、
+/// GHSA-2899-x373-j96f)。
+const AVFRAME_DATA_PLANES: usize = 8;
+
+/// `format` が planar かつ `channels` が [`AVFRAME_DATA_PLANES`] を超える場合は
+/// エラーにする純関数。`open_audio_encoder` から、出力(エンコーダ)側の
+/// フォーマット・チャンネル数が確定した時点で呼ぶ。現行パイプラインは AAC 固定
+/// (最大 8ch)のため live bug ではないが、将来の入力/エンコーダ変更に備えた
+/// 防御的ガード。`extended_data` への完全対応はスコープ外 — 8ch 上限の明示
+/// チェックのみ行う。
+fn check_planar_channel_limit(format: format::Sample, channels: i32) -> Result<()> {
+	if format.is_planar() && channels.max(0) as usize > AVFRAME_DATA_PLANES {
+		return Err(MediaError::UnsupportedPlanarChannelCount { channels });
+	}
+	Ok(())
+}
+
 /// 入力サンプルレートから出力(AAC)サンプルレートを決定する純関数。
 /// 入力が [`AAC_MAX_SAMPLE_RATE`] 以下ならそのまま、超えるならダウンサンプルする。
 pub fn decide_sample_rate(input_rate: u32) -> u32 {
@@ -189,6 +210,10 @@ fn open_audio_encoder(
 
 	let sample_format = pick_sample_format(codec);
 	let channel_layout = pick_channel_layout(codec, source.decoder.channel_layout());
+	// ストリーム設定(出力フォーマット・チャンネルレイアウト)がここで確定するため、
+	// フレームごとのホットパスに入れず 1 箇所でチェックする(`check_planar_channel_limit`
+	// 冒頭コメント参照、GHSA-2899-x373-j96f)。
+	check_planar_channel_limit(sample_format, channel_layout.channels())?;
 	let rate = decide_sample_rate(source.decoder.rate());
 
 	let mut encoder_ctx = codec::context::Context::new_with_codec(codec)
@@ -845,5 +870,35 @@ mod tests {
 		let fifo = AudioFifo::new(format, ChannelLayout::STEREO, 48_000);
 		let mut fifo = fifo;
 		assert!(fifo.pop_remainder().is_none());
+	}
+
+	// --- check_planar_channel_limit: GHSA-2899-x373-j96f -----------------------------
+	//
+	// `AVFrame.data` は `[*mut u8; 8]` 固定長のため、9ch を超える planar 音声は
+	// `data[index]` の直接添字アクセス(`audio_plane_bytes`/`audio_plane_bytes_mut`)が
+	// 範囲外になりうる。8ch は許容、9ch はエラーという境界値を検証する。
+
+	#[test]
+	fn check_planar_channel_limit_allows_eight_channels() {
+		let format = format::Sample::F32(format::sample::Type::Planar);
+		assert!(check_planar_channel_limit(format, 8).is_ok());
+	}
+
+	#[test]
+	fn check_planar_channel_limit_rejects_nine_channels() {
+		let format = format::Sample::F32(format::sample::Type::Planar);
+		let err = check_planar_channel_limit(format, 9).expect_err("9ch は未対応");
+		assert!(matches!(
+			err,
+			MediaError::UnsupportedPlanarChannelCount { channels: 9 }
+		));
+	}
+
+	#[test]
+	fn check_planar_channel_limit_ignores_non_planar_formats() {
+		// packed(interleaved)フォーマットはプレーンが 1 個のみで `data[0]` しか
+		// 使わないため、チャンネル数によらず本ガードの対象外。
+		let format = format::Sample::F32(format::sample::Type::Packed);
+		assert!(check_planar_channel_limit(format, 16).is_ok());
 	}
 }
