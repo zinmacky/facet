@@ -1,6 +1,8 @@
-//! `packages/contract/src/job-manifest.ts` の `JobManifest`/`JobCreateResponse` に
-//! 対応する型は `contract-rs`(`packages/contract/schema/job-manifest.json` から
-//! typify で codegen する crate、Issue #93)からの生成型を re-export して使う。
+//! `packages/contract/src/job-manifest.ts` の `JobManifest`/`JobCreateResponse`/
+//! `JobRecord` に対応する型は `contract-rs`(`packages/contract/schema/job-manifest.json`
+//! から typify で codegen する crate、Issue #93)からの生成型を re-export して使う。
+//! `JobRecord`(`GET /jobs/:id` の応答形状)は `jobs::scheduler_client::fetch_job` が
+//! 使う(desktop が IG 予約投稿の最終成否を追跡しない問題への対応、architecture review 指摘)。
 //!
 //! 生成型は他クレート(`contract-rs`)で定義されているため、Rust の orphan rule に
 //! より本モジュールから `impl JobManifest { .. }` のような inherent impl を追加
@@ -15,15 +17,15 @@
 //! Phase 0 のタスクとして据え置かれているため、ここでは「Rust 側は REELS のみを
 //! 送出する」という運用上の決定にとどめる(contract の zod スキーマは変更しない)。
 //!
-//! `JobCreateResponse.status` を敢えて `JobStatus` enum ではなく `String` として
-//! 生成させている理由は `crates/contract-rs/build.rs` 冒頭コメント参照
+//! `JobCreateResponse.status`/`JobRecord.status` を敢えて `JobStatus` enum ではなく
+//! `String` として生成させている理由は `crates/contract-rs/build.rs` 冒頭コメント参照
 //! (scheduler が新しい status 値を追加しても、自動更新にタイムラグのある desktop
 //! 側のデシリアライズが壊れないようにするため)。
 
 use std::num::NonZeroU64;
 
 use contract_rs::MediaType;
-pub use contract_rs::{JobCreateResponse, JobManifest};
+pub use contract_rs::{JobCreateResponse, JobManifest, JobRecord};
 use thiserror::Error;
 
 /// `POST /jobs` のリクエストボディ(contract-rs の生成型 `JobManifest`)を組み立てる。

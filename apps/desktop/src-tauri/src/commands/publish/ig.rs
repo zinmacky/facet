@@ -30,6 +30,16 @@
 //! // §commands/publish/mod.rs モジュール冒頭コメント)。
 //!
 //! await invoke("ig_publish_cancel", { jobId });
+//!
+//! // 予約公開の最終成否の追跡(アーキテクチャレビュー指摘対応)。`ig_publish_start` の
+//! // done イベントは scheduler が「受理した」ことしか意味せず、実際の IG 側公開成否
+//! // (published/failed)はここでは分からない。呼び出し側は done イベントの
+//! // `schedulerJobId` を保持しておき、`ig_job_status` でポーリング/手動確認する。
+//! const outcome = await invoke("ig_job_status", { schedulerJobId: done.schedulerJobId });
+//! // outcome.outcome: "found" | "not_found" | "unauthorized" | "service_unavailable" | "network"
+//! // "found" の場合のみ outcome.status: "pending" | "creating" | "processing" |
+//! // "publishing" | "published" | "failed" が読める(JobRecord のフィールドが
+//! // フラットに乗る。§IgJobStatusOutcome 冒頭コメント)。
 //! ```
 //!
 //! ## 事前検証と非同期本体の分離
@@ -60,7 +70,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
-use crate::jobs::manifest;
+use crate::jobs::manifest::{self, JobRecord};
 use crate::jobs::r2_upload::{self, R2UploadError};
 use crate::jobs::scheduler_client::{self, EnqueueError};
 use crate::jobs::sigv4::{self, R2Credentials};
@@ -383,6 +393,94 @@ pub(crate) fn cancel_impl(job_id: JobId, jobs: State<'_, IgJobsState>) -> Result
 			"未知のジョブです(既に完了した可能性があります): {job_id}"
 		)),
 	}
+}
+
+/// [`job_status_impl`] の結果。`commands::publish::scheduler_check::ConnectionCheckResult`
+/// と同じ設計判断: 呼び出し側(`usePublishExtras.tsx`)が分岐を必要とする結果は
+/// `Result::Ok` 側のタグ付き enum とし、`Result::Err(String)` は「呼び出し自体が
+/// 想定外に失敗した」場合(キーチェーン読み出し失敗・scheduler 未設定等)のみに使う。
+///
+/// レビュー指摘対応: 当初は `FetchJobError` を `.to_string()` で一律 `Err(String)` に
+/// 潰していたが、それだと呼び出し側が「404(NotFound、恒久的に回復しない)」と
+/// 「401/503/ネットワーク瞬断(一過性・再試行で回復しうる)」を区別できず、404 の場合も
+/// ポーリング対象から外さず永久に再試行し続けてしまう(desktop が IG 予約投稿の
+/// 最終成否を追跡しない問題の修正が別の形で再発する)。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum IgJobStatusOutcome {
+	/// 取得成功。`JobRecord` のフィールドはタグ(`outcome`)と並べてフラットに
+	/// シリアライズされる(internally-tagged enum の newtype variant の挙動。
+	/// `JobRecord` は "outcome" というフィールドを持たないためタグと衝突しない)。
+	/// `Box` は他 variant(ユニット/`{ detail: String }`)とのサイズ差を抑えるため
+	/// (clippy::large_enum_variant)。`Box<T>` のシリアライズは `T` に委譲されるため
+	/// JSON 表現には影響しない。
+	Found(Box<JobRecord>),
+	/// 指定された `scheduler_job_id` のジョブが見つからない(404)。`ig_publish_start` の
+	/// done イベント(= enqueue 受理成功)の後にこれが起きるのは、ジョブが scheduler 側で
+	/// 削除された等の実質的に回復不能な事象のため、呼び出し側はポーリング対象から外し
+	/// 終端エラーとして扱うべき(他の一過性エラーとは区別する)。
+	NotFound,
+	/// Bearer トークンが scheduler 側と一致しない(401)。トークン再設定で回復しうるため
+	/// `NotFound` とは区別し、呼び出し側はポーリング対象から外さない。
+	Unauthorized,
+	/// scheduler 側で `SCHEDULER_API_TOKEN` が未設定(503, fail-closed)。
+	ServiceUnavailable,
+	/// 接続不可・タイムアウト・応答解析失敗・想定外のステータスコード等の一過性エラー。
+	Network { detail: String },
+}
+
+impl From<scheduler_client::FetchJobError> for IgJobStatusOutcome {
+	fn from(err: scheduler_client::FetchJobError) -> Self {
+		use scheduler_client::FetchJobError;
+		match err {
+			FetchJobError::Unauthorized => IgJobStatusOutcome::Unauthorized,
+			FetchJobError::ServiceUnavailable => IgJobStatusOutcome::ServiceUnavailable,
+			FetchJobError::NotFound => IgJobStatusOutcome::NotFound,
+			FetchJobError::Network(detail) => IgJobStatusOutcome::Network { detail },
+		}
+	}
+}
+
+/// `scheduler_job_id`(`IgPublishDone.scheduler_job_id`。scheduler が発行したジョブ ID)の
+/// 現在の状態を scheduler から取得する(ロジック本体。`#[tauri::command]` は `mod.rs` 側に
+/// 付ける — 理由は [`start_impl`] 冒頭コメント参照)。
+///
+/// desktop が IG 予約投稿の最終成否を追跡しない問題(アーキテクチャレビュー指摘)への
+/// 対応で追加した。`ig_publish_start` の done イベントは「scheduler がジョブ登録を
+/// 受理した」ことまでしか保証せず、その後の IG 側公開(published/failed)は本コマンドで
+/// 別途確認する必要がある(§本モジュール冒頭コメント renderer 向け API)。
+///
+/// `start_impl` と同様、scheduler の URL・トークンはここでキーチェーンの保存値からのみ
+/// 読む(renderer から受け取らない。GHSA-j74q-9v5x-87w3 対応)。`Result::Err(String)` は
+/// キーチェーン未設定等の想定外ケースのみ(§[`IgJobStatusOutcome`] 冒頭コメント)。
+pub(crate) async fn job_status_impl(
+	scheduler_job_id: String,
+) -> Result<IgJobStatusOutcome, String> {
+	let scheduler_token = KeyringStore
+		.get(SERVICE, KEY_SCHEDULER_API_TOKEN)?
+		.ok_or_else(|| "scheduler の API トークンが未設定です。".to_string())?;
+	let scheduler_url = KeyringStore
+		.get(SERVICE, KEY_SCHEDULER_URL)?
+		.ok_or_else(|| {
+			"scheduler の URL が未設定です。設定画面から入力してください。".to_string()
+		})?;
+	scheduler_client::parse_scheduler_base(&scheduler_url)
+		.map_err(|err| format!("保存済みの scheduler URL が不正です: {err}"))?;
+
+	let client = reqwest::Client::new();
+	let outcome = match scheduler_client::fetch_job(
+		&client,
+		&scheduler_url,
+		&scheduler_token,
+		&scheduler_job_id,
+		scheduler_client::FETCH_JOB_TIMEOUT,
+	)
+	.await
+	{
+		Ok(record) => IgJobStatusOutcome::Found(Box::new(record)),
+		Err(err) => err.into(),
+	};
+	Ok(outcome)
 }
 
 /// ジョブ本体(非同期タスク)。R2 アップロード → scheduler 登録の順に実行し、

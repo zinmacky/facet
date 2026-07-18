@@ -5,6 +5,7 @@ const LABEL: Record<PubStatusKind, string> = {
 	idle: "未投稿",
 	rendering: "レンダリング中…",
 	publishing: "投稿中…",
+	scheduled: "予約済み(scheduler 受理)",
 	success: "完了",
 	error: "エラー",
 };
@@ -13,6 +14,7 @@ const TONE: Record<PubStatusKind, StatusTone> = {
 	idle: "neutral",
 	rendering: "accent",
 	publishing: "accent",
+	scheduled: "accent",
 	success: "ok",
 	error: "danger",
 };

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Clip } from "../../types";
@@ -9,6 +9,7 @@ import {
 	invokeJobId,
 	mockEventListenerCount,
 	mockInvoke,
+	MOCK_IG_JOB_RECORD,
 	MOCK_IG_PUBLISH_DONE,
 	MOCK_IG_PUBLISH_ERROR,
 	MOCK_IG_PUBLISH_PROGRESS,
@@ -38,6 +39,30 @@ const SCHEDULER_URL = "https://scheduler.example.workers.dev";
 
 beforeEach(() => {
 	window.localStorage.clear();
+});
+
+/**
+ * `@testing-library/dom` の `waitFor` は Jest 互換のグローバル `jest`
+ * (`typeof jest !== "undefined"` かつ `setTimeout.clock` の有無)でしか fake timers を
+ * 検出しない(node_modules/@testing-library/dom/dist/helpers.js の
+ * `jestFakeTimersAreEnabled`)。vitest の `vi.useFakeTimers()` はこの検出に引っかからず、
+ * `waitFor` が内部の `setInterval`/`setTimeout` を自動で進めてくれずハングするため、
+ * 自動ポーリング検証(下記「IG ジョブステータス追跡」テスト)専用に最小限の
+ * jest 互換シムをこのファイル限定で用意する(値は `vi.advanceTimersByTime` へ委譲する
+ * だけで、実タイマー操作自体は引き続き vitest が行う)。
+ */
+beforeAll(() => {
+	(
+		globalThis as typeof globalThis & {
+			jest?: { advanceTimersByTime: (ms: number) => void };
+		}
+	).jest = {
+		advanceTimersByTime: (ms: number) => vi.advanceTimersByTime(ms),
+	};
+});
+
+afterAll(() => {
+	delete (globalThis as typeof globalThis & { jest?: unknown }).jest;
 });
 
 /** ゲートが開く前提条件(scheduler URL + トークン + R2 資格情報)を作る。 */
@@ -144,7 +169,7 @@ describe("UploadScreen: IG 投稿のゲート活性化", () => {
 });
 
 describe("UploadScreen: IG 投稿フロー", () => {
-	it("投稿用レンダリング(publish 品質)→ ig_publish_start → 進捗 → done で「完了」になる", async () => {
+	it("投稿用レンダリング(publish 品質)→ ig_publish_start → 進捗 → done で「予約済み」になる(アーキテクチャレビュー指摘対応: scheduler 受理は IG 側公開の確定ではない)", async () => {
 		await setUpReadyGate();
 		const user = userEvent.setup();
 		renderScreen();
@@ -198,9 +223,14 @@ describe("UploadScreen: IG 投稿フロー", () => {
 			expect(screen.getByText(/アップロード中 42%/)).toBeInTheDocument(),
 		);
 
-		// 4. done で「完了」。
+		// 4. done では「完了」ではなく「予約済み(scheduler 受理)」になる — scheduler が
+		//    ジョブ登録を受理しただけで、実際の IG 側公開成否(published/failed)は
+		//    まだ分からないため(アーキテクチャレビュー指摘対応)。
 		emitMockEvent(`ig_publish://done/${igJobId}`, MOCK_IG_PUBLISH_DONE);
-		await waitFor(() => expect(screen.getByText("完了")).toBeInTheDocument());
+		await waitFor(() =>
+			expect(screen.getByText(/予約済み\(scheduler 受理\)/)).toBeInTheDocument(),
+		);
+		expect(screen.queryByText("完了")).not.toBeInTheDocument();
 	});
 
 	it("401(enqueue_unauthorized)はトークン無効のメッセージとして表示される", async () => {
@@ -390,5 +420,132 @@ describe("UploadScreen: IG 投稿ジョブのライフサイクル(Issue #95, GH
 		)[1]?.[1] as { jobId: string };
 		// output.id ごとに安定な jobId が再利用される(Rust 側の idempotency_key 決定化と対)。
 		expect(secondJobId.jobId).toBe(firstJobId);
+	});
+});
+
+/**
+ * 投稿(preview → ig_publish_start → done)を最後まで進め、「予約済み(scheduler 受理)」
+ * 状態(`ig_job_status` によるポーリング/手動更新の追跡対象)まで到達させる共通ヘルパ。
+ * アーキテクチャレビュー指摘対応のテスト(下記 describe)で使う。
+ */
+async function publishUntilScheduled(
+	user: ReturnType<typeof userEvent.setup>,
+): Promise<void> {
+	await setUpReadyGate();
+	renderScreen();
+
+	const publishButton = await openIgPublishButton(user);
+	await waitFor(() => expect(publishButton).toBeEnabled());
+	await user.click(publishButton);
+
+	const previewCallIndex = await waitFor(() => {
+		const index = mockInvoke.mock.calls.findIndex(([cmd]) => cmd === "preview_start");
+		expect(index).toBeGreaterThanOrEqual(0);
+		return index;
+	});
+	emitMockEvent(`preview://done/${invokeJobId(previewCallIndex)}`, {
+		path: "/publish-cache/out.mp4",
+	});
+
+	const igCallIndex = await waitFor(() => {
+		const index = mockInvoke.mock.calls.findIndex(
+			([cmd]) => cmd === "ig_publish_start",
+		);
+		expect(index).toBeGreaterThanOrEqual(0);
+		return index;
+	});
+	emitMockEvent(`ig_publish://done/${invokeJobId(igCallIndex)}`, MOCK_IG_PUBLISH_DONE);
+
+	await waitFor(() =>
+		expect(screen.getByText(/予約済み\(scheduler 受理\)/)).toBeInTheDocument(),
+	);
+}
+
+describe("UploadScreen: IG ジョブステータス追跡(アーキテクチャレビュー指摘対応: desktop が IG 予約投稿の最終成否を追跡しない)", () => {
+	afterEach(() => {
+		// フェイクタイマーを使うテスト(自動ポーリング検証)が後続テストへ影響しないように。
+		vi.useRealTimers();
+	});
+
+	it("公開時刻経過後、60秒間隔の自動ポーリングで failed を検出しエラー表示する", async () => {
+		// setInterval(useEffect のマウント時登録)がフェイクタイマーとして登録される
+		// よう、render 前に切り替える。userEvent はフェイクタイマー下では
+		// `advanceTimers` を渡さないと内部の待機が進まずハングするため設定する
+		// (@testing-library/user-event v14 のフェイクタイマー対応)。
+		vi.useFakeTimers();
+		const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+
+		await publishUntilScheduled(user);
+
+		// ig_job_status の既定実装(outcome: "found", MOCK_IG_JOB_RECORD.status: "published")
+		// をこのテストだけ failed へ差し替える。
+		const defaultImpl = mockInvoke.getMockImplementation();
+		mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+			if (cmd === "ig_job_status") {
+				return {
+					outcome: "found",
+					...MOCK_IG_JOB_RECORD,
+					status: "failed",
+					lastError: "Instagram API error: token expired",
+				};
+			}
+			return defaultImpl?.(cmd, args);
+		});
+
+		// このテストの publishAt は即時(Date.now())のため、60秒経過すれば
+		// ポーリング条件(公開時刻経過後)を満たす。
+		await vi.advanceTimersByTimeAsync(60_000);
+
+		await waitFor(() =>
+			expect(
+				screen.getByText(/Instagram API error: token expired/),
+			).toBeInTheDocument(),
+		);
+		// エラーに確定したら追跡対象から外れる(以後ポーリングされない)ことも確認する。
+		expect(screen.queryByText(/予約済み/)).not.toBeInTheDocument();
+	});
+
+	it("「状態更新」ボタンをクリックすると即時に ig_job_status を取得し、published を検出して「完了」になる", async () => {
+		const user = userEvent.setup();
+		await publishUntilScheduled(user);
+
+		const refreshButton = screen.getByRole("button", { name: "状態更新" });
+		await user.click(refreshButton);
+
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith("ig_job_status", {
+				schedulerJobId: MOCK_IG_PUBLISH_DONE.schedulerJobId,
+			}),
+		);
+		// 既定実装(MOCK_IG_JOB_RECORD)は status: "published" を返す。
+		await waitFor(() => expect(screen.getByText("完了")).toBeInTheDocument());
+	});
+
+	it("ig_job_status が not_found(404)を返した場合は終端エラーとして確定し、追跡対象から外れる(code review 指摘の回帰テスト)", async () => {
+		// must-fix 対応の回帰テスト: not_found を他の一過性エラーと同列に扱うと
+		// 「予約済み」表示のまま永久にポーリングし続けてしまうバグがあった
+		// (usePublishExtras.tsx の pollIgJobStatus 冒頭コメント参照)。
+		const user = userEvent.setup();
+		await publishUntilScheduled(user);
+
+		const defaultImpl = mockInvoke.getMockImplementation();
+		mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+			if (cmd === "ig_job_status") {
+				return { outcome: "not_found" };
+			}
+			return defaultImpl?.(cmd, args);
+		});
+
+		await user.click(screen.getByRole("button", { name: "状態更新" }));
+
+		await waitFor(() =>
+			expect(
+				screen.getByText(/scheduler 側でジョブが見つかりませんでした/),
+			).toBeInTheDocument(),
+		);
+		// 終端エラーに確定したら追跡対象から外れ、「状態更新」ボタン(scheduled 限定表示)も消える。
+		expect(
+			screen.queryByRole("button", { name: "状態更新" }),
+		).not.toBeInTheDocument();
 	});
 });

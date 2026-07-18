@@ -116,6 +116,10 @@ pub fn run() {
 			commands::publish::ig_publish_start,
 			#[cfg(feature = "publish")]
 			commands::publish::ig_publish_cancel,
+			// 予約公開の最終成否の追跡(アーキテクチャレビュー指摘対応、
+			// §commands/publish/ig.rs の `job_status_impl` 冒頭コメント参照)。
+			#[cfg(feature = "publish")]
+			commands::publish::ig_job_status,
 			// YouTube OAuth(Installed App フロー、§6.5・§11-4)。
 			#[cfg(feature = "publish")]
 			commands::publish::set_youtube_oauth_client,
