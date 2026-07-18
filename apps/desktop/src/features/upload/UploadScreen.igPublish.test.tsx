@@ -10,6 +10,8 @@ import {
 	mockEventListenerCount,
 	mockInvoke,
 	MOCK_IG_PUBLISH_DONE,
+	MOCK_IG_PUBLISH_ERROR,
+	MOCK_IG_PUBLISH_PROGRESS,
 } from "../../test/tauri-mock";
 import { UploadScreen } from "./UploadScreenPrivate";
 
@@ -191,12 +193,7 @@ describe("UploadScreen: IG 投稿フロー", () => {
 		const igJobId = invokeJobId(igCallIndex);
 
 		// 3. アップロード進捗がステータスバッジに反映される。
-		emitMockEvent(`ig_publish://progress/${igJobId}`, {
-			phase: "uploading",
-			bytesSent: 42,
-			totalBytes: 100,
-			percent: 42,
-		});
+		emitMockEvent(`ig_publish://progress/${igJobId}`, MOCK_IG_PUBLISH_PROGRESS);
 		await waitFor(() =>
 			expect(screen.getByText(/アップロード中 42%/)).toBeInTheDocument(),
 		);
@@ -233,9 +230,7 @@ describe("UploadScreen: IG 投稿フロー", () => {
 			expect(index).toBeGreaterThanOrEqual(0);
 			return index;
 		});
-		emitMockEvent(`ig_publish://error/${invokeJobId(igCallIndex)}`, {
-			kind: "enqueue_unauthorized",
-		});
+		emitMockEvent(`ig_publish://error/${invokeJobId(igCallIndex)}`, MOCK_IG_PUBLISH_ERROR);
 
 		await waitFor(() =>
 			expect(

@@ -1,67 +1,62 @@
-//! `packages/contract/src/job-manifest.ts` の `JobManifest`/`mediaType` に対応する
-//! **暫定手書き型**(`crates/media-core/src/spec.rs` 冒頭コメントと同じ理由: typify に
-//! よる契約コード生成 [`crate::jobs`] は Phase 0/2 のタスクのため未配線。contract-rs
-//! 側に生成型が追加され次第、本モジュールはそちらへ差し替える前提)。
+//! `packages/contract/src/job-manifest.ts` の `JobManifest`/`JobCreateResponse` に
+//! 対応する型は `contract-rs`(`packages/contract/schema/job-manifest.json` から
+//! typify で codegen する crate、Issue #93)からの生成型を re-export して使う。
 //!
-//! typify 配線までの間、この手書き型が契約からずれても人間の注意力だけでは気付けない
-//! (GHSA-6w5m-8gcr-rf63 / Issue #93)。そのため `tests` 内の
-//! `job_manifest_conforms_to_contract_schema` / `job_create_response_conforms_to_contract_schema`
-//! が、`packages/contract/schema/job-manifest.json`(zod スキーマから生成される
-//! コミット対象ファイル)を実行時に読み込んで本モジュールのシリアライズ結果と照合する
-//! **契約の正に対する実行時強制**を担う。
+//! 生成型は他クレート(`contract-rs`)で定義されているため、Rust の orphan rule に
+//! より本モジュールから `impl JobManifest { .. }` のような inherent impl を追加
+//! できない。そのため旧 `JobManifest::new` 相当は [`new_job_manifest`] という
+//! フリー関数として提供する(呼び出し側は本モジュールの他のヘルパー
+//! (`build_r2_key`/`validate_*`)と同じ `manifest::foo(...)` の形で呼べる)。
 //!
 //! `mediaType` は contract 上 `"VIDEO" | "REELS"` だが、Instagram Graph API の現行
 //! リファレンスに `VIDEO` が存在しない(docs/desktop-migration-plan.md §6.4・§12.1)
-//! ため、本実装は **`REELS` に一本化**する(1:1/4:5 の出力も REELS として投稿する)。
-//! contract 側の enum 整理自体は Phase 0 のタスクとして据え置かれているため、ここでは
-//! 「Rust 側は REELS のみを送出する」という運用上の決定にとどめる(contract の
-//! zod スキーマは変更しない)。
+//! ため、本実装は生成された `MediaType` enum のうち **`Reels` variant に一本化**
+//! する(1:1/4:5 の出力も REELS として投稿する)。contract 側の enum 整理自体は
+//! Phase 0 のタスクとして据え置かれているため、ここでは「Rust 側は REELS のみを
+//! 送出する」という運用上の決定にとどめる(contract の zod スキーマは変更しない)。
+//!
+//! `JobCreateResponse.status` を敢えて `JobStatus` enum ではなく `String` として
+//! 生成させている理由は `crates/contract-rs/build.rs` 冒頭コメント参照
+//! (scheduler が新しい status 値を追加しても、自動更新にタイムラグのある desktop
+//! 側のデシリアライズが壊れないようにするため)。
 
-use serde::Serialize;
+use std::num::NonZeroU64;
+
+use contract_rs::MediaType;
+pub use contract_rs::{JobCreateResponse, JobManifest};
 use thiserror::Error;
 
-/// Instagram の公開種別。REELS のみ(§モジュール冒頭コメント)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum MediaType {
-	#[serde(rename = "REELS")]
-	Reels,
-}
-
-/// `POST /jobs` のリクエストボディ(`packages/contract` の `jobManifest` に対応)。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JobManifest {
-	pub idempotency_key: String,
-	/// contract 上は `z.literal("instagram")`。将来他プラットフォームが増えても
-	/// この構造体は IG 専用のまま(YouTube は別経路、§6.5)なので固定文字列でよい。
-	pub platform: &'static str,
-	pub r2_key: String,
-	pub media_type: MediaType,
-	pub caption: String,
-	pub publish_at: i64,
-}
-
-impl JobManifest {
-	pub fn new(idempotency_key: String, r2_key: String, caption: String, publish_at: i64) -> Self {
-		Self {
-			idempotency_key,
-			platform: "instagram",
-			r2_key,
-			media_type: MediaType::Reels,
-			caption,
-			publish_at,
-		}
+/// `POST /jobs` のリクエストボディ(contract-rs の生成型 `JobManifest`)を組み立てる。
+///
+/// 各フィールドは呼び出し前に以下の検証を通過している前提で `.expect()` する
+/// (契約上不正な値を渡すと生成型のコンストラクタ相当がここでパニックする —
+/// 検証は呼び出し側の責務):
+/// - `caption`: [`validate_caption`](2200 UTF-16 単位以下)
+/// - `r2_key`: [`build_r2_key`] が常に1文字以上を生成する
+/// - `publish_at_ms`: [`validate_publish_at`](正の値)
+/// - `idempotency_key`: 呼び出し側(`commands::publish::ig::derive_idempotency_key`)が
+///   常に UUID 文字列を渡す
+pub fn new_job_manifest(
+	idempotency_key: String,
+	r2_key: String,
+	caption: String,
+	publish_at_ms: i64,
+) -> JobManifest {
+	JobManifest {
+		idempotency_key: idempotency_key
+			.parse()
+			.expect("idempotency_key は呼び出し側が常に UUID 文字列を渡す前提"),
+		platform: "instagram".to_string(),
+		r2_key: r2_key
+			.try_into()
+			.expect("r2_key は build_r2_key が常に1文字以上を生成する前提"),
+		media_type: MediaType::Reels, // モジュール冒頭コメント参照: REELS に一本化。
+		caption: caption
+			.try_into()
+			.expect("caption は validate_caption で ≤2200 UTF-16 単位を検証済みの前提"),
+		publish_at: NonZeroU64::new(publish_at_ms as u64)
+			.expect("publish_at は validate_publish_at で正の値を検証済みの前提"),
 	}
-}
-
-/// `POST /jobs` のレスポンス(`packages/contract` の `jobCreateResponse` に対応)。
-/// `status` は contract の `jobStatus` 列挙をそのまま文字列として受け取る
-/// (scheduler 側が将来値を追加してもデシリアライズが壊れないよう、意図的に
-/// Rust 側では enum 化しない — renderer は文字列のまま表示できれば十分)。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct JobCreateResponse {
-	pub id: String,
-	pub status: String,
 }
 
 /// R2 オブジェクトキーを生成する。
@@ -129,6 +124,11 @@ pub enum ValidationError {
 	DurationTooLong { seconds: f64, max_seconds: f64 },
 	#[error("キャプションが長すぎます({len}文字 > {max}文字)。")]
 	CaptionTooLong { len: usize, max: usize },
+	/// contract `jobManifest.publishAt`(`z.number().int().positive()`)違反。
+	/// 生成型 `JobManifest.publish_at` が `NonZeroU64` のため、[`new_job_manifest`] に
+	/// 渡す前にここで検証しておかないと 0/負値でパニックしてしまう。
+	#[error("公開時刻が不正です({value})。正の unix ms(1970-01-01 以降)である必要があります。")]
+	InvalidPublishAt { value: i64 },
 }
 
 /// ファイルサイズ(バイト)を検証する。R2 アップロード開始前に呼ぶこと
@@ -168,6 +168,16 @@ pub fn validate_caption(caption: &str) -> Result<(), ValidationError> {
 		return Err(ValidationError::CaptionTooLong {
 			len,
 			max: MAX_CAPTION_UTF16_LEN,
+		});
+	}
+	Ok(())
+}
+
+/// 公開時刻(unix ms)を検証する(contract `jobManifest.publishAt` と同じ基準、正の値のみ)。
+pub fn validate_publish_at(publish_at_ms: i64) -> Result<(), ValidationError> {
+	if publish_at_ms <= 0 {
+		return Err(ValidationError::InvalidPublishAt {
+			value: publish_at_ms,
 		});
 	}
 	Ok(())
@@ -256,11 +266,32 @@ mod tests {
 		assert!(validate_caption(&caption).is_err());
 	}
 
+	// ---- validate_publish_at 境界値 ---------------------------------------------------
+
+	#[test]
+	fn publish_at_positive_is_valid() {
+		assert!(validate_publish_at(1).is_ok());
+	}
+
+	#[test]
+	fn publish_at_zero_is_invalid() {
+		assert!(validate_publish_at(0).is_err());
+	}
+
+	#[test]
+	fn publish_at_negative_is_invalid() {
+		let err = validate_publish_at(-1).unwrap_err();
+		assert!(matches!(
+			err,
+			ValidationError::InvalidPublishAt { value: -1 }
+		));
+	}
+
 	// ---- JobManifest / MediaType の JSON 形状(リテラル値の固定) ----------------------
 
 	#[test]
 	fn job_manifest_serializes_to_contract_shape() {
-		let manifest = JobManifest::new(
+		let manifest = new_job_manifest(
 			"11111111-2222-3333-4444-555555555555".to_string(),
 			"posts/2026-07-10/uuid.mp4".to_string(),
 			"caption".to_string(),
@@ -285,21 +316,80 @@ mod tests {
 		assert_eq!(resp.status, "pending");
 	}
 
+	/// `crates/contract-rs/build.rs` の `JobStatus`→`String` 差し替え設定の意図そのものを
+	/// 固定する回帰テスト。差し替えが typify のバージョン更新や `$defs` 名変更で無効化
+	/// されると `JobCreateResponse.status` が `enum JobStatus` に戻り、契約に無い
+	/// 未知の status 値でこのテストが失敗するようになる(既存テストは "pending" 等の
+	/// 既知の値しか使わないため、差し替えが壊れても気付けない — レビュー指摘対応)。
+	#[test]
+	fn job_create_response_accepts_unknown_status_value_forward_compat() {
+		let json = r#"{"id":"job-1","status":"some-future-status-not-yet-known"}"#;
+		let resp: JobCreateResponse = serde_json::from_str(json).expect(
+			"status は String のため契約に無い未知の値でも desktop 側のデシリアライズは壊れない",
+		);
+		assert_eq!(resp.status, "some-future-status-not-yet-known");
+	}
+
+	/// 未知の**トップレベルフィールド**の許容(旧手書き型の寛容さ)を固定する回帰テスト。
+	/// contract の zod スキーマは `.strict()` を使っておらず未知キーを黙って無視する
+	/// (strip)ため、schema/*.json は `additionalProperties` を出力せず、typify の
+	/// 生成型にも `#[serde(deny_unknown_fields)]` が付かない
+	/// (`crates/contract-rs/build.rs` の「未知フィールドの許容」コメント参照)。
+	/// これが退行する(生成スキーマに `additionalProperties: false` が復活する等)と、
+	/// scheduler が応答にフィールドを追加した瞬間、自動更新にタイムラグのある旧バージョン
+	/// の desktop でデシリアライズが失敗するようになるため、このテストで固定する。
+	#[test]
+	fn job_create_response_ignores_unknown_fields_forward_compat() {
+		let json = r#"{"id":"job-1","status":"pending","someFutureField":{"nested":true}}"#;
+		let resp: JobCreateResponse = serde_json::from_str(json).expect(
+			"未知のトップレベルフィールドは無視され、デシリアライズは成功する(旧手書き型と同じ寛容さ)",
+		);
+		assert_eq!(resp.id, "job-1");
+		assert_eq!(resp.status, "pending");
+	}
+
+	// ---- 旧手書き型時代の JSON フィクスチャの roundtrip(typify 配線の互換性固定) -----
+	//
+	// typify 配線(contract-rs の生成型への置き換え)の前後でワイヤ形式が1バイトも
+	// 変わっていないことを、旧手書き型が実際に出力していた JSON リテラルを
+	// デシリアライズ→再シリアライズして固定する(実装指示 パート A-4)。
+
+	#[test]
+	fn job_manifest_roundtrips_legacy_handwritten_fixture() {
+		let legacy_json = serde_json::json!({
+			"idempotencyKey": "11111111-2222-3333-4444-555555555555",
+			"platform": "instagram",
+			"r2Key": "posts/2026-07-10/uuid.mp4",
+			"mediaType": "REELS",
+			"caption": "caption",
+			"publishAt": 1_783_686_896_000_i64,
+		});
+		let manifest: JobManifest = serde_json::from_value(legacy_json.clone())
+			.expect("旧手書き型時代の JSON フィクスチャが生成型でもデシリアライズできること");
+		let roundtripped = serde_json::to_value(&manifest).unwrap();
+		assert_eq!(
+			roundtripped, legacy_json,
+			"typify 配線後もワイヤ形式(シリアライズ結果)が変わっていないこと"
+		);
+	}
+
+	#[test]
+	fn job_create_response_roundtrips_legacy_handwritten_fixture() {
+		let legacy_json = serde_json::json!({ "id": "job-1", "status": "pending" });
+		let resp: JobCreateResponse = serde_json::from_value(legacy_json.clone())
+			.expect("旧手書き型時代の JSON フィクスチャが生成型でもデシリアライズできること");
+		let roundtripped = serde_json::to_value(&resp).unwrap();
+		assert_eq!(roundtripped, legacy_json);
+	}
+
 	// ---- 契約スキーマとの整合性検証(GHSA-6w5m-8gcr-rf63 / Issue #93) ------------------
 	//
-	// 上のテストは「Rust 側が意図通りの値をシリアライズ/デシリアライズできるか」を
-	// 固定するリテラル値テストに過ぎず、`packages/contract` の zod スキーマが変わっても
-	// 何も気付けない。ここから下は逆に **`packages/contract/schema/job-manifest.json`
-	// (zod スキーマから `pnpm build` 時に生成される、コミット対象のファイル)を
-	// 「契約の正」としてテストが直接読み込み**、Rust 側の JSON 表現をそれと突き合わせる。
-	// typify によるコード生成(contract-rs、Phase 0/2)を配線すればこの手続きは不要に
-	// なるはずだが、それまでの間はこのテストが唯一の自動整合性チェックになる。
-	//
-	// 検証範囲(jsonschema 等の新規依存を増やさないため、serde_json のみで実装):
-	//   (a) シリアライズした JSON のキー集合が schema の properties と過不足なく一致する
-	//   (b) schema の required がすべて出力に存在する
-	//   (c) 各フィールドの型($ref/const/enum を解決した上で string/integer 等)が一致する
-	// Draft 2019-09 のフル検証(minLength/format 等の制約値そのもの)は対象外。
+	// typify 配線後は `JobManifest`/`JobCreateResponse` 自体が
+	// `packages/contract/schema/job-manifest.json` から生成された型になったため、
+	// 以下のテストは「手書き型が契約から乖離していないか」ではなく「typify の生成結果
+	// (`JobStatus` を `String` に差し替える設定を含む)が意図通りの JSON 表現に
+	// なっているか」の回帰確認として引き続き維持する
+	// (`crates/contract-rs/build.rs` 冒頭コメント参照)。
 
 	use std::collections::BTreeSet;
 
@@ -408,7 +498,7 @@ mod tests {
 		let schema_keys: BTreeSet<&str> = properties.keys().map(String::as_str).collect();
 		assert_eq!(
 			actual_keys, schema_keys,
-			"{def_name}: キー集合が契約スキーマと不一致(Rust 側の手書き型が乖離しています)"
+			"{def_name}: キー集合が契約スキーマと不一致(contract-rs の生成型が乖離しています)"
 		);
 
 		// (b) required がすべて出力に存在する(上の (a) で集合一致を見ているため、
@@ -430,7 +520,7 @@ mod tests {
 
 	#[test]
 	fn job_manifest_conforms_to_contract_schema() {
-		let manifest = JobManifest::new(
+		let manifest = new_job_manifest(
 			"11111111-2222-3333-4444-555555555555".to_string(),
 			"posts/2026-07-10/uuid.mp4".to_string(),
 			"caption".to_string(),
@@ -442,11 +532,9 @@ mod tests {
 
 	#[test]
 	fn job_create_response_conforms_to_contract_schema() {
-		// `JobCreateResponse` は Deserialize のみ導出している(scheduler からの受信専用の
-		// ため)。ワイヤ表現(scheduler が実際に返す JSON)側から出発して
-		// `serde_json::from_value` に通すことで、「このキー名で実際にデシリアライズ
-		// できるか」自体も検証する(単に構造体のフィールドから Value を組み直すだけだと、
-		// `#[serde(rename = ...)]` の付け間違い等でワイヤキーとズレてもテストが気付けない)。
+		// `JobCreateResponse` は scheduler からの受信専用のため、ワイヤ表現
+		// (scheduler が実際に返す JSON)側から出発して `serde_json::from_value` に
+		// 通すことで、「このキー名で実際にデシリアライズできるか」自体も検証する。
 		let wire = serde_json::json!({ "id": "job-1", "status": "pending" });
 		let resp: JobCreateResponse = serde_json::from_value(wire.clone())
 			.expect("wire JSON から JobCreateResponse へデシリアライズできること");
