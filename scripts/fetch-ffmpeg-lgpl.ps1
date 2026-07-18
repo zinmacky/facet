@@ -50,9 +50,14 @@ $ErrorActionPreference = "Stop"
 # --- 日付固定タグ(pin)。BtbN/FFmpeg-Builds の GitHub Releases API で実在を確認済み。 ---
 # 更新時は `gh api repos/BtbN/FFmpeg-Builds/releases --jq '.[].tag_name'` で最新の
 # autobuild-YYYY-MM-DD-HH-MM を確認し、対象タグの assets からファイル名を確認すること。
+# あわせて $ExpectedSha256 も取得したファイルの `shasum -a 256`(または
+# `Get-FileHash -Algorithm SHA256`)で計算し直して更新すること(改ざん・差し替え
+# 検出のため。取得先は BtbN のリリースアセットで署名は提供されていないため、
+# ハッシュ固定が唯一の完全性検証手段)。
 $Tag = "autobuild-2026-07-11-13-13"
 $AssetName = "ffmpeg-n8.1.2-22-g94138f6973-win64-lgpl-shared-8.1.zip"
 $DownloadUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$Tag/$AssetName"
+$ExpectedSha256 = "11514A894225FA65076FF1DE7BCB926CF6AD1CB12B0B3864955CF91E0AC11352"
 
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 
@@ -90,6 +95,15 @@ else {
 	$zipPath = Join-Path $tmpDir $AssetName
 	Write-Log "取得中(pin: $Tag): $DownloadUrl"
 	Invoke-WebRequest -Uri $DownloadUrl -OutFile $zipPath
+
+	# 改ざん・差し替え検出: 展開前に SHA-256 を検証する(大文字小文字を無視した比較)。
+	# 一致しない場合は即 throw し、展開ステップに進ませない。
+	Write-Log "SHA-256 を検証中: $zipPath"
+	$actualSha256 = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash
+	if ($actualSha256.ToUpperInvariant() -ne $ExpectedSha256.ToUpperInvariant()) {
+		throw "SHA-256 が一致しません(改ざん・アセット差し替えの可能性): 期待値 $ExpectedSha256, 実際 $actualSha256 ($zipPath)"
+	}
+	Write-Log "SHA-256 検証 OK: $actualSha256"
 
 	Write-Log "展開中: $zipPath -> $ExtractRoot"
 	Expand-Archive -Path $zipPath -DestinationPath $ExtractRoot -Force

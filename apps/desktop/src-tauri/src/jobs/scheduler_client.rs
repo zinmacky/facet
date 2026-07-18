@@ -175,9 +175,23 @@ pub async fn enqueue_job(
 			.map_err(|err| EnqueueError::Network(format!("応答の解析に失敗しました: {err}"))),
 		StatusCode::UNAUTHORIZED => Err(EnqueueError::Unauthorized),
 		StatusCode::SERVICE_UNAVAILABLE => Err(EnqueueError::ServiceUnavailable),
-		other => {
+		// 4xx(401 を除く)は manifest 自体が scheduler 側のバリデーションで拒否された
+		// ケース — 再送しても同じ結果になるため恒久的な `Rejected` のまま。
+		other if other.is_client_error() => {
 			let detail = response.text().await.unwrap_or_default();
 			Err(EnqueueError::Rejected(format!("{other}: {detail}")))
+		}
+		// 5xx(Cloudflare のゲートウェイエラー等)やその他の想定外ステータスは
+		// scheduler 側の一時的な不調である可能性が高く、同じファイルの `fetch_job`
+		// (252行目付近)の「想定外ステータス」フォールバックと同じく再試行可能な
+		// `Network` に分類する(以前は恒久エラーの `Rejected` として扱っていたため、
+		// 一時的な 502/504 でもリトライされずユーザーに「拒否された」と誤って
+		// 伝わっていた)。
+		other => {
+			let detail = response.text().await.unwrap_or_default();
+			Err(EnqueueError::Network(format!(
+				"scheduler が予期しないステータスを返しました: {other}: {detail}"
+			)))
 		}
 	}
 }
@@ -449,6 +463,81 @@ mod tests {
 		.await
 		.unwrap_err();
 		assert!(matches!(err, EnqueueError::Rejected(_)));
+	}
+
+	#[tokio::test]
+	async fn enqueue_job_rejected_on_422() {
+		let base = spawn_mock_server(
+			"HTTP/1.1 422 Unprocessable Entity",
+			r#"{"error":"invalid job manifest"}"#,
+		);
+		let client = Client::new();
+		let err = enqueue_job(
+			&client,
+			&base,
+			"any-token",
+			&sample_manifest(),
+			TEST_TIMEOUT,
+			&CancelToken::new(),
+		)
+		.await
+		.unwrap_err();
+		assert!(matches!(err, EnqueueError::Rejected(_)));
+	}
+
+	// 5xx は scheduler 側の一時的な不調(Cloudflare のゲートウェイエラー等)である
+	// 可能性が高く、`Rejected`(恒久エラー)ではなく再試行可能な `Network` に分類する
+	// (レビュー指摘: 以前は 500/502/504 も `Rejected` となり、一時的な障害でも
+	// リトライされずユーザーに「拒否された」と誤って伝わっていた)。
+	#[tokio::test]
+	async fn enqueue_job_network_error_on_500() {
+		let base = spawn_mock_server("HTTP/1.1 500 Internal Server Error", "{}");
+		let client = Client::new();
+		let err = enqueue_job(
+			&client,
+			&base,
+			"any-token",
+			&sample_manifest(),
+			TEST_TIMEOUT,
+			&CancelToken::new(),
+		)
+		.await
+		.unwrap_err();
+		assert!(matches!(err, EnqueueError::Network(_)));
+	}
+
+	#[tokio::test]
+	async fn enqueue_job_network_error_on_502() {
+		let base = spawn_mock_server("HTTP/1.1 502 Bad Gateway", "{}");
+		let client = Client::new();
+		let err = enqueue_job(
+			&client,
+			&base,
+			"any-token",
+			&sample_manifest(),
+			TEST_TIMEOUT,
+			&CancelToken::new(),
+		)
+		.await
+		.unwrap_err();
+		assert!(matches!(err, EnqueueError::Network(_)));
+	}
+
+	#[tokio::test]
+	async fn enqueue_job_network_error_on_504() {
+		let base = spawn_mock_server("HTTP/1.1 504 Gateway Timeout", "{}");
+		let client = Client::new();
+		let err = enqueue_job(
+			&client,
+			&base,
+			"any-token",
+			&sample_manifest(),
+			TEST_TIMEOUT,
+			&CancelToken::new(),
+		)
+		.await
+		.unwrap_err();
+		assert!(matches!(err, EnqueueError::Network(_)));
 	}
 
 	#[tokio::test]

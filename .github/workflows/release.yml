@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -76,27 +76,38 @@ jobs:
       # tauri.conf.json / package.json / Cargo.toml 間の一致検証だけは実タグ push と同様に行う。
       - name: Resolve version-check tag
         id: version-check-tag
+        # github.ref_name を pwsh ソースへ直接文字列展開せず env 経由で渡す
+        # (ref 名は攻撃者が制御しうる入力であり、直接展開するとスクリプト
+        # インジェクションが成立しうるため)。
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
           if ($env:IS_DRY_RUN -eq "true") {
             $tauriConf = Get-Content -Raw "apps/desktop/src-tauri/tauri.conf.json" | ConvertFrom-Json
             $tag = "v$($tauriConf.version)"
             Write-Host "dry run: 実タグが無いため tauri.conf.json のバージョンから合成タグを使用します: $tag"
           } else {
-            $tag = "${{ github.ref_name }}"
+            $tag = $env:REF_NAME
           }
           echo "tag=$tag" >> $env:GITHUB_OUTPUT
 
       # --- 3. タグとバージョン単一ソース(tauri.conf.json)の一致チェック ---
       # 不一致なら即 fail する(scripts/check-release-version.ps1)。
       - name: Check tag matches version (tauri.conf.json / package.json / Cargo.toml)
-        run: ./scripts/check-release-version.ps1 -Tag "${{ steps.version-check-tag.outputs.tag }}"
+        # 手順2の tag 出力は実タグ経路では github.ref_name そのもの(攻撃者制御入力)。
+        # 直接展開せず env 経由で渡す(手順2と同じ理由。code-reviewer 指摘で追加)。
+        env:
+          RESOLVED_TAG: ${{ steps.version-check-tag.outputs.tag }}
+        run: ./scripts/check-release-version.ps1 -Tag "$env:RESOLVED_TAG"
 
       # --- 4. Rust toolchain + rust-cache + LIBCLANG_PATH(rust-windows-check と同形) ---
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
 
       - name: Setup rust-cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: apps/desktop -> target
 
@@ -268,7 +279,7 @@ jobs:
       # `cond && '' || 'x'` は cond が真でも 'x' を返してしまう。三項の真側には
       # 必ず非空(truthy)の値を置く形(`反転条件 && '非空値' || ''`)で書くこと。
       - name: Build & publish draft release (tauri-action)
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ env.IS_DRY_RUN != 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
