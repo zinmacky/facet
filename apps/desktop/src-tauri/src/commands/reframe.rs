@@ -53,6 +53,9 @@
 //! // それ以外("h264_amf" / "h264_mf" 等)は明示指定で、そのプラットフォームの候補
 //! // テーブルに存在しない名前を渡すとジョブを起動せずに Err を返す
 //! // (encoder_choice_from_param がジョブ登録前に検証する)。
+//! // output が input と同一ファイルを指す場合も同様にジョブを起動せず Err を返す
+//! // (output_targets_input がジョブ登録前に検証する。rename で入力を上書きし
+//! // 元の動画を失うデータ損失事故を防ぐガード)。
 //! await invoke("reframe_start", {
 //!   jobId,
 //!   input: "/path/to/input.mp4",
@@ -337,6 +340,58 @@ fn encoder_choice_from_param(
 	}
 }
 
+/// `output` が(パス表記の違いを問わず)`input` と同一ファイルを指すかどうかを判定する。
+///
+/// **背景(データ損失バグ)**: `media_core::pipeline::finalize_output` は成功時に
+/// ステージング一時ファイルを `fs::rename` で `output` へ確定させる。これはデマルチプレクサ
+/// (入力側のファイルハンドル)を drop した後に行われるため、ユーザーが保存ダイアログで
+/// 誤って入力ファイルそのものを出力先に選んだ場合、この guard が無ければ元の動画が
+/// 静かに上書き・消失する。[`OutputPathRegistry`](media_core) は実行中の**出力**パスしか
+/// 追跡しておらず、このケース(出力 == 入力)は検知できないため、ジョブを起動する前に
+/// ここで明示的に弾く。
+///
+/// **パス比較の頑健性**: macOS(APFS)/Windows(NTFS)は既定で大文字小文字を区別しない
+/// ファイルシステムのため、単純な文字列比較では `Video.mp4` と `video.mp4` が同一ファイルを
+/// 指していても見逃す。また `..` を含む相対パス表記の違いも同様に見逃しうる。
+/// `input` は呼び出し時点で実在するファイルなので `fs::canonicalize` できるが、`output` は
+/// これから書き出す新規ファイルの場合が多く存在しないことがあるため、
+/// [`canonicalize_existing_or_missing`] で「実在しなくても親ディレクトリの実体パスから
+/// 組み立てる」形にして比較する。どちらのパスも `fs::canonicalize` 系の処理が失敗した場合
+/// (親ディレクトリも存在しない等)は、誤検知で正当な書き出しをブロックしないよう
+/// 素のパス比較にフォールバックする(見逃しはあり得るが、既存挙動からの後退はない)。
+fn output_targets_input(input: &Path, output: &Path) -> bool {
+	match (
+		fs::canonicalize(input),
+		canonicalize_existing_or_missing(output),
+	) {
+		(Ok(canonical_input), Ok(canonical_output)) => canonical_input == canonical_output,
+		_ => input == output,
+	}
+}
+
+/// `path` を `fs::canonicalize` する。`path` 自体が存在しなくても、親ディレクトリが
+/// 実在すれば「親ディレクトリの実体パス + ファイル名」で組み立てて返す
+/// ([`output_targets_input`] が書き出し前(=まだ存在しない)出力パスも比較できるように
+/// するためのヘルパ)。親ディレクトリも実在しない、またはファイル名を取り出せない場合は
+/// `Err` を返す(呼び出し側は素のパス比較へフォールバックする)。
+fn canonicalize_existing_or_missing(path: &Path) -> std::io::Result<PathBuf> {
+	if let Ok(canonical) = fs::canonicalize(path) {
+		return Ok(canonical);
+	}
+	let file_name = path.file_name().ok_or_else(|| {
+		std::io::Error::new(
+			std::io::ErrorKind::InvalidInput,
+			format!("ファイル名を取り出せません: {}", path.display()),
+		)
+	})?;
+	let parent = match path.parent() {
+		Some(parent) if !parent.as_os_str().is_empty() => parent,
+		_ => Path::new("."),
+	};
+	let canonical_parent = fs::canonicalize(parent)?;
+	Ok(canonical_parent.join(file_name))
+}
+
 /// `input` を `spec` の指定形状へ再フレーミングするジョブを開始する。
 ///
 /// `job_id` は renderer 側が採番して渡す(モジュール冒頭コメント「jobId 採番を
@@ -362,6 +417,16 @@ pub async fn reframe_start(
 ) -> Result<(), String> {
 	let encoder_choice =
 		encoder_choice_from_param(encoder_select::Platform::current(), encoder.as_deref())?;
+
+	let input_path = PathBuf::from(input);
+	let output_path = PathBuf::from(output);
+	if output_targets_input(&input_path, &output_path) {
+		return Err(format!(
+			"出力先に入力ファイルと同じパスは指定できません(元の動画が上書きされ失われます): {}",
+			output_path.display()
+		));
+	}
+
 	let staging_dir = resolve_staging_dir(&app)?;
 
 	let token = CancelToken::new();
@@ -371,8 +436,6 @@ pub async fn reframe_start(
 
 	let app_for_task = app.clone();
 	let job_id_for_task = job_id;
-	let input_path = PathBuf::from(input);
-	let output_path = PathBuf::from(output);
 
 	tauri::async_runtime::spawn_blocking(move || {
 		run_job(
@@ -703,6 +766,87 @@ mod tests {
 		let err = encoder_choice_from_param(encoder_select::Platform::Other, Some("h264_amf"))
 			.expect_err("Other platform has no candidates");
 		assert!(err.contains("h264_amf"), "message was: {err}");
+	}
+
+	// --- output_targets_input ---------------------------------------------------------
+	//
+	// `unique_test_dir` は本モジュール下部の `sweep_orphaned_staging_files` テスト群で
+	// 定義されたヘルパを共用する(同じ `tests` モジュール内なので定義順に依存しない)。
+
+	#[test]
+	fn output_targets_input_true_for_identical_path() {
+		let dir = unique_test_dir("output-targets-input-identical");
+		let input = dir.join("video.mp4");
+		fs::write(&input, b"dummy").expect("write dummy input");
+
+		assert!(output_targets_input(&input, &input));
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn output_targets_input_true_for_dotdot_segments() {
+		let dir = unique_test_dir("output-targets-input-dotdot");
+		let sub = dir.join("sub");
+		fs::create_dir_all(&sub).expect("create sub dir");
+		let input = sub.join("video.mp4");
+		fs::write(&input, b"dummy").expect("write dummy input");
+
+		// `sub/../sub/video.mp4` は `sub/video.mp4` と同一ファイルを指すが、
+		// 文字列としては `input` と異なる(canonicalize で吸収されるべきケース)。
+		let output_via_dotdot = sub.join("..").join("sub").join("video.mp4");
+
+		assert!(output_targets_input(&input, &output_via_dotdot));
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn output_targets_input_false_for_distinct_files() {
+		let dir = unique_test_dir("output-targets-input-distinct");
+		let input = dir.join("input.mp4");
+		let output = dir.join("output.mp4");
+		fs::write(&input, b"dummy-in").expect("write dummy input");
+		fs::write(&output, b"dummy-out").expect("write dummy output");
+
+		assert!(!output_targets_input(&input, &output));
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn output_targets_input_false_when_output_parent_does_not_exist() {
+		let dir = unique_test_dir("output-targets-input-missing-parent");
+		let input = dir.join("input.mp4");
+		fs::write(&input, b"dummy-in").expect("write dummy input");
+
+		// 出力先の親ディレクトリ自体が存在しない(= canonicalize が失敗する)場合は
+		// 素のパス比較にフォールバックする。ここでは常に異なるパスなので false になる
+		// (正当な新規書き出しを誤ってブロックしないことの確認)。
+		let output = dir.join("does-not-exist").join("output.mp4");
+
+		assert!(!output_targets_input(&input, &output));
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[cfg(any(target_os = "macos", target_os = "windows"))]
+	#[test]
+	fn output_targets_input_true_for_case_difference_on_case_insensitive_fs() {
+		// APFS(macOS)/NTFS(Windows)は既定で大文字小文字を区別しないため、綴りの
+		// 大文字小文字だけが異なるパスでも同一ファイルを指す(このアプリが両 OS を
+		// 対象にしている以上、必須のケース)。Linux 等の大文字小文字を区別する
+		// ファイルシステムでは別表記は別名として存在しないため本テストの対象外
+		// (`#[cfg]` で除外)。
+		let dir = unique_test_dir("output-targets-input-case");
+		let input = dir.join("Video.mp4");
+		fs::write(&input, b"dummy").expect("write dummy input");
+
+		let output = dir.join("VIDEO.MP4");
+
+		assert!(output_targets_input(&input, &output));
+
+		let _ = fs::remove_dir_all(&dir);
 	}
 
 	// --- looks_like_staging_tmp_name ---------------------------------------------------
