@@ -1,5 +1,7 @@
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	editSpec,
 	igPublishDone,
 	igPublishProgress,
 	igPublishRuntimeError,
@@ -7,12 +9,22 @@ import {
 	jobStatus,
 } from "@facet/contract";
 import type { IgPublishDone } from "../features/upload/igPublish";
+import { useReframeQueue } from "../lib/useReframeQueue";
+import { usePreview } from "../lib/usePreview";
 import { mockOn } from "../mock/eventBus";
 import { startMockJob } from "../mock/jobRunner";
+import {
+	finalSpec,
+	masterSpec,
+	targetById,
+	type Clip,
+	type OutputTarget,
+} from "../types";
 import {
 	MOCK_IG_PUBLISH_DONE,
 	MOCK_IG_PUBLISH_ERROR,
 	MOCK_IG_PUBLISH_PROGRESS,
+	mockInvoke,
 } from "./tauri-mock";
 
 /**
@@ -48,6 +60,14 @@ import {
  *   `apps/desktop/src-tauri/src/jobs/manifest.rs` のテストでカバー済み。
  * - typify による contract-rs のコード生成配線自体(パート A)はこのファイルの対象外
  *   (Rust 側テストでカバー)。
+ *
+ * 加えて、`EditSpec`(`reframe_start`/`preview_start` が受け取る `spec` 引数、
+ * TS↔Rust 境界の中核型)の契約テストもここに追加する(アーキテクチャレビュー指摘対応)。
+ * `masterSpec`/`finalSpec`(`../types.ts`)は実際に `spec` を組み立てる本番コードそのもの、
+ * `useReframeQueue`/`usePreview` は `reframe_start`/`preview_start` を叩く本番フックその
+ * ものなので、いずれも手打ちの重複フィクスチャではなく実際の実行結果を検証する
+ * (`mockInvoke.mock.calls` から invoke に渡った実引数を取り出す)。Rust 側の契約整合性は
+ * `apps/desktop/src-tauri/src/commands/edit_spec_contract.rs` でカバーする。
  */
 
 /** `IgPublishDone` を `jobCreateResponse` の形(`id`/`status`)へ読み替える。 */
@@ -135,5 +155,100 @@ describe("contract boundary: mock/jobRunner.ts(dev:mock)の実際の emit", () =
 		expect(() =>
 			jobCreateResponse.parse(toJobCreateResponseShape(done)),
 		).not.toThrow();
+	});
+});
+
+// ---- contract boundary: EditSpec(reframe_start/preview_start の spec 引数) -------------
+//
+// アーキテクチャレビュー指摘対応: EditSpec は手動同期のみで契約テストが無かった
+// (`packages/core/src/types.ts` が TS 側の真実の源、`crates/media-core/src/spec.rs` が
+// Rust 側の手書き型)。`masterSpec`/`finalSpec`(`../types.ts`)は spec を実際に組み立てる
+// 本番コードそのもの、`useReframeQueue`/`usePreview` は `reframe_start`/`preview_start`
+// を実際に叩く本番フックそのものを exercise し、`mockInvoke` に渡った実引数を
+// `@facet/contract` の `editSpec` で検証する(igPublish 系のテストと同じ「手打ちの
+// フィクスチャではなく実際の実行結果を検証する」方針)。
+
+const CONTRACT_TEST_CLIP: Clip = {
+	id: "clip-1",
+	name: "clip-1",
+	trim: { start: 1, end: 5 },
+	crop: { x: 0.1, y: 0, width: 0.8, height: 1 },
+	aspect: "9:16",
+};
+const CONTRACT_TEST_SOURCE = { width: 1920, height: 1080 };
+
+/** `targetById` は存在しない id には `undefined` を返す(`../types.ts`)。固定 id のためテスト側で存在を保証する。 */
+function contractTestTarget(): OutputTarget {
+	const target = targetById("ig-reels");
+	if (!target) throw new Error("test fixture: ig-reels output target must exist");
+	return target;
+}
+
+describe("contract boundary: EditSpec(masterSpec/finalSpec が組み立てる spec)", () => {
+	it("masterSpec()(EXPORT 用ビルダー)が組み立てる EditSpec は契約に適合する", () => {
+		const spec = masterSpec(CONTRACT_TEST_CLIP, CONTRACT_TEST_SOURCE);
+		expect(() => editSpec.parse(spec)).not.toThrow();
+	});
+
+	it("finalSpec()(UPLOAD 用ビルダー)が組み立てる EditSpec は契約に適合する", () => {
+		const spec = finalSpec(
+			CONTRACT_TEST_CLIP,
+			CONTRACT_TEST_SOURCE,
+			contractTestTarget(),
+			"blur-pad",
+		);
+		expect(() => editSpec.parse(spec)).not.toThrow();
+	});
+
+	it("crop 未指定の Clip から組み立てた EditSpec(crop キー自体が無い)も契約に適合する", () => {
+		const { crop: _crop, ...clipWithoutCrop } = CONTRACT_TEST_CLIP;
+		const spec = masterSpec(clipWithoutCrop, CONTRACT_TEST_SOURCE);
+		expect(spec.crop).toBeUndefined();
+		expect(() => editSpec.parse(spec)).not.toThrow();
+	});
+});
+
+describe("contract boundary: EditSpec(reframe_start/preview_start に実際に渡る spec)", () => {
+	it("useReframeQueue.run() が reframe_start へ渡す spec は契約に適合する", async () => {
+		const spec = masterSpec(CONTRACT_TEST_CLIP, CONTRACT_TEST_SOURCE);
+		const { result } = renderHook(() => useReframeQueue());
+
+		act(() => {
+			const token = result.current.reserve("clip-1");
+			expect(token).not.toBe(false);
+			void result.current.run(token as string, "clip-1", "/in.mp4", "/out.mp4", spec);
+		});
+
+		await waitFor(() => {
+			expect(
+				mockInvoke.mock.calls.some(([cmd]) => cmd === "reframe_start"),
+			).toBe(true);
+		});
+		const call = mockInvoke.mock.calls.find(([cmd]) => cmd === "reframe_start");
+		const args = call?.[1] as { spec?: unknown } | undefined;
+		expect(() => editSpec.parse(args?.spec)).not.toThrow();
+	});
+
+	it("usePreview.ensure() が preview_start へ渡す spec は契約に適合する", async () => {
+		const spec = finalSpec(
+			CONTRACT_TEST_CLIP,
+			CONTRACT_TEST_SOURCE,
+			contractTestTarget(),
+			"crop",
+		);
+		const { result } = renderHook(() => usePreview());
+
+		act(() => {
+			void result.current.ensure("clip-1", "/in.mp4", spec, "sig-1");
+		});
+
+		await waitFor(() => {
+			expect(
+				mockInvoke.mock.calls.some(([cmd]) => cmd === "preview_start"),
+			).toBe(true);
+		});
+		const call = mockInvoke.mock.calls.find(([cmd]) => cmd === "preview_start");
+		const args = call?.[1] as { spec?: unknown } | undefined;
+		expect(() => editSpec.parse(args?.spec)).not.toThrow();
 	});
 });

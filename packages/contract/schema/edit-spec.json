@@ -1,0 +1,113 @@
+{
+	"$defs": {
+		"cropRect": {
+			"properties": {
+				"height": {
+					"type": "number"
+				},
+				"width": {
+					"type": "number"
+				},
+				"x": {
+					"type": "number"
+				},
+				"y": {
+					"type": "number"
+				}
+			},
+			"required": [
+				"x",
+				"y",
+				"width",
+				"height"
+			],
+			"type": "object"
+		},
+		"editSpec": {
+			"properties": {
+				"crop": {
+					"$ref": "#/$defs/cropRect"
+				},
+				"preset": {
+					"$ref": "#/$defs/preset"
+				},
+				"source": {
+					"$ref": "#/$defs/sourceDimensions"
+				},
+				"trim": {
+					"$ref": "#/$defs/trim"
+				}
+			},
+			"required": [
+				"source",
+				"preset"
+			],
+			"type": "object"
+		},
+		"fitMode": {
+			"enum": [
+				"blur-pad",
+				"crop"
+			],
+			"type": "string"
+		},
+		"preset": {
+			"properties": {
+				"fit": {
+					"$ref": "#/$defs/fitMode"
+				},
+				"height": {
+					"minimum": 0,
+					"type": "integer"
+				},
+				"name": {
+					"type": "string"
+				},
+				"width": {
+					"minimum": 0,
+					"type": "integer"
+				}
+			},
+			"required": [
+				"name",
+				"width",
+				"height",
+				"fit"
+			],
+			"type": "object"
+		},
+		"sourceDimensions": {
+			"properties": {
+				"height": {
+					"minimum": 0,
+					"type": "integer"
+				},
+				"width": {
+					"minimum": 0,
+					"type": "integer"
+				}
+			},
+			"required": [
+				"width",
+				"height"
+			],
+			"type": "object"
+		},
+		"trim": {
+			"properties": {
+				"end": {
+					"type": "number"
+				},
+				"start": {
+					"type": "number"
+				}
+			},
+			"required": [
+				"start",
+				"end"
+			],
+			"type": "object"
+		}
+	},
+	"$schema": "https://json-schema.org/draft/2019-09/schema#"
+}

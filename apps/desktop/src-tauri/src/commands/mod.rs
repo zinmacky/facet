@@ -24,6 +24,8 @@
 //! feature 限定の `jobs` モジュール(`lib.rs` 参照)とは別に `commands` 直下に置く
 //! (`job_state` モジュール冒頭コメント「統一した経緯」参照)。
 
+#[cfg(test)]
+mod edit_spec_contract;
 pub(crate) mod job_state;
 pub mod preview;
 pub mod probe;

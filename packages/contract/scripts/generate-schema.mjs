@@ -8,6 +8,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import {
+	cropRect,
+	editSpec,
+	fitMode,
 	igPublishDone,
 	igPublishProgress,
 	igPublishRuntimeError,
@@ -16,6 +19,9 @@ import {
 	jobRecord,
 	jobStatus,
 	mediaType,
+	preset,
+	sourceDimensions,
+	trim,
 } from "../dist/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -124,4 +130,24 @@ writeSchemaFile(resolve(__dirname, "../schema/ig-publish-events.json"), {
 		igPublishRuntimeError,
 		{},
 	),
+});
+
+// `EditSpec`(desktop の `reframe_start`/`preview_start` が受け取る `spec` 引数の
+// ワイヤ形式、§edit-spec.ts 冒頭コメント)。preset/source/trim/crop はネストした
+// オブジェクトのため、それぞれを独立した $defs エントリにして $ref で参照させる
+// (フラットな他契約と異なり、ここでは enum だけでなくオブジェクト型そのものを
+// 共有 definitions として渡す。仕組みは jobManifest の mediaType/jobStatus 共有と同じ —
+// toJsonSchemaDef 冒頭コメント参照)。
+writeSchemaFile(resolve(__dirname, "../schema/edit-spec.json"), {
+	fitMode: toJsonSchemaDef("fitMode", fitMode, {}),
+	sourceDimensions: toJsonSchemaDef("sourceDimensions", sourceDimensions, {}),
+	trim: toJsonSchemaDef("trim", trim, {}),
+	cropRect: toJsonSchemaDef("cropRect", cropRect, {}),
+	preset: toJsonSchemaDef("preset", preset, { fitMode }),
+	editSpec: toJsonSchemaDef("editSpec", editSpec, {
+		sourceDimensions,
+		trim,
+		cropRect,
+		preset,
+	}),
 });
