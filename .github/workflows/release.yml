@@ -167,7 +167,7 @@ jobs:
       # TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) が未設定だとこのステップで失敗する
       # (初回リリース前チェックリスト、docs/phase4-packaging.md 参照)。
       - name: Build & publish draft release (tauri-action)
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
