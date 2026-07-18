@@ -247,6 +247,13 @@ jobs:
         if: matrix.task == 'check-publish'
         run: cargo check --workspace --features publish
 
+      # publish feature の clippy 回帰(cfg(target_os) 経路含む)。cargo check だけでは
+      # 警告レベルの問題(未使用 import 等)を検出できないため、他タスクの clippy
+      # ステップと同じ厳格度(-D warnings)で見る。
+      - name: cargo clippy --workspace --features publish
+        if: matrix.task == 'check-publish'
+        run: cargo clippy --workspace --features publish -- -D warnings
+
       # commands::publish のテスト(§11-3)は CredentialStore をトレイト分離しており、
       # 実 OS キーチェーンに触れるテストのみ #[ignore] で隔離済み(ubuntu ランナーには
       # Secret Service が無く不安定なため)。ignore されていないテストは HTTP をループバック
@@ -328,6 +335,14 @@ jobs:
       - name: cargo check --workspace
         run: cargo check --workspace
 
+      # publish feature(v2.4 エディション分離)は Windows 専用の CredentialStore 実装
+      # (Windows 資格情報マネージャー等、cfg(target_os = "windows") 経路)を持ちうる。
+      # rust job の check-publish は ubuntu でのみ実行されるため、Windows 実ターゲット
+      # でのコンパイル回帰はここで見る(check-publish と同じ cargo check の形。
+      # ビルド時間予算を踏まえ check のみ、test/clippy は追加しない)。
+      - name: cargo check --workspace --features publish
+        run: cargo check --workspace --features publish
+
   # macOS ランナーでのビルド回帰チェック専用ジョブ(docs/mac-handover.md §4-1)。
   # Mac が開発の主系になったため、Homebrew FFmpeg + pkg-config 経由のリンクで
   # media-core(および src-tauri)が Mac 上でも build/test できることを CI で守る。
@@ -386,3 +401,11 @@ jobs:
 
       - name: cargo test --workspace
         run: cargo test --workspace
+
+      # publish feature(v2.4 エディション分離)は macOS 専用の CredentialStore 実装
+      # (macOS Keychain 等、cfg(target_os = "macos") 経路)を持ちうる。rust job の
+      # check-publish は ubuntu でのみ実行されるため、macOS 実ターゲットでの
+      # コンパイル回帰はここで見る(check-publish と同じ cargo check の形。
+      # ビルド時間予算を踏まえ check のみ、test/clippy は追加しない)。
+      - name: cargo check --workspace --features publish
+        run: cargo check --workspace --features publish
