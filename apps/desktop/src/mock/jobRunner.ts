@@ -10,7 +10,7 @@ import { MOCK_OUTPUT_PATH } from "./fixtures";
  */
 
 interface StartMockJobOptions {
-	namespace: "reframe" | "preview" | "ig_publish";
+	namespace: "reframe" | "preview" | "ig_publish" | "youtube_publish";
 	jobId: string;
 	/** progress イベントの fps/frame 換算用(見た目のみ、実エンコードは行わない)。 */
 	fps?: number;
@@ -34,9 +34,11 @@ export function startMockJob(opts: StartMockJobOptions): string {
 		const percent = Math.min(100, Math.round((tick / STEPS) * 1000) / 10);
 		const frame = Math.round((percent / 100) * totalFrames);
 
-		if (namespace === "ig_publish") {
-			// IG 公開ジョブの進捗形(`IgPublishProgress`、§features/upload/igPublish.ts)。
-			mockEmit(`ig_publish://progress/${jobId}`, {
+		if (namespace === "ig_publish" || namespace === "youtube_publish") {
+			// アップロード系ジョブの進捗形(`IgPublishProgress`/`YoutubePublishProgress`、
+			// どちらも `phase: "uploading"` タグの同形。§features/upload/igPublish.ts,
+			// §features/upload/youtubePublish.ts)。
+			mockEmit(`${namespace}://progress/${jobId}`, {
 				phase: "uploading",
 				bytesSent: Math.round((percent / 100) * 1_000_000),
 				totalBytes: 1_000_000,
@@ -57,13 +59,25 @@ export function startMockJob(opts: StartMockJobOptions): string {
 			clearInterval(timer);
 			timers.delete(jobId);
 			if (namespace === "reframe") {
-				mockEmit(`reframe://done/${jobId}`, { encoder: "libx264" });
+				// libx264 は desktop 移行時に破棄済み(§docs/desktop-migration-plan.md)。
+				// dev:mock のスクリーンショットに残存 encoder が映り込まないよう、
+				// 実際に使う HW エンコーダ(mac の videotoolbox)の値を返す。
+				mockEmit(`reframe://done/${jobId}`, { encoder: "h264_videotoolbox" });
 			} else if (namespace === "preview") {
 				mockEmit(`preview://done/${jobId}`, { path: MOCK_OUTPUT_PATH });
-			} else {
+			} else if (namespace === "ig_publish") {
 				mockEmit(`ig_publish://done/${jobId}`, {
 					schedulerJobId: `mock-scheduler-job-${jobId}`,
 					status: "pending",
+				});
+			} else {
+				// 実際は publishAt 指定時に "scheduled" になりうる(§youtubePublish.ts の
+				// YoutubePublishDone コメント参照)が、このジョブ進行シミュレータは publishAt を
+				// 受け取らないため区別できない。ig_publish の固定 "pending" と同様、
+				// UI 確認用の固定終端値として "private" を返す。
+				mockEmit(`youtube_publish://done/${jobId}`, {
+					videoId: `mock-youtube-video-${jobId}`,
+					status: "private",
 				});
 			}
 		}
