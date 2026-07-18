@@ -3,7 +3,8 @@ import type { MutableRefObject } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getErrorMessage } from "./getErrorMessage";
 import type { EncoderPreference } from "./settings";
-import { cancelJob, startReframe, type JobHandle } from "./tauri";
+import { cancelOrphanHandle, useKeyedJobLifecycle } from "./tauriJobLifecycle";
+import { startReframe, type JobHandle } from "./tauri";
 
 /**
  * `reframe_start`(実書き出し品質)による 1 ジョブ(clip や output)ぶんの進行状態。
@@ -38,13 +39,13 @@ export interface UseReframeQueueResult {
 	 */
 	tasksRef: MutableRefObject<Map<string, ReframeTaskState>>;
 	/**
-	 * key を「実行中」として同期的に予約する(unsubsRef へプレースホルダを登録 +
-	 * tasks を running で初期化)。既に予約/実行中の key には何もせず `false` を返す
-	 * (呼び出し側はこれで二重起動を防ぐ)。成功時は「世代トークン」を返す —
-	 * 後続の `run`/`fail` 呼び出しにそのまま渡すことで、同じ key に対して後から
-	 * `remove`/`reserve` が割り込んでも(バグ3: 世代管理)、この呼び出し由来の
-	 * 非同期コールバックが新しいジョブの状態を誤って上書きしないようにする
-	 * (`run` の JSDoc 参照)。実際のジョブ起動(`run`)より前に、非同期処理
+	 * key を「実行中」として同期的に予約する(世代トークンの発行 + tasks を running で
+	 * 初期化)。既に予約/実行中の key には何もせず `false` を返す(呼び出し側はこれで
+	 * 二重起動を防ぐ)。成功時は「世代トークン」を返す — 後続の `run`/`fail` 呼び出しに
+	 * そのまま渡すことで、同じ key に対して後から `remove`/`reserve` が割り込んでも
+	 * (バグ3: 世代管理)、この呼び出し由来の非同期コールバックが新しいジョブの状態を
+	 * 誤って上書きしないようにする(世代トークンの設計は `tauriJobLifecycle.ts` の
+	 * `useKeyedJobLifecycle` 参照)。実際のジョブ起動(`run`)より前に、非同期処理
 	 * (出力パスの解決など)を挟まず同期的に呼ぶこと。
 	 */
 	reserve: (key: string, initial?: Partial<ReframeTaskState>) => string | false;
@@ -106,43 +107,19 @@ export interface UseReframeQueueResult {
  * 共通フック。ExportScreen の「書き出し」(常時マウントの effect から継続的に起動)・
  * UploadScreen の「フォルダへ一括書き出し」(ユーザー操作 1 回で一括起動)の双方が、
  * 起動タイミング・二重起動防止の判定は個別に持ちつつ、「ジョブを起動し progress/done/
- * error を Map と購読解除関数(unsubsRef)へ反映する」部分だけをここへ集約する。
+ * error を Map へ反映する」部分だけをここへ集約する。
+ *
+ * ライフサイクル不変条件(listen-before-invoke / 世代トークン / remove 時 cancel /
+ * アンマウント時 unsubscribe+cancel / stale ハンドル到着時の即時 cancel、Issue #95)は
+ * `./tauriJobLifecycle.ts` の `useKeyedJobLifecycle` に集約されている(`usePreview.ts`
+ * も同じ土台を使う)。このフックは `tasks` Map(進行状態)の所有・`reserve`/`run`/
+ * `startBatch` という3種の起動入口の使い分けに専念する。
  */
 export function useReframeQueue(): UseReframeQueueResult {
 	const [tasks, setTasks] = useState<Map<string, ReframeTaskState>>(new Map());
 	const tasksRef = useRef<Map<string, ReframeTaskState>>(tasks);
 
-	// key ごとの購読解除関数。値が存在する = 予約済み or 実行中。
-	const unsubsRef = useRef<Map<string, () => void>>(new Map());
-
-	// key ごとの「現在有効な」世代トークン(バグ3: 世代管理)。reserve()/startBatch() が
-	// 発行し、remove()/reset() が破棄する。run()/fail() は自分に渡された token が
-	// 今もこの Map の値と一致する場合のみ tasks/unsubsRef を書き換える。不一致であれば
-	// 「後から reserve() し直された新しいジョブ、または remove() 済みの孤児」とみなし、
-	// 状態を書き換えず購読解除(必要ならジョブのキャンセル)だけ行う。
-	//
-	// トークンは reserve()/startBatch() というただ 1 箇所(同期実行)でのみ発行・上書き
-	// されるため、複数の run() 呼び出しが非同期に「自分が最新か」を後から claim
-	// し合うような競合は起きない(発行順は JS の単一スレッド実行で一意に決まる)。
-	const activeTokenRef = useRef<Map<string, string>>(new Map());
-	const tokenCounterRef = useRef(0);
-	const nextToken = useCallback((): string => {
-		tokenCounterRef.current += 1;
-		return String(tokenCounterRef.current);
-	}, []);
-
-	/**
-	 * jobId が既知ならキャンセルを試みる(失敗は握りつぶさず warn に留める。バグ1)。
-	 * 戻り値の Promise は常に resolve する(失敗時も warn 後に resolve — 呼び出し側が
-	 * `.catch` を書かずに待てるようにする)。jobId 未確定(＝まだキャンセルすべき
-	 * ジョブが無い)場合は即 resolve 済みの Promise を返す。
-	 */
-	const cancelOrphan = useCallback((jobId: string | undefined): Promise<void> => {
-		if (!jobId) return Promise.resolve();
-		return cancelJob(jobId).catch((err: unknown) => {
-			console.warn(`ジョブのキャンセルに失敗しました(jobId=${jobId})`, err);
-		});
-	}, []);
+	const lifecycle = useKeyedJobLifecycle();
 
 	// tasksRef を都度同期更新してから setTasks へ渡す(関数更新子は開発時の StrictMode で
 	// 二重呼び出しされうるため、ref 更新のような副作用はその中に置かず、ここで確定した
@@ -157,14 +134,12 @@ export function useReframeQueue(): UseReframeQueueResult {
 
 	const reserve = useCallback(
 		(key: string, initial?: Partial<ReframeTaskState>): string | false => {
-			if (unsubsRef.current.has(key)) return false;
-			const token = nextToken();
-			activeTokenRef.current.set(key, token);
-			unsubsRef.current.set(key, () => {});
+			if (lifecycle.isActive(key)) return false;
+			const token = lifecycle.reserve(key);
 			update(key, { status: "running", ratio: 0, ...initial });
 			return token;
 		},
-		[update, nextToken],
+		[update, lifecycle],
 	);
 
 	const run = useCallback(
@@ -176,7 +151,7 @@ export function useReframeQueue(): UseReframeQueueResult {
 			spec: EditSpec,
 			encoder?: EncoderPreference,
 		): Promise<void> => {
-			const isCurrent = () => activeTokenRef.current.get(key) === token;
+			const isCurrent = () => lifecycle.isCurrent(key, token);
 			// remove()/再 reserve() が run() 到達前に既に起きている(バグ3)。
 			// ジョブを起動する意味が無いので、reframe_start すら呼ばずに終わる。
 			if (!isCurrent()) return Promise.resolve();
@@ -188,7 +163,7 @@ export function useReframeQueue(): UseReframeQueueResult {
 				// 起動直後に完了/失敗する短いジョブでは later の `.then((h) => …)` が
 				// onDone/onError より後に実行されることがあるため、後着の `.then` が
 				// 既に確定した状態(jobId 等)で上書きしないためのローカルなガード
-				// (activeTokenRef とは別物 — こちらは「同一 run() 呼び出し内」の順序保証)。
+				// (isCurrent とは別物 — こちらは「同一 run() 呼び出し内」の順序保証)。
 				let settled = false;
 
 				startReframe(
@@ -211,7 +186,7 @@ export function useReframeQueue(): UseReframeQueueResult {
 								resolve();
 								return;
 							}
-							unsubsRef.current.delete(key);
+							lifecycle.clearUnsubscribe(key);
 							update(key, { status: "done", ratio: 1, outputPath });
 							resolve();
 						},
@@ -222,7 +197,7 @@ export function useReframeQueue(): UseReframeQueueResult {
 								resolve();
 								return;
 							}
-							unsubsRef.current.delete(key);
+							lifecycle.clearUnsubscribe(key);
 							update(key, { status: "error", error: message });
 							reject(new Error(message));
 						},
@@ -237,17 +212,11 @@ export function useReframeQueue(): UseReframeQueueResult {
 							// remove 対応)。孤児として走らせ続けないよう明示的にキャンセルし、
 							// リスナーも解放する(キャンセルが失敗しても、終端イベントを待たず
 							// ここで確実に購読を切る)。
-							h.unsubscribe();
-							void h.cancel().catch((err: unknown) => {
-								console.warn(
-									`孤児ジョブのキャンセルに失敗しました(jobId=${h.jobId})`,
-									err,
-								);
-							});
+							cancelOrphanHandle(h);
 							resolve();
 							return;
 						}
-						unsubsRef.current.set(key, h.unsubscribe);
+						lifecycle.setUnsubscribe(key, h.unsubscribe);
 						update(key, { jobId: h.jobId });
 					})
 					.catch((err: unknown) => {
@@ -256,31 +225,28 @@ export function useReframeQueue(): UseReframeQueueResult {
 							resolve();
 							return;
 						}
-						unsubsRef.current.delete(key);
+						lifecycle.clearUnsubscribe(key);
 						const message = getErrorMessage(err);
 						update(key, { status: "error", error: message });
 						reject(err instanceof Error ? err : new Error(message));
 					});
 			});
 		},
-		[update],
+		[update, lifecycle],
 	);
 
 	const fail = useCallback(
 		(token: string, key: string, err: unknown) => {
-			if (activeTokenRef.current.get(key) !== token) return;
-			unsubsRef.current.delete(key);
+			if (!lifecycle.isCurrent(key, token)) return;
+			lifecycle.clearUnsubscribe(key);
 			update(key, { status: "error", error: getErrorMessage(err) });
 		},
-		[update],
+		[update, lifecycle],
 	);
 
 	const remove = useCallback(
 		(key: string): Promise<void> => {
-			unsubsRef.current.get(key)?.();
-			unsubsRef.current.delete(key);
-			activeTokenRef.current.delete(key);
-			const cancelled = cancelOrphan(tasksRef.current.get(key)?.jobId);
+			const cancelled = lifecycle.remove(key, tasksRef.current.get(key)?.jobId);
 			if (!tasksRef.current.has(key)) return cancelled;
 			const next = new Map(tasksRef.current);
 			next.delete(key);
@@ -288,17 +254,14 @@ export function useReframeQueue(): UseReframeQueueResult {
 			setTasks(next);
 			return cancelled;
 		},
-		[cancelOrphan],
+		[lifecycle],
 	);
 
 	const reset = useCallback(() => {
-		for (const unsub of unsubsRef.current.values()) unsub();
-		unsubsRef.current.clear();
-		activeTokenRef.current.clear();
-		for (const task of tasksRef.current.values()) cancelOrphan(task.jobId);
+		lifecycle.resetAll([...tasksRef.current.values()].map((task) => task.jobId));
 		tasksRef.current = new Map();
 		setTasks(new Map());
-	}, [cancelOrphan]);
+	}, [lifecycle]);
 
 	const startBatch = useCallback(
 		(keys: string[], initial?: Partial<ReframeTaskState>): Map<string, string> => {
@@ -306,35 +269,31 @@ export function useReframeQueue(): UseReframeQueueResult {
 			// 前バッチは既に完了/失敗済みのはず」が前提だが、その不変条件が破れて
 			// 実行中ジョブが残っていた場合に孤児化しないよう、念のため明示的に
 			// 購読解除・キャンセルしてから新しいバッチを積む(バグ1と同じ理由)。
-			for (const unsub of unsubsRef.current.values()) unsub();
-			unsubsRef.current.clear();
-			for (const task of tasksRef.current.values()) cancelOrphan(task.jobId);
-			activeTokenRef.current.clear();
+			lifecycle.resetAll([...tasksRef.current.values()].map((task) => task.jobId));
 
 			const next = new Map<string, ReframeTaskState>();
 			const tokens = new Map<string, string>();
 			for (const key of keys) {
 				next.set(key, { status: "running", ratio: 0, ...initial });
-				const token = nextToken();
-				tokens.set(key, token);
-				activeTokenRef.current.set(key, token);
+				// lifecycle.reserve() は unsubsRef へも no-op プレースホルダを登録するため、
+				// 呼び出し直後は isActive(key) が true になる(reserve() 単体と同じ挙動)。
+				// startBatch はここで発行したトークンをそのまま呼び出し側の run() へ渡す
+				// 前提で isActive() を参照しないため、無害。
+				tokens.set(key, lifecycle.reserve(key));
 			}
 			tasksRef.current = next;
 			setTasks(next);
 			return tokens;
 		},
-		[nextToken, cancelOrphan],
+		[lifecycle],
 	);
 
 	// アンマウント時に全購読を解除し、jobId が確定しているジョブはキャンセルする(バグ1)。
 	useEffect(() => {
-		const unsubs = unsubsRef.current;
 		return () => {
-			for (const unsub of unsubs.values()) unsub();
-			unsubs.clear();
-			for (const task of tasksRef.current.values()) cancelOrphan(task.jobId);
+			lifecycle.resetAll([...tasksRef.current.values()].map((task) => task.jobId));
 		};
-	}, [cancelOrphan]);
+	}, [lifecycle]);
 
 	return { tasks, tasksRef, reserve, run, fail, remove, reset, startBatch, update };
 }

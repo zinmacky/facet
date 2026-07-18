@@ -1,0 +1,166 @@
+{
+	"$defs": {
+		"igPublishDone": {
+			"properties": {
+				"schedulerJobId": {
+					"type": "string"
+				},
+				"status": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"schedulerJobId",
+				"status"
+			],
+			"type": "object"
+		},
+		"igPublishProgress": {
+			"anyOf": [
+				{
+					"properties": {
+						"bytesSent": {
+							"minimum": 0,
+							"type": "integer"
+						},
+						"percent": {
+							"type": "number"
+						},
+						"phase": {
+							"const": "uploading",
+							"type": "string"
+						},
+						"totalBytes": {
+							"minimum": 0,
+							"type": "integer"
+						}
+					},
+					"required": [
+						"phase",
+						"bytesSent",
+						"totalBytes",
+						"percent"
+					],
+					"type": "object"
+				},
+				{
+					"properties": {
+						"phase": {
+							"const": "enqueuing",
+							"type": "string"
+						}
+					},
+					"required": [
+						"phase"
+					],
+					"type": "object"
+				}
+			]
+		},
+		"igPublishRuntimeError": {
+			"anyOf": [
+				{
+					"properties": {
+						"detail": {
+							"type": "string"
+						},
+						"kind": {
+							"const": "upload_failed",
+							"type": "string"
+						}
+					},
+					"required": [
+						"kind",
+						"detail"
+					],
+					"type": "object"
+				},
+				{
+					"properties": {
+						"kind": {
+							"const": "enqueue_unauthorized",
+							"type": "string"
+						}
+					},
+					"required": [
+						"kind"
+					],
+					"type": "object"
+				},
+				{
+					"properties": {
+						"kind": {
+							"const": "enqueue_service_unavailable",
+							"type": "string"
+						}
+					},
+					"required": [
+						"kind"
+					],
+					"type": "object"
+				},
+				{
+					"properties": {
+						"detail": {
+							"type": "string"
+						},
+						"kind": {
+							"const": "enqueue_rejected",
+							"type": "string"
+						}
+					},
+					"required": [
+						"kind",
+						"detail"
+					],
+					"type": "object"
+				},
+				{
+					"properties": {
+						"detail": {
+							"type": "string"
+						},
+						"kind": {
+							"const": "network",
+							"type": "string"
+						}
+					},
+					"required": [
+						"kind",
+						"detail"
+					],
+					"type": "object"
+				},
+				{
+					"properties": {
+						"kind": {
+							"const": "cancelled",
+							"type": "string"
+						}
+					},
+					"required": [
+						"kind"
+					],
+					"type": "object"
+				},
+				{
+					"properties": {
+						"detail": {
+							"type": "string"
+						},
+						"kind": {
+							"const": "internal",
+							"type": "string"
+						}
+					},
+					"required": [
+						"kind",
+						"detail"
+					],
+					"type": "object"
+				}
+			]
+		}
+	},
+	"$schema": "https://json-schema.org/draft/2019-09/schema#"
+}
