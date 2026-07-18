@@ -94,7 +94,11 @@ jobs:
       # --- 3. タグとバージョン単一ソース(tauri.conf.json)の一致チェック ---
       # 不一致なら即 fail する(scripts/check-release-version.ps1)。
       - name: Check tag matches version (tauri.conf.json / package.json / Cargo.toml)
-        run: ./scripts/check-release-version.ps1 -Tag "${{ steps.version-check-tag.outputs.tag }}"
+        # 手順2の tag 出力は実タグ経路では github.ref_name そのもの(攻撃者制御入力)。
+        # 直接展開せず env 経由で渡す(手順2と同じ理由。code-reviewer 指摘で追加)。
+        env:
+          RESOLVED_TAG: ${{ steps.version-check-tag.outputs.tag }}
+        run: ./scripts/check-release-version.ps1 -Tag "$env:RESOLVED_TAG"
 
       # --- 4. Rust toolchain + rust-cache + LIBCLANG_PATH(rust-windows-check と同形) ---
       - name: Setup Rust toolchain
