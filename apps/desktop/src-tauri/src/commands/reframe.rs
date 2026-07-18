@@ -146,7 +146,7 @@ use std::time::{Duration, SystemTime};
 
 use media_core::encoder_select::{self, EncoderChoice};
 use media_core::spec::EditSpec;
-use media_core::{encode, fit, CancelToken, EncoderSelection, Progress, ReframeOptions};
+use media_core::{encode, fit, path_key, CancelToken, EncoderSelection, Progress, ReframeOptions};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -346,50 +346,29 @@ fn encoder_choice_from_param(
 /// ステージング一時ファイルを `fs::rename` で `output` へ確定させる。これはデマルチプレクサ
 /// (入力側のファイルハンドル)を drop した後に行われるため、ユーザーが保存ダイアログで
 /// 誤って入力ファイルそのものを出力先に選んだ場合、この guard が無ければ元の動画が
-/// 静かに上書き・消失する。[`OutputPathRegistry`](media_core) は実行中の**出力**パスしか
-/// 追跡しておらず、このケース(出力 == 入力)は検知できないため、ジョブを起動する前に
-/// ここで明示的に弾く。
+/// 静かに上書き・消失する。`media_core::pipeline::JobPathRegistry` は実行中の**他ジョブ**
+/// の入出力パスとの交差(クロスジョブ競合)を追跡するものであり、このジョブ自身がまだ
+/// 起動していない(= レジストリに何も登録していない)時点での「自分の出力 == 自分の入力」
+/// は検知できないため、ジョブを起動する前にここで明示的に弾く。
 ///
 /// **パス比較の頑健性**: macOS(APFS)/Windows(NTFS)は既定で大文字小文字を区別しない
 /// ファイルシステムのため、単純な文字列比較では `Video.mp4` と `video.mp4` が同一ファイルを
 /// 指していても見逃す。また `..` を含む相対パス表記の違いも同様に見逃しうる。
-/// `input` は呼び出し時点で実在するファイルなので `fs::canonicalize` できるが、`output` は
-/// これから書き出す新規ファイルの場合が多く存在しないことがあるため、
-/// [`canonicalize_existing_or_missing`] で「実在しなくても親ディレクトリの実体パスから
-/// 組み立てる」形にして比較する。どちらのパスも `fs::canonicalize` 系の処理が失敗した場合
-/// (親ディレクトリも存在しない等)は、誤検知で正当な書き出しをブロックしないよう
-/// 素のパス比較にフォールバックする(見逃しはあり得るが、既存挙動からの後退はない)。
+/// [`media_core::path_key::canonicalize_existing_or_missing`] で「実在すれば
+/// `fs::canonicalize`、実在しなくても親ディレクトリの実体パスから組み立てる」形にして
+/// 両パスを比較する(`media_core::pipeline::JobPathRegistry` のキー正規化と同じ規則を
+/// 共有する一本化されたヘルパ ── `path_key` モジュール冒頭コメント参照)。どちらかの
+/// パスで `fs::canonicalize` 系の処理が失敗した場合(親ディレクトリも存在しない等)は、
+/// 誤検知で正当な書き出しをブロックしないよう素のパス比較にフォールバックする
+/// (見逃しはあり得るが、既存挙動からの後退はない)。
 fn output_targets_input(input: &Path, output: &Path) -> bool {
 	match (
-		fs::canonicalize(input),
-		canonicalize_existing_or_missing(output),
+		path_key::canonicalize_existing_or_missing(input),
+		path_key::canonicalize_existing_or_missing(output),
 	) {
 		(Ok(canonical_input), Ok(canonical_output)) => canonical_input == canonical_output,
 		_ => input == output,
 	}
-}
-
-/// `path` を `fs::canonicalize` する。`path` 自体が存在しなくても、親ディレクトリが
-/// 実在すれば「親ディレクトリの実体パス + ファイル名」で組み立てて返す
-/// ([`output_targets_input`] が書き出し前(=まだ存在しない)出力パスも比較できるように
-/// するためのヘルパ)。親ディレクトリも実在しない、またはファイル名を取り出せない場合は
-/// `Err` を返す(呼び出し側は素のパス比較へフォールバックする)。
-fn canonicalize_existing_or_missing(path: &Path) -> std::io::Result<PathBuf> {
-	if let Ok(canonical) = fs::canonicalize(path) {
-		return Ok(canonical);
-	}
-	let file_name = path.file_name().ok_or_else(|| {
-		std::io::Error::new(
-			std::io::ErrorKind::InvalidInput,
-			format!("ファイル名を取り出せません: {}", path.display()),
-		)
-	})?;
-	let parent = match path.parent() {
-		Some(parent) if !parent.as_os_str().is_empty() => parent,
-		_ => Path::new("."),
-	};
-	let canonical_parent = fs::canonicalize(parent)?;
-	Ok(canonical_parent.join(file_name))
 }
 
 /// `input` を `spec` の指定形状へ再フレーミングするジョブを開始する。

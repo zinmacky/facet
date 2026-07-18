@@ -28,6 +28,7 @@ pub mod encode;
 pub mod encoder_select;
 pub mod error;
 pub mod fit;
+pub mod path_key;
 pub mod pipeline;
 pub mod preview;
 pub mod probe;

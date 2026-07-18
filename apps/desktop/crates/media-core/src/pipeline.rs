@@ -67,7 +67,7 @@
 //!   [`crate::concurrency::retry_on_encoder_open`] でラップし、`EncoderOpen`(HW
 //!   セッション枯渇等)はリトライ後も次候補へ進む(`concurrency.rs` 冒頭コメント参照)。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -87,6 +87,7 @@ use crate::encode::{self, EncoderSpec};
 use crate::encoder_select;
 use crate::error::{is_again_or_eof, MediaError, Result};
 use crate::fit::{self, FilterGraphSpec};
+use crate::path_key::normalize_path_key;
 use crate::probe;
 use crate::progress::ProgressTracker;
 use crate::spec::{CropRect, Preset, SourceDimensions, Trim};
@@ -138,62 +139,135 @@ pub struct ReframeOptions<'a> {
 	pub staging_dir: Option<PathBuf>,
 }
 
-/// 実行中の出力先パス(`output_path`)をプロセス全体で追跡するグローバルレジストリ
-/// (P1-2: 同一 output_path への同時実行競合の検知)。
+/// 実行中ジョブの入出力パスをプロセス全体で追跡するグローバルレジストリ
+/// (P1-2: 同一 output_path への同時実行競合の検知。+ クロスジョブのパス競合検知:
+/// job B の出力が job A の入力/出力と交差するケースを拒否する)。
 ///
-/// `reframe()` は冒頭でここに `output_path` を登録し、既に別のジョブが同じパスへ
-/// 書き出し中であれば [`MediaError::OutputBusy`] を返して即座に失敗する
-/// (デコーダ/エンコーダ open 等、実際の書き出し処理には一切入らない)。
-/// 登録は [`OutputPathGuard`] の RAII で `reframe()` 終了時(成功・失敗・キャンセル
-/// いずれも)に自動的に解放されるため、1 本目が完了すれば同じパスへ再度書き出せる。
-struct OutputPathRegistry {
-	active: Mutex<HashSet<PathBuf>>,
+/// - `active_outputs`: 実行中ジョブの出力先(書き込み中)。同じパスへの多重登録は
+///   1 件までしか許さない(同時に 2 本が同じファイルへ rename しようとするのを防ぐ
+///   ── 従来からの `OutputBusy` 相当)。
+/// - `active_inputs`: 実行中ジョブの入力(読み取り中)。同一の入力を複数ジョブが
+///   同時に読むこと自体は正当な使い方(同じ動画から複数プリセットを同時書き出す等)
+///   なので、単純な集合ではなく参照カウントで保持し、同一パスの重複登録を拒否
+///   しない。
+///
+/// `register` はこの 2 つの集合を 1 つの `Mutex`(`JobPaths`)の下でアトミックに
+/// チェック・更新する。チェックと挿入を分けて別々にロックすると、その間に別スレッドの
+/// `register` が割り込む TOCTOU が生まれるため(結果、両者が「衝突なし」と誤判定して
+/// 同時に登録してしまう)、1 回のロック区間で完結させている。
+///
+/// 登録は [`JobPathGuard`] の RAII で `reframe()` 終了時(成功・失敗・キャンセル・
+/// パニックいずれの経路でも Drop は必ず走る)に自動的に解放される。
+struct JobPathRegistry {
+	state: Mutex<JobPaths>,
 }
 
-impl OutputPathRegistry {
+#[derive(Default)]
+struct JobPaths {
+	active_outputs: HashSet<PathBuf>,
+	active_inputs: HashMap<PathBuf, u32>,
+}
+
+/// [`JobPathRegistry::register`] が検知した競合の種類。呼び出し側(`reframe()`)が
+/// これを見て対応する [`MediaError`] variant へ変換する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathConflict {
+	/// 自分の出力先が、既に別ジョブの出力先として登録済み(同一パスへの二重書き込み。
+	/// 既存の `OutputBusy` ケースそのもの)。
+	OutputVsOutput,
+	/// 自分の出力先が、実行中の別ジョブの入力と一致する(rename でその入力を
+	/// 上書きしてしまう destructive race)。
+	OutputVsInput,
+	/// 自分の入力が、実行中の別ジョブの出力先と一致する(別ジョブの rename が
+	/// 走る前後にこちらが読み取ってしまう destructive race)。
+	InputVsOutput,
+}
+
+impl JobPathRegistry {
 	/// プロセス全体で共有するインスタンス(`OnceLock`。`concurrency::EncodeSlots::global`
 	/// と同じパターン)。
-	fn global() -> &'static OutputPathRegistry {
-		static INSTANCE: OnceLock<OutputPathRegistry> = OnceLock::new();
-		INSTANCE.get_or_init(|| OutputPathRegistry {
-			active: Mutex::new(HashSet::new()),
+	fn global() -> &'static JobPathRegistry {
+		static INSTANCE: OnceLock<JobPathRegistry> = OnceLock::new();
+		INSTANCE.get_or_init(|| JobPathRegistry {
+			state: Mutex::new(JobPaths::default()),
 		})
 	}
 
-	/// `path` を実行中として登録する。既に登録済み(=別のジョブが同じパスへ実行中)
-	/// なら `None` を返す(呼び出し側はこれを [`MediaError::OutputBusy`] に変換する)。
-	fn register(&self, path: &Path) -> Option<OutputPathGuard<'_>> {
-		let mut active = lock_or_recover(&self.active);
-		if !active.insert(path.to_path_buf()) {
-			return None;
+	/// `input`/`output` を実行中として登録する。[`normalize_path_key`] で正規化した上で
+	/// 比較するため、大文字小文字違いや `..` を含む表記違いも同一ファイルとして検知する
+	/// (`path_key` モジュール冒頭コメント参照)。
+	///
+	/// 競合があれば(`active_outputs`/`active_inputs` のどちらも変更せず)
+	/// `Err(PathConflict)` を返す。チェックの優先順位は `OutputVsOutput` →
+	/// `OutputVsInput` → `InputVsOutput`(既存の `OutputBusy` 相当のケースを最優先で
+	/// 区別し、既存挙動を変えないため)。
+	///
+	/// **注意(自ジョブの自己衝突は対象外)**: このチェックは呼び出し時点で既に
+	/// レジストリに登録済みの**他ジョブ**との交差のみを検知する。今回登録しようとしている
+	/// `input == output`(同一ジョブの入出力が同じファイルを指す)自体はここでは
+	/// 弾かれない ── その入力/出力はまだレジストリに存在しないため、チェック時点では
+	/// 衝突なしと判定されてしまう。このケースを弾く責務は呼び出し側にある(`src-tauri` の
+	/// `reframe_start` コマンドは `commands/reframe.rs` の `output_targets_input` で
+	/// ジョブ起動前に別途弾いている。[`reframe`] を直接叩く他の呼び出し元を追加する場合は
+	/// 同様のチェックを呼び出し側で用意すること)。
+	fn register(
+		&self,
+		input: &Path,
+		output: &Path,
+	) -> std::result::Result<JobPathGuard<'_>, PathConflict> {
+		let input_key = normalize_path_key(input);
+		let output_key = normalize_path_key(output);
+
+		let mut state = lock_or_recover(&self.state);
+		if state.active_outputs.contains(&output_key) {
+			return Err(PathConflict::OutputVsOutput);
 		}
-		Some(OutputPathGuard {
+		if state.active_inputs.contains_key(&output_key) {
+			return Err(PathConflict::OutputVsInput);
+		}
+		if state.active_outputs.contains(&input_key) {
+			return Err(PathConflict::InputVsOutput);
+		}
+
+		state.active_outputs.insert(output_key.clone());
+		*state.active_inputs.entry(input_key.clone()).or_insert(0) += 1;
+
+		Ok(JobPathGuard {
 			registry: self,
-			path: path.to_path_buf(),
+			input_key,
+			output_key,
 		})
 	}
 
-	fn release(&self, path: &Path) {
-		let mut active = lock_or_recover(&self.active);
-		active.remove(path);
+	fn release(&self, input_key: &Path, output_key: &Path) {
+		let mut state = lock_or_recover(&self.state);
+		state.active_outputs.remove(output_key);
+		if let Some(count) = state.active_inputs.get_mut(input_key) {
+			*count -= 1;
+			if *count == 0 {
+				state.active_inputs.remove(input_key);
+			}
+		}
 	}
 }
 
-/// [`OutputPathRegistry::register`] が返す RAII ガード。drop 時に登録を解除する。
-struct OutputPathGuard<'a> {
-	registry: &'a OutputPathRegistry,
-	path: PathBuf,
+/// [`JobPathRegistry::register`] が返す RAII ガード。drop 時に登録を解除する
+/// (正規化後のキーを保持しておき、登録時と同じキーで解放する)。
+struct JobPathGuard<'a> {
+	registry: &'a JobPathRegistry,
+	input_key: PathBuf,
+	output_key: PathBuf,
 }
 
-impl Drop for OutputPathGuard<'_> {
+impl Drop for JobPathGuard<'_> {
 	fn drop(&mut self) {
-		self.registry.release(&self.path);
+		self.registry.release(&self.input_key, &self.output_key);
 	}
 }
 
 /// `Mutex` の poisoning を復旧して中身を取り出す(`concurrency::lock_or_recover` と同じ
-/// 設計判断: ロック保持中の処理は `HashSet` の insert/remove のみでパニックしうる操作を
-/// 含まないため、poisoning が起きても中身の不変条件は壊れていない)。
+/// 設計判断: ロック保持中の処理は `HashSet`/`HashMap` の参照・insert/remove のみで
+/// パニックしうる操作を含まないため、poisoning が起きても中身の不変条件は壊れていない)。
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 	mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -221,14 +295,28 @@ pub fn reframe(
 		return Err(MediaError::Cancelled);
 	}
 
-	// 同一 output_path への同時実行を検知して即座に拒否する(P1-2)。スロット待機
-	// (他ジョブと共有される有限リソース)より先に行うことで、既に同じ出力先へ
-	// 書き出し中の 2 本目がスロット空きを無駄に待つことも防げる。
-	// `_output_guard` は関数末尾までスコープに保持し、drop 時に RAII で解放される。
-	let _output_guard = OutputPathRegistry::global()
-		.register(output_path)
-		.ok_or_else(|| MediaError::OutputBusy {
-			path: output_path.to_path_buf(),
+	// 同一 output_path への同時実行、および入出力パスがクロスジョブで交差する
+	// 競合(自分の出力が別ジョブの入力/出力と一致、または自分の入力が別ジョブの出力と
+	// 一致)を検知して即座に拒否する(P1-2 + クロスジョブ拡張)。スロット待機(他ジョブと
+	// 共有される有限リソース)より先に行うことで、既に競合が確定しているジョブが
+	// スロット空きを無駄に待つことも防げる。
+	// `_job_guard` は関数末尾までスコープに保持し、drop 時に RAII で解放される。
+	let _job_guard = JobPathRegistry::global()
+		.register(input_path, output_path)
+		.map_err(|conflict| match conflict {
+			PathConflict::OutputVsOutput => MediaError::OutputBusy {
+				path: output_path.to_path_buf(),
+			},
+			PathConflict::OutputVsInput | PathConflict::InputVsOutput => {
+				let path = if conflict == PathConflict::OutputVsInput {
+					output_path
+				} else {
+					input_path
+				};
+				MediaError::CrossJobPathConflict {
+					path: path.to_path_buf(),
+				}
+			}
 		})?;
 
 	// 同時エンコード数を制限するスロットを取得する(関数末尾までスコープに保持し、
@@ -1164,55 +1252,208 @@ mod tests {
 		let _ = fs::remove_dir_all(&dir);
 	}
 
-	// --- OutputPathRegistry(P1-2) ----------------------------------------------------
+	// --- JobPathRegistry(P1-2 + クロスジョブのパス競合検知) ---------------------------
 	//
-	// `OutputPathRegistry::global()` はプロセス全体で共有される `OnceLock` のため、
-	// 各テストが異なる(テスト名を含む)ダミーパスを使うことで、並行実行される他の
-	// テストとの干渉を避ける(`concurrency.rs` の `MAX_CONCURRENT_ENCODES_ENV` テストが
-	// 専用ロックで直列化しているのとは異なるアプローチだが、パスが重複しない限り
-	// 状態は独立している)。
+	// `JobPathRegistry::global()` はプロセス全体で共有される `OnceLock` のため、各テストが
+	// 異なる(テスト名を含む)ダミーパスを使うことで、並行実行される他のテストとの干渉を
+	// 避ける(`concurrency.rs` の `MAX_CONCURRENT_ENCODES_ENV` テストが専用ロックで
+	// 直列化しているのとは異なるアプローチだが、パスが重複しない限り状態は独立している)。
+	//
+	// 実在しないファイルへの `register` も正しく動く前提はケースバイケースで異なる
+	// (`normalize_path_key` は親ディレクトリの実在のみ要求し、ファイル名の大文字小文字は
+	// 実ファイルが無ければ素通しになる ── `path_key.rs` 冒頭コメント参照)。そのため
+	// 「大文字小文字違いの衝突検知」を検証するテストのみ、実ファイルを用意する
+	// (`reframe.rs::output_targets_input_true_for_case_difference_on_case_insensitive_fs`
+	// と同じ理由)。
 
 	#[test]
-	fn second_register_for_same_path_returns_none_until_first_guard_drops() {
-		let path = Path::new("/tmp/facet-desktop-test-output-busy-basic.mp4");
-		let registry = OutputPathRegistry::global();
+	fn second_register_for_same_output_is_rejected_until_first_guard_drops() {
+		// 既存の `OutputBusy`(同一 output への二重書き込み)ケースが、2 引数版の
+		// `register` へ変わった後も変わらず検知されることの回帰確認。
+		let input_a = Path::new("/tmp/facet-desktop-test-output-busy-input-a.mp4");
+		let input_b = Path::new("/tmp/facet-desktop-test-output-busy-input-b.mp4");
+		let output = Path::new("/tmp/facet-desktop-test-output-busy-basic.mp4");
+		let registry = JobPathRegistry::global();
 
 		let first_guard = registry
-			.register(path)
+			.register(input_a, output)
 			.expect("first register should succeed");
-		assert!(
-			registry.register(path).is_none(),
-			"second register for the same path should be rejected while the first is active"
+		assert_eq!(
+			registry.register(input_b, output).err(),
+			Some(PathConflict::OutputVsOutput),
+			"second register for the same output should be rejected while the first is active"
 		);
 
 		drop(first_guard);
 
 		assert!(
-			registry.register(path).is_some(),
-			"after the first guard is dropped, the path should be registrable again"
+			registry.register(input_b, output).is_ok(),
+			"after the first guard is dropped, the output should be registrable again"
 		);
 	}
 
 	#[test]
-	fn register_for_different_paths_does_not_conflict() {
-		let registry = OutputPathRegistry::global();
-		let path_a = Path::new("/tmp/facet-desktop-test-output-busy-a.mp4");
-		let path_b = Path::new("/tmp/facet-desktop-test-output-busy-b.mp4");
+	fn register_for_unrelated_paths_does_not_conflict() {
+		let registry = JobPathRegistry::global();
+		let input_a = Path::new("/tmp/facet-desktop-test-unrelated-input-a.mp4");
+		let output_a = Path::new("/tmp/facet-desktop-test-unrelated-output-a.mp4");
+		let input_b = Path::new("/tmp/facet-desktop-test-unrelated-input-b.mp4");
+		let output_b = Path::new("/tmp/facet-desktop-test-unrelated-output-b.mp4");
 
-		let _guard_a = registry.register(path_a).expect("path_a should register");
-		let _guard_b = registry.register(path_b).expect("path_b should register");
+		let _guard_a = registry
+			.register(input_a, output_a)
+			.expect("job a should register");
+		let _guard_b = registry
+			.register(input_b, output_b)
+			.expect("job b should register");
+	}
+
+	#[test]
+	fn register_allows_multiple_concurrent_jobs_sharing_the_same_input() {
+		// 同一の入力から複数プリセットを同時書き出す(バンドのライブ映像から複数ショートを
+		// 作る、という本アプリの主用途)ことは正当な使い方であり、`active_inputs` を
+		// 参照カウントで持つことで拒否されないことを確認する回帰テスト。
+		let shared_input = Path::new("/tmp/facet-desktop-test-shared-input.mp4");
+		let output_a = Path::new("/tmp/facet-desktop-test-shared-input-output-a.mp4");
+		let output_b = Path::new("/tmp/facet-desktop-test-shared-input-output-b.mp4");
+		let registry = JobPathRegistry::global();
+
+		let _guard_a = registry
+			.register(shared_input, output_a)
+			.expect("first job reading shared_input should register");
+		let _guard_b = registry
+			.register(shared_input, output_b)
+			.expect("second job reading the same shared_input should also register");
+	}
+
+	#[test]
+	fn register_rejects_output_colliding_with_a_running_jobs_input() {
+		// クロスジョブ競合(a): job B の出力が、実行中の job A の入力と同じファイルを
+		// 指す場合を拒否する(B の `finalize_output` の rename が、A がまだ読み取り中の
+		// 入力を上書きしてしまう destructive race を防ぐ)。
+		let running_input = Path::new("/tmp/facet-desktop-test-cross-output-vs-input-running.mp4");
+		let running_output = Path::new("/tmp/facet-desktop-test-cross-output-vs-input-output.mp4");
+		let new_job_input = Path::new("/tmp/facet-desktop-test-cross-output-vs-input-new.mp4");
+		let registry = JobPathRegistry::global();
+
+		let _running_guard = registry
+			.register(running_input, running_output)
+			.expect("running job should register");
+
+		assert_eq!(
+			registry.register(new_job_input, running_input).err(),
+			Some(PathConflict::OutputVsInput),
+			"new job's output must not be allowed to target another running job's input"
+		);
+	}
+
+	#[test]
+	fn register_rejects_input_colliding_with_a_running_jobs_output() {
+		// クロスジョブ競合(b): job B の入力が、実行中の job A の出力先と同じファイルを
+		// 指す場合を拒否する(A の rename が完了する前後に B が読み取ってしまう
+		// destructive race を防ぐ)。
+		let running_input = Path::new("/tmp/facet-desktop-test-cross-input-vs-output-running.mp4");
+		let running_output = Path::new("/tmp/facet-desktop-test-cross-input-vs-output-output.mp4");
+		let new_job_output = Path::new("/tmp/facet-desktop-test-cross-input-vs-output-new.mp4");
+		let registry = JobPathRegistry::global();
+
+		let _running_guard = registry
+			.register(running_input, running_output)
+			.expect("running job should register");
+
+		assert_eq!(
+			registry.register(running_output, new_job_output).err(),
+			Some(PathConflict::InputVsOutput),
+			"new job's input must not be allowed to target another running job's output"
+		);
+	}
+
+	#[cfg(any(target_os = "macos", target_os = "windows"))]
+	#[test]
+	fn register_rejects_case_variant_collision_on_case_insensitive_fs() {
+		// APFS(macOS)/NTFS(Windows)は既定で大文字小文字を区別しないため、綴りの
+		// 大文字小文字だけが異なるパスでも同一ファイルを指す
+		// (`reframe.rs::output_targets_input_true_for_case_difference_on_case_insensitive_fs`
+		// と同じ前提)。実ファイルが無いと `normalize_path_key` はファイル名部分を素通し
+		// するため、この検証には実ファイルが必須(モジュール冒頭コメント参照)。
+		let dir = registry_test_dir("case-variant");
+		let running_input = dir.join("Video.mp4");
+		fs::write(&running_input, b"dummy").expect("write dummy input");
+		let running_output = dir.join("output.mp4");
+
+		let registry = JobPathRegistry::global();
+		let _running_guard = registry
+			.register(&running_input, &running_output)
+			.expect("running job should register");
+
+		let new_job_output = dir.join("VIDEO.MP4");
+		let new_job_input = dir.join("new-input.mp4");
+
+		assert_eq!(
+			registry.register(&new_job_input, &new_job_output).err(),
+			Some(PathConflict::OutputVsInput),
+			"case-variant spelling of the same file must still be detected as a collision"
+		);
+
+		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn release_on_guard_drop_frees_both_input_and_output_for_reuse() {
+		// 完了(ここでは単に guard を drop するだけで成功・失敗・キャンセルいずれの終了
+		// 経路も表現できる ── `JobPathGuard` の Drop は経路を問わず必ず走る)後、
+		// 同じ input/output の組み合わせは元の衝突チェックの対象から外れることを確認する。
+		let input = Path::new("/tmp/facet-desktop-test-release-frees-input.mp4");
+		let output = Path::new("/tmp/facet-desktop-test-release-frees-output.mp4");
+		let other_input = Path::new("/tmp/facet-desktop-test-release-frees-other-input.mp4");
+		let other_output = Path::new("/tmp/facet-desktop-test-release-frees-other-output.mp4");
+		let registry = JobPathRegistry::global();
+
+		let guard = registry
+			.register(input, output)
+			.expect("first registration should succeed");
+
+		// 実行中は、他ジョブの output==input / input==output いずれの交差も拒否される。
+		assert!(registry.register(other_input, input).is_err());
+		assert!(registry.register(output, other_output).is_err());
+
+		drop(guard);
+
+		// 解放後は両方のパスが交差チェックの対象から外れ、通常どおり登録できる。
+		assert!(
+			registry.register(other_input, input).is_ok(),
+			"input should be reusable as another job's output after release"
+		);
+		assert!(
+			registry.register(output, other_output).is_ok(),
+			"output should be reusable as another job's input after release"
+		);
+	}
+
+	fn registry_test_dir(name: &str) -> PathBuf {
+		let nanos = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.map(|d| d.as_nanos())
+			.unwrap_or(0);
+		let dir = std::env::temp_dir().join(format!(
+			"facet-pipeline-job-path-registry-test-{name}-{nanos}"
+		));
+		fs::create_dir_all(&dir).expect("create unique registry test dir");
+		dir
 	}
 
 	#[test]
 	fn reframe_returns_output_busy_error_for_a_path_registered_by_another_guard() {
 		// `reframe()` 自身は実 ffmpeg 依存だが、`reframe()` 冒頭のチェックが
-		// `OutputPathRegistry` 経由で `MediaError::OutputBusy` を返すこと自体は、
+		// `JobPathRegistry` 経由で `MediaError::OutputBusy` を返すこと自体は、
 		// レジストリへ事前登録してから `reframe()` を呼ぶことで実ファイル・実 ffmpeg
 		// 抜きで検証できる(`register` に失敗した時点でデコーダ/エンコーダ open 等の
 		// 実処理には一切入らないため)。
 		let path = Path::new("/tmp/facet-desktop-test-output-busy-via-reframe.mp4");
-		let _held = OutputPathRegistry::global()
-			.register(path)
+		let held_input =
+			Path::new("/tmp/facet-desktop-test-output-busy-via-reframe-held-input.mp4");
+		let _held = JobPathRegistry::global()
+			.register(held_input, path)
 			.expect("first registration should succeed");
 
 		let preset = Preset {
@@ -1250,6 +1491,57 @@ mod tests {
 		assert!(
 			matches!(result, Err(MediaError::OutputBusy { .. })),
 			"expected OutputBusy, got: {result:?}"
+		);
+	}
+
+	#[test]
+	fn reframe_returns_cross_job_path_conflict_when_input_targets_a_running_output() {
+		// `reframe_returns_output_busy_error_for_a_path_registered_by_another_guard` と
+		// 同じ手法(事前登録 → `reframe()` を呼んで即座に弾かれることを確認)で、
+		// 新規のクロスジョブ変種(このジョブの入力が実行中の別ジョブの出力と衝突)も
+		// `MediaError::CrossJobPathConflict` として検知されることを確認する。
+		let running_input = Path::new("/tmp/facet-desktop-test-cross-conflict-running-input.mp4");
+		let running_output = Path::new("/tmp/facet-desktop-test-cross-conflict-running-output.mp4");
+		let _held = JobPathRegistry::global()
+			.register(running_input, running_output)
+			.expect("running job should register");
+
+		let preset = Preset {
+			name: "cross-job-conflict-test".to_string(),
+			width: 1080,
+			height: 1920,
+			fit: crate::spec::FitMode::BlurPad,
+		};
+		let cancel = CancelToken::new();
+		let on_progress = |_p: Progress| {};
+		let options = ReframeOptions {
+			preset: &preset,
+			sigma: fit::DEFAULT_SIGMA,
+			crop: None,
+			source: SourceDimensions {
+				width: 0,
+				height: 0,
+			},
+			trim: None,
+			encoder: EncoderSelection::Explicit {
+				name: "does-not-matter",
+				options: Dictionary::new(),
+			},
+			bit_rate: 0,
+			cancel: &cancel,
+			on_progress: &on_progress,
+			staging_dir: None,
+		};
+
+		// 新規ジョブの input が、実行中ジョブの output(= running_output)と同じ。
+		let result = reframe(
+			running_output,
+			Path::new("/tmp/facet-desktop-test-cross-conflict-new-output.mp4"),
+			options,
+		);
+		assert!(
+			matches!(result, Err(MediaError::CrossJobPathConflict { .. })),
+			"expected CrossJobPathConflict, got: {result:?}"
 		);
 	}
 
