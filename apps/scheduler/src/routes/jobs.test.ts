@@ -51,7 +51,15 @@ function fakeJobsDB(options: { staleReadIdempotencyKey?: string } = {}) {
 								}
 								for (const row of rows.values()) {
 									if (row.idempotency_key === key) {
-										return { id: row.id, status: row.status } as T;
+										return {
+											id: row.id,
+											status: row.status,
+											platform: row.platform,
+											r2_key: row.r2_key,
+											media_type: row.media_type,
+											caption: row.caption,
+											publish_at: row.publish_at,
+										} as T;
 									}
 								}
 								return null;
@@ -229,7 +237,7 @@ describe("POST /jobs", () => {
 		expect(raced.__rows.size).toBe(1);
 	});
 
-	it("同一 idempotencyKey の再送は 200 で既存ジョブを返し、二重 INSERT しない", async () => {
+	it("同一 idempotencyKey・同一内容の再送は 200 で既存ジョブを返し、二重 INSERT しない", async () => {
 		const manifest = validManifest();
 		const first = await app.request(
 			"/jobs",
@@ -238,16 +246,10 @@ describe("POST /jobs", () => {
 		);
 		const firstJson = (await first.json()) as { id: string; status: string };
 
-		// 同一 idempotencyKey・別内容(caption 変更)で再送しても既存ジョブがそのまま返る。
+		// 同一 idempotencyKey・完全に同一内容の再送(冪等リプレイ)。
 		const second = await app.request(
 			"/jobs",
-			{
-				method: "POST",
-				body: JSON.stringify(validManifest({
-					idempotencyKey: manifest.idempotencyKey,
-					caption: "changed",
-				})),
-			},
+			{ method: "POST", body: JSON.stringify(manifest) },
 			envWithDB(db),
 		);
 
@@ -255,7 +257,40 @@ describe("POST /jobs", () => {
 		const secondJson = (await second.json()) as { id: string; status: string };
 		expect(secondJson).toEqual(firstJson);
 		expect(db.__rows.size).toBe(1);
-		// 再送では上書きされず、初回登録時の caption が維持される。
+	});
+
+	it("同一 idempotencyKey・別内容の再送は 409 で拒否する(idempotency key の使い回し)", async () => {
+		const manifest = validManifest();
+		const first = await app.request(
+			"/jobs",
+			{ method: "POST", body: JSON.stringify(manifest) },
+			envWithDB(db),
+		);
+		const firstJson = (await first.json()) as { id: string; status: string };
+
+		// 同一 idempotencyKey・別内容(caption 変更)で再送すると、古いジョブをそのまま
+		// 返さず 409 で拒否する(desktop 側のバグで別内容が紛れ込んでも黙って
+		// 古い内容を公開しないようにするため)。
+		const second = await app.request(
+			"/jobs",
+			{
+				method: "POST",
+				body: JSON.stringify(
+					validManifest({
+						idempotencyKey: manifest.idempotencyKey,
+						caption: "changed",
+					}),
+				),
+			},
+			envWithDB(db),
+		);
+
+		expect(second.status).toBe(409);
+		const secondJson = (await second.json()) as { error: string; id: string };
+		expect(secondJson.error).toBeTruthy();
+		expect(secondJson.id).toBe(firstJson.id);
+		expect(db.__rows.size).toBe(1);
+		// 拒否されても既存ジョブは変更されない(初回登録時の caption が維持される)。
 		expect(db.__rows.get(firstJson.id)?.caption).toBe(manifest.caption);
 	});
 });

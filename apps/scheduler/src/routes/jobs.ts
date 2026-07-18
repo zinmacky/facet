@@ -1,6 +1,7 @@
 import { jobManifest, jobRecord } from "@facet/contract";
-import type { JobRecord } from "@facet/contract";
+import type { JobManifest, JobRecord } from "@facet/contract";
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { Env } from "../env.js";
 
 /** D1 の jobs 行(全列)。camelCase の JobRecord へ写像する。 */
@@ -57,10 +58,15 @@ function toJobRecord(row: JobRowFull): JobRecord | null {
 	return parsed.data;
 }
 
-/** idempotency_key 検索で使う既存ジョブの最小情報。 */
+/** idempotency_key 検索で使う既存ジョブの情報。再送されたマニフェストとの内容比較に使う列も含む。 */
 interface ExistingJobLookup {
 	id: string;
 	status: string;
+	platform: string;
+	r2_key: string;
+	media_type: string;
+	caption: string | null;
+	publish_at: number;
 }
 
 /** idempotency_key で既存ジョブを検索する(無ければ null)。 */
@@ -69,7 +75,9 @@ async function findByIdempotencyKey(
 	idempotencyKey: string,
 ): Promise<ExistingJobLookup | null> {
 	return db
-		.prepare("SELECT id, status FROM jobs WHERE idempotency_key = ?")
+		.prepare(
+			"SELECT id, status, platform, r2_key, media_type, caption, publish_at FROM jobs WHERE idempotency_key = ?",
+		)
 		.bind(idempotencyKey)
 		.first<ExistingJobLookup>();
 }
@@ -82,6 +90,42 @@ async function findByIdempotencyKey(
  */
 function isUniqueConstraintViolation(err: unknown): boolean {
 	return err instanceof Error && /unique constraint failed/i.test(err.message);
+}
+
+/** 再送されたマニフェストが既存ジョブと同一内容かどうか。 */
+function samePayload(manifest: JobManifest, existing: ExistingJobLookup): boolean {
+	return (
+		existing.platform === manifest.platform &&
+		existing.r2_key === manifest.r2Key &&
+		existing.media_type === manifest.mediaType &&
+		(existing.caption ?? "") === manifest.caption &&
+		existing.publish_at === manifest.publishAt
+	);
+}
+
+/**
+ * 既存ジョブへの応答を組み立てる。内容が完全一致すれば冪等リプレイとして 200 で
+ * 既存ジョブを返す。内容が異なる場合、同じ idempotencyKey を別内容のジョブに
+ * 使い回そうとしている(desktop 側のバグ等)とみなし 409 で拒否する
+ * (idempotency key の標準的な契約: 同一キーへの再送は同一リクエストのみ許容し、
+ * 内容が食い違う場合は黙って古いジョブを返さない)。
+ */
+function respondForExistingJob(
+	c: Context<{ Bindings: Env }>,
+	manifest: JobManifest,
+	existing: ExistingJobLookup,
+) {
+	if (!samePayload(manifest, existing)) {
+		return c.json(
+			{
+				error:
+					"idempotencyKey は既に別内容のジョブで使用されています。新しい idempotencyKey を発行してください。",
+				id: existing.id,
+			},
+			409,
+		);
+	}
+	return c.json({ id: existing.id, status: existing.status }, 200);
 }
 
 /** /jobs 配下のルータを組み立てて返す。 */
@@ -100,13 +144,14 @@ export function jobsRoutes() {
 		}
 		const manifest = parsed.data;
 
-		// 既存の同一 idempotencyKey を検索。あれば 200 で既存を返す(再送は冪等)。
+		// 既存の同一 idempotencyKey を検索。あれば内容一致を確認して応答する
+		// (完全一致なら 200 で既存を返す冪等リプレイ、内容が異なれば 409)。
 		const existing = await findByIdempotencyKey(
 			c.env.DB,
 			manifest.idempotencyKey,
 		);
 		if (existing) {
-			return c.json({ id: existing.id, status: existing.status }, 200);
+			return respondForExistingJob(c, manifest, existing);
 		}
 
 		const id = crypto.randomUUID();
@@ -141,7 +186,7 @@ export function jobsRoutes() {
 					manifest.idempotencyKey,
 				);
 				if (raced) {
-					return c.json({ id: raced.id, status: raced.status }, 200);
+					return respondForExistingJob(c, manifest, raced);
 				}
 			}
 			throw err;
