@@ -63,6 +63,20 @@ jobs:
       # YouTube セクション)でのみ使われる「クライアントID」と、投稿フロー
       # (features/upload/youtubePublish.ts のエラーメッセージ)でのみ使われる
       # 「YouTube の認可が無効」を見る。
+      #
+      # GHSA-39fc-vq56-xx99: マーカー文字列はリファクタで改名されると下のビルド後
+      # grep が黙って空振り(常に「一致無し」= 合格)になる。ビルドの前にマーカーが
+      # ソース側に実在することを検査し、改名時はここで fail させて更新を強制する。
+      - name: Verify upload-feature markers still exist in source
+        if: matrix.task == 'build'
+        run: |
+          set -eu
+          for marker in "一括投稿" "APIトークン" "クライアントID" "YouTube の認可が無効"; do
+            if ! grep -rlF "$marker" apps/desktop/src >/dev/null; then
+              echo "::error::マーカー文字列「$marker」が apps/desktop/src に見つかりません(リネームされた場合は本ワークフローと release.yml の検査対象も更新してください)"
+              exit 1
+            fi
+          done
       - name: Build public frontend and check for upload-feature markers
         if: matrix.task == 'build'
         run: |
@@ -80,6 +94,14 @@ jobs:
           fi
           if grep -rlE "一括投稿|APIトークン|クライアントID|YouTube の認可が無効" "$assets_dir"; then
             echo "::error::public ビルドの成果物に投稿系マーカー(「一括投稿」/「APIトークン」/「クライアントID」/「YouTube の認可が無効」)が含まれています"
+            exit 1
+          fi
+          # JP UI 文字列マーカーは改名で素通りし得るため、投稿系エンドポイント文字列
+          # (R2/Cloudflare, IG Graph API, YouTube Data API)の負ガードで補強する
+          # (GHSA-39fc-vq56-xx99)。src-tauri(Rust)側のみが参照する文字列だが、
+          # フロント側に将来混入した場合も検出できるよう public バンドルも検査する。
+          if grep -rlE "googleapis|cloudflarestorage|graph\.facebook" "$assets_dir"; then
+            echo "::error::public ビルドの成果物に投稿系エンドポイント文字列(googleapis/cloudflarestorage/graph.facebook)が含まれています"
             exit 1
           fi
           rm -rf apps/desktop/dist-public-check

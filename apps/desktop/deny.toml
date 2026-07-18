@@ -33,6 +33,11 @@ ignore = [
 	{ id = "RUSTSEC-2024-0418", reason = "tauri/wry の推移的依存(gtk-rs GTK3)。上流更新待ち" },
 	{ id = "RUSTSEC-2024-0419", reason = "tauri/wry の推移的依存(gtk-rs GTK3)。上流更新待ち" },
 	{ id = "RUSTSEC-2024-0420", reason = "tauri/wry の推移的依存(gtk-rs GTK3)。上流更新待ち" },
+	# glib VariantStrIter の unsoundness(GHSA-wrw7-89jp-8q8g)。glib 0.20.0 で修正済みだが、
+	# GTK3 バインディング(gtk 0.18 系)が glib ^0.18 を要求しており、上流(gtk-rs の
+	# GTK3 系リリース、または tauri/wry の GTK4 移行)待ち。VariantStrIter は Facet の
+	# コードパスでは未使用。
+	{ id = "RUSTSEC-2024-0429", reason = "tauri/wry の推移的依存(gtk-rs GTK3 の glib)。上流更新待ち" },
 	# proc-macro-error は多数のマクロクレートが依存する定番だが保守停止。ビルド専用
 	# (実行時コード非同梱)で影響は軽微。
 	{ id = "RUSTSEC-2024-0370", reason = "tauri 系マクロの推移的依存。ビルド専用で実行時影響なし" },
