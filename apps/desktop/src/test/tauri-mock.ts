@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import type { IgPublishDone } from "../features/upload/igPublish";
 import type { MediaInfo } from "../lib/tauri";
 
 /**
@@ -21,6 +22,18 @@ export const DEFAULT_MEDIA_INFO: MediaInfo = {
 	fps: 30,
 	hasAudio: true,
 	codec: "h264",
+};
+
+/**
+ * `emitMockEvent("ig_publish://done/<jobId>", ...)` に渡す既定の done ペイロード。
+ * `UploadScreen.igPublish.test.tsx` が実際に emit する値そのもので、
+ * `test/contract-boundary.test.ts` がこれを import して `@facet/contract` の
+ * `jobCreateResponse` スキーマへの適合を検証する(GHSA-6w5m-8gcr-rf63 / Issue #93)。
+ * ここを直接変更すると契約検証テストも連動して確認できる(手打ちの重複を避ける)。
+ */
+export const MOCK_IG_PUBLISH_DONE: IgPublishDone = {
+	schedulerJobId: "scheduler-job-1",
+	status: "pending",
 };
 
 /**
