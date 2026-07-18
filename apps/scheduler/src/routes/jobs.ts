@@ -57,6 +57,33 @@ function toJobRecord(row: JobRowFull): JobRecord | null {
 	return parsed.data;
 }
 
+/** idempotency_key 検索で使う既存ジョブの最小情報。 */
+interface ExistingJobLookup {
+	id: string;
+	status: string;
+}
+
+/** idempotency_key で既存ジョブを検索する(無ければ null)。 */
+async function findByIdempotencyKey(
+	db: Env["DB"],
+	idempotencyKey: string,
+): Promise<ExistingJobLookup | null> {
+	return db
+		.prepare("SELECT id, status FROM jobs WHERE idempotency_key = ?")
+		.bind(idempotencyKey)
+		.first<ExistingJobLookup>();
+}
+
+/**
+ * D1 の INSERT が idempotency_key の UNIQUE 制約に違反したかどうかを判定する。
+ * D1 は専用のエラークラスを公開していないため、エラーメッセージで判定する
+ * ("D1_ERROR: UNIQUE constraint failed: ..." 形式)。誤判定でも呼び出し側で
+ * 元のエラーを再送出するだけなので、握りつぶしにはならない。
+ */
+function isUniqueConstraintViolation(err: unknown): boolean {
+	return err instanceof Error && /unique constraint failed/i.test(err.message);
+}
+
 /** /jobs 配下のルータを組み立てて返す。 */
 export function jobsRoutes() {
 	const app = new Hono<{ Bindings: Env }>();
@@ -74,35 +101,51 @@ export function jobsRoutes() {
 		const manifest = parsed.data;
 
 		// 既存の同一 idempotencyKey を検索。あれば 200 で既存を返す(再送は冪等)。
-		const existing = await c.env.DB.prepare(
-			"SELECT id, status FROM jobs WHERE idempotency_key = ?",
-		)
-			.bind(manifest.idempotencyKey)
-			.first<{ id: string; status: string }>();
+		const existing = await findByIdempotencyKey(
+			c.env.DB,
+			manifest.idempotencyKey,
+		);
 		if (existing) {
 			return c.json({ id: existing.id, status: existing.status }, 200);
 		}
 
 		const id = crypto.randomUUID();
 		const now = Date.now();
-		await c.env.DB.prepare(
-			`INSERT INTO jobs
+		try {
+			await c.env.DB.prepare(
+				`INSERT INTO jobs
         (id, idempotency_key, platform, r2_key, media_type, caption, publish_at,
          status, attempts, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
-		)
-			.bind(
-				id,
-				manifest.idempotencyKey,
-				manifest.platform,
-				manifest.r2Key,
-				manifest.mediaType,
-				manifest.caption,
-				manifest.publishAt,
-				now,
-				now,
 			)
-			.run();
+				.bind(
+					id,
+					manifest.idempotencyKey,
+					manifest.platform,
+					manifest.r2Key,
+					manifest.mediaType,
+					manifest.caption,
+					manifest.publishAt,
+					now,
+					now,
+				)
+				.run();
+		} catch (err) {
+			// 上の SELECT → この INSERT はアトミックでないため、同一 idempotencyKey の
+			// リクエストが同時に来ると両方が SELECT を通過しうる(check-then-insert の
+			// レース)。後発の INSERT は idempotency_key の UNIQUE 制約に弾かれるので、
+			// それを検知して「既存ジョブを返す」通常の冪等パスへ合流させる。
+			if (isUniqueConstraintViolation(err)) {
+				const raced = await findByIdempotencyKey(
+					c.env.DB,
+					manifest.idempotencyKey,
+				);
+				if (raced) {
+					return c.json({ id: raced.id, status: raced.status }, 200);
+				}
+			}
+			throw err;
+		}
 
 		return c.json({ id, status: "pending" }, 201);
 	});

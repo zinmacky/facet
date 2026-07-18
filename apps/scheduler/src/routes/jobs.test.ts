@@ -25,9 +25,15 @@ interface FakeRow {
  * jobs.ts が発行する2種の SELECT(idempotency_key 検索・id 検索)と INSERT を
  * 再現するインメモリ D1 フェイク。SQL 文言をパターン照合して分岐する
  * (publish-do.test.ts の既存フェイクと同じ方針)。
+ *
+ * `staleReadIdempotencyKey` を指定すると、そのキーでの idempotency_key 検索
+ * (SELECT)は最初の1回だけ既存行があっても null を返す。check-then-insert の
+ * レース(SELECT 時点では見えなかった行が、後続の INSERT 時点では既にコミット
+ * 済みで UNIQUE 制約に弾かれる状況)を再現するためのフック。
  */
-function fakeJobsDB() {
+function fakeJobsDB(options: { staleReadIdempotencyKey?: string } = {}) {
 	const rows = new Map<string, FakeRow>();
+	let staleReadConsumed = false;
 	const db = {
 		prepare(sql: string) {
 			return {
@@ -36,6 +42,13 @@ function fakeJobsDB() {
 						async first<T>() {
 							if (sql.includes("idempotency_key = ?")) {
 								const key = args[0] as string;
+								if (
+									options.staleReadIdempotencyKey === key &&
+									!staleReadConsumed
+								) {
+									staleReadConsumed = true;
+									return null;
+								}
 								for (const row of rows.values()) {
 									if (row.idempotency_key === key) {
 										return { id: row.id, status: row.status } as T;
@@ -72,6 +85,14 @@ function fakeJobsDB() {
 									number,
 									number,
 								];
+								// 実際の D1(SQLite)と同じく idempotency_key の UNIQUE 制約を再現する。
+								for (const row of rows.values()) {
+									if (row.idempotency_key === idempotencyKey) {
+										throw new Error(
+											"D1_ERROR: UNIQUE constraint failed: jobs.idempotency_key: SQLITE_CONSTRAINT",
+										);
+									}
+								}
 								rows.set(id, {
 									id,
 									idempotency_key: idempotencyKey,
@@ -164,6 +185,48 @@ describe("POST /jobs", () => {
 			status: "pending",
 			attempts: 0,
 		});
+	});
+
+	it("check-then-insert のレースで idempotency_key の UNIQUE 制約に衝突しても 200 で既存ジョブを返す", async () => {
+		const manifest = validManifest();
+		const raced = fakeJobsDB({
+			staleReadIdempotencyKey: manifest.idempotencyKey,
+		});
+		const raceApp = buildApp();
+
+		// 「別の並行リクエスト」が既に同一 idempotencyKey でジョブを INSERT 済み、という体を
+		// 直接 rows に書き込んで再現する。
+		const racedId = crypto.randomUUID();
+		const now = Date.now();
+		raced.__rows.set(racedId, {
+			id: racedId,
+			idempotency_key: manifest.idempotencyKey,
+			platform: "instagram",
+			r2_key: manifest.r2Key,
+			media_type: manifest.mediaType,
+			caption: manifest.caption,
+			publish_at: manifest.publishAt,
+			status: "pending",
+			ig_container_id: null,
+			ig_media_id: null,
+			attempts: 0,
+			last_error: null,
+			created_at: now,
+			updated_at: now,
+		});
+
+		const res = await raceApp.request(
+			"/jobs",
+			{ method: "POST", body: JSON.stringify(manifest) },
+			envWithDB(raced),
+		);
+
+		// 事前の SELECT では見えなかった(stale read)が、INSERT が UNIQUE 制約で弾かれ、
+		// 再取得した既存ジョブがそのまま 200 で返る。二重 INSERT もされない。
+		expect(res.status).toBe(200);
+		const json = await res.json();
+		expect(json).toMatchObject({ id: racedId, status: "pending" });
+		expect(raced.__rows.size).toBe(1);
 	});
 
 	it("同一 idempotencyKey の再送は 200 で既存ジョブを返し、二重 INSERT しない", async () => {
