@@ -7,6 +7,12 @@ import { generateSchedule, msToLocalInput } from "../../lib/schedule";
 import { usePreview } from "../../lib/usePreview";
 import { getErrorMessage } from "../../lib/getErrorMessage";
 import { newJobId } from "../../lib/jobId";
+import {
+	detachAllJobHandles,
+	detachHandle,
+	detachJobHandle,
+	type JobHandleLike,
+} from "../../lib/tauriJobLifecycle";
 import { Button } from "../../components/ui/Button";
 import { usePublishGateContext } from "../publish-settings/PublishGateContext";
 import { describeIgPublishError, startIgPublish } from "./igPublish";
@@ -64,17 +70,18 @@ export function usePublishExtras({
 	// 満たす場合のみ Instagram への投稿ボタンを有効化する(`canPublishTarget` 参照)。
 	const publishGate = usePublishGateContext();
 
-	// startYoutubePublish/startIgPublish が返すハンドルの共通形(構造的に一致)。
-	type PublishHandle = {
-		jobId: string;
-		unsubscribe: () => void;
-		cancel: () => Promise<void>;
-	};
+	// startYoutubePublish/startIgPublish が返すハンドルの共通形(構造的に一致。
+	// `JobHandleLike` は `tauriJobLifecycle.ts` 参照)。
+	type PublishHandle = JobHandleLike;
 	// output.id → 実行中の投稿ジョブのハンドル(GHSA-rrgf-h689-w639 対応)。
 	// 従来は publishTo() 内で `.catch` のみ握って破棄しており、投稿中(数十秒)に
 	// アンマウントされるとリスナ残留・アンマウント済みコンポーネントへの setState・
 	// キャンセル導線の欠如が起きていた。done/error で自身を Map から取り除く
 	// (settled 済みなら .then() 側で登録しない、useReframeQueue.ts と同じ順序保証)。
+	// 購読解除 + キャンセルは `detachHandle`/`detachJobHandle`/`detachAllJobHandles`
+	// (`tauriJobLifecycle.ts`)に集約している — useReframeQueue.ts/usePreview.ts の
+	// `cancelOrphanHandle` と異なり、失敗を warn せず握りつぶす(既存の意図的な挙動。
+	// 投稿中のキャンセルはユーザー操作/アンマウントで頻発しうるため)。
 	const inFlightRef = useRef<Map<string, PublishHandle>>(new Map());
 	// アンマウント後の setState を防ぐフラグ(setPubStatus 経由でのみ書き込むため
 	// ここ 1 箇所をガードすれば足りる)。
@@ -107,11 +114,7 @@ export function usePublishExtras({
 		mountedRef.current = true;
 		return () => {
 			mountedRef.current = false;
-			for (const handle of inFlightRef.current.values()) {
-				handle.unsubscribe();
-				void handle.cancel().catch(() => undefined);
-			}
-			inFlightRef.current.clear();
+			detachAllJobHandles(inFlightRef.current);
 		};
 	}, []);
 
@@ -159,12 +162,7 @@ export function usePublishExtras({
 			publishRender.remove(id);
 			// in-flight の投稿ジョブが残っていれば購読解除 + キャンセルする
 			// (GHSA-rrgf-h689-w639 対応。output 自体が消えたので誰も結果を見ない)。
-			const handle = inFlightRef.current.get(id);
-			if (handle) {
-				handle.unsubscribe();
-				void handle.cancel().catch(() => undefined);
-				inFlightRef.current.delete(id);
-			}
+			detachJobHandle(inFlightRef.current, id);
 			igJobIdsRef.current.delete(id);
 		}
 	}, [posts, publishRender.remove]);
@@ -355,8 +353,7 @@ export function usePublishExtras({
 							// usePreview.ts の isCurrent() 分岐と同じレース)。孤児掃除
 							// effect/unmount cleanup は既に走った後なので inFlightRef へは
 							// 登録せず、ここで直接 unsubscribe + cancel する。
-							handle.unsubscribe();
-							void handle.cancel().catch(() => undefined);
+							detachHandle(handle);
 							resolve();
 							return;
 						}
@@ -418,8 +415,7 @@ export function usePublishExtras({
 					if (settled) return;
 					if (!isOutputLive(output.id)) {
 						// YouTube 分岐と同じレース対策(直前のコメント参照)。
-						handle.unsubscribe();
-						void handle.cancel().catch(() => undefined);
+						detachHandle(handle);
 						resolve();
 						return;
 					}
