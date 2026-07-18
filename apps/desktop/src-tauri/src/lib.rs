@@ -94,6 +94,14 @@ pub fn run() {
 			commands::publish::has_scheduler_api_token,
 			#[cfg(feature = "publish")]
 			commands::publish::delete_scheduler_api_token,
+			// scheduler の URL(GHSA-j74q-9v5x-87w3 対応: Bearer トークンの送信先を
+			// renderer から都度指定させず、Rust 側の保存値からのみ導出する)。
+			#[cfg(feature = "publish")]
+			commands::publish::set_scheduler_url,
+			#[cfg(feature = "publish")]
+			commands::publish::get_scheduler_url,
+			#[cfg(feature = "publish")]
+			commands::publish::delete_scheduler_url,
 			#[cfg(feature = "publish")]
 			commands::publish::check_scheduler_connection,
 			// R2(S3 互換)資格情報設定(§6.4)。

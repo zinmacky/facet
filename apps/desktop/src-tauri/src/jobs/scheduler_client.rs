@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use reqwest::{Client, StatusCode, Url};
 use thiserror::Error;
+use url::Host;
 
 use super::manifest::{JobCreateResponse, JobManifest};
 
@@ -42,16 +43,41 @@ pub enum EnqueueError {
 	Network(String),
 }
 
+/// `base`(scheduler のベース URL)を http/https の絶対 URL として検証する。
+///
+/// GHSA-j74q-9v5x-87w3(confused deputy)対策: 送信先は Rust 側の保存値(キーチェーン)
+/// からのみ導出する構造にした上で、さらにここで `http://` をループバック
+/// (`127.0.0.1`/`::1`/`localhost`)限定にする。WebView が侵害され任意のホストを
+/// 指定できたとしても、TLS を伴わない `http://` で外部ホストへ Bearer トークンが
+/// 流出することを防ぐ(`https://` は任意ホストを許可する — 経路上の盗聴は TLS が防ぐ)。
+pub fn parse_scheduler_base(base: &str) -> Result<Url, String> {
+	let url =
+		Url::parse(base.trim()).map_err(|_| "scheduler_url が不正な URL です。".to_string())?;
+	match url.scheme() {
+		"https" => Ok(url),
+		"http" => {
+			let is_loopback = match url.host() {
+				Some(Host::Ipv4(addr)) => addr.is_loopback(),
+				Some(Host::Ipv6(addr)) => addr.is_loopback(),
+				Some(Host::Domain(domain)) => domain == "localhost",
+				None => false,
+			};
+			if is_loopback {
+				Ok(url)
+			} else {
+				Err("http:// はループバック(localhost)のみ許可されます。リモートの scheduler には https:// を使ってください。".to_string())
+			}
+		}
+		_ => Err("scheduler_url は http/https のみ対応です。".to_string()),
+	}
+}
+
 /// `base`(scheduler のベース URL)+ `/jobs` の URL を組み立てる。
 /// `commands::publish::scheduler_check::join_path` と同じ考え方の小さな純関数だが、
 /// `jobs` はビジネスロジック層・`commands` は invoke 境界層という層分けを保つため、
 /// 依存方向を逆転させないよう独立に持つ(§`jobs` モジュール冒頭コメント参照)。
 fn join_jobs_url(base: &str) -> Result<Url, String> {
-	let mut url =
-		Url::parse(base.trim()).map_err(|_| "scheduler_url が不正な URL です。".to_string())?;
-	if !matches!(url.scheme(), "http" | "https") {
-		return Err("scheduler_url は http/https のみ対応です。".to_string());
-	}
+	let mut url = parse_scheduler_base(base)?;
 	let base_path = url.path().trim_end_matches('/');
 	url.set_path(&format!("{base_path}/jobs"));
 	Ok(url)
@@ -107,6 +133,34 @@ mod tests {
 	use crate::jobs::manifest::JobManifest;
 	use std::io::{Read, Write};
 	use std::net::TcpListener;
+
+	// ---- parse_scheduler_base(純粋関数、ネットワーク不要) --------------------------
+	// GHSA-j74q-9v5x-87w3: http はループバックのみ許可、https は任意ホスト許可。
+
+	#[test]
+	fn parse_scheduler_base_allows_http_ipv4_loopback() {
+		assert!(parse_scheduler_base("http://127.0.0.1:8787").is_ok());
+	}
+
+	#[test]
+	fn parse_scheduler_base_allows_http_localhost() {
+		assert!(parse_scheduler_base("http://localhost:8787").is_ok());
+	}
+
+	#[test]
+	fn parse_scheduler_base_allows_http_ipv6_loopback() {
+		assert!(parse_scheduler_base("http://[::1]:8787").is_ok());
+	}
+
+	#[test]
+	fn parse_scheduler_base_rejects_http_remote_host() {
+		assert!(parse_scheduler_base("http://evil.example.com").is_err());
+	}
+
+	#[test]
+	fn parse_scheduler_base_allows_https_remote_host() {
+		assert!(parse_scheduler_base("https://evil.example.com").is_ok());
+	}
 
 	// ---- join_jobs_url(純粋関数、ネットワーク不要) ---------------------------------
 

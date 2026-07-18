@@ -79,10 +79,13 @@ export function cancelIgPublishJob(jobId: string): Promise<void> {
 /**
  * IG(Instagram)への予約公開ジョブを開始する。
  *
- * `inputPath` は書き出し済みの mp4 の絶対パス、`publishAt` は unix ms、
- * `schedulerUrl` は scheduler のベース URL(`schedulerUrlStore.ts` から読む)。
- * バリデーション(ファイルサイズ・尺・キャプション長)・R2/scheduler の資格情報未設定は
- * `invoke()` 自体の reject(Err(String))として返る(ジョブは開始されない、
+ * `inputPath` は書き出し済みの mp4 の絶対パス、`publishAt` は unix ms。scheduler の
+ * 送信先(scheduler_url)はここでは渡さない — Rust 側がキーチェーンの保存値から読む
+ * (GHSA-j74q-9v5x-87w3 対応: renderer が任意の送信先を指定できると、WebView 侵害時に
+ * Bearer トークンを任意ホストへ流出させられるため。`schedulerUrlStore.ts`/
+ * `commands/publish/ig.rs` 冒頭コメント参照)。
+ * バリデーション(ファイルサイズ・尺・キャプション長)・R2/scheduler の資格情報・URL
+ * 未設定は `invoke()` 自体の reject(Err(String))として返る(ジョブは開始されない、
  * `commands/publish/ig.rs` 冒頭コメント参照)。R2 アップロード/scheduler 登録開始後の
  * 失敗(ネットワーク・401・503・キャンセル)は `onError` ハンドラに構造化 enum で届く。
  */
@@ -91,7 +94,6 @@ export async function startIgPublish(
 		inputPath: string;
 		caption: string;
 		publishAt: number;
-		schedulerUrl: string;
 	},
 	handlers: IgPublishHandlers,
 ): Promise<IgPublishHandle> {
@@ -128,7 +130,6 @@ export async function startIgPublish(
 			inputPath: params.inputPath,
 			caption: params.caption,
 			publishAt: params.publishAt,
-			schedulerUrl: params.schedulerUrl,
 		});
 	} catch (err) {
 		unsubscribe();

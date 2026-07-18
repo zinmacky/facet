@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { getErrorMessage } from "../../lib/getErrorMessage";
 import { usePublishGateContext } from "./PublishGateContext";
@@ -12,7 +12,7 @@ import {
 	youtubeOauthConnect,
 	youtubeOauthDisconnect,
 } from "./publishSettingsClient";
-import { loadSchedulerUrl, saveSchedulerUrl } from "./schedulerUrlStore";
+import { getSchedulerUrl, setSchedulerUrl } from "./schedulerUrlStore";
 import type { PublishGateResult } from "./usePublishGate";
 
 /** R2 バケット名の既定値(Rust 側 `r2_credentials::DEFAULT_BUCKET` と同じ値)。 */
@@ -21,7 +21,8 @@ const DEFAULT_R2_BUCKET = "facet-media";
 /**
  * 設定ダイアログに差し込む「公開連携」セクション(private エディション専用、§entry.ts)。
  *
- * scheduler の URL(秘密ではないため localStorage、§schedulerUrlStore.ts)・API
+ * scheduler の URL(秘密ではないが、送信先を Rust 側の保存値に限定するため OS
+ * キーチェーンに保存する。GHSA-j74q-9v5x-87w3 対応、§schedulerUrlStore.ts)・API
  * トークン・R2(Cloudflare, S3 互換)資格情報(いずれも秘密のため OS キーチェーン、
  * §publishSettingsClient.ts / src-tauri/src/commands/publish/)を設定し、疎通チェックの
  * 結果を表示する。「scheduler 疎通 OK かつ R2 資格情報保存済み」で IG 投稿が有効になる
@@ -35,12 +36,26 @@ const DEFAULT_R2_BUCKET = "facet-media";
  * (保存済みバッジ + 削除ボタンのみ表示する。§実装方針)。
  */
 export function PublishSettingsSection() {
-	const [schedulerUrl, setSchedulerUrlInput] = useState(() => loadSchedulerUrl());
+	const [schedulerUrl, setSchedulerUrlInput] = useState("");
+	const [savingUrl, setSavingUrl] = useState(false);
+	const [urlError, setUrlError] = useState<string | null>(null);
 	const [tokenInput, setTokenInput] = useState("");
 	const [savingToken, setSavingToken] = useState(false);
 	const [tokenError, setTokenError] = useState<string | null>(null);
 	const [deletingToken, setDeletingToken] = useState(false);
 	const gate = usePublishGateContext();
+
+	// 保存済みの scheduler URL を Rust 側(キーチェーン)から非同期に読み込む
+	// (§schedulerUrlStore.ts、旧 localStorage からの一回性移行もここで行われる)。
+	useEffect(() => {
+		let cancelled = false;
+		void getSchedulerUrl().then((url) => {
+			if (!cancelled) setSchedulerUrlInput(url);
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, []);
 
 	// R2 資格情報フォーム(4フィールドまとめて保存/削除、§r2_credentials.rs)。
 	const [r2AccountId, setR2AccountId] = useState("");
@@ -59,9 +74,17 @@ export function PublishSettingsSection() {
 	const [connectingYt, setConnectingYt] = useState(false);
 	const [ytBusy, setYtBusy] = useState(false);
 
-	const handleSaveUrl = () => {
-		saveSchedulerUrl(schedulerUrl.trim());
-		void gate.recheck();
+	const handleSaveUrl = async () => {
+		setSavingUrl(true);
+		setUrlError(null);
+		try {
+			await setSchedulerUrl(schedulerUrl.trim());
+			await gate.recheck();
+		} catch (err) {
+			setUrlError(getErrorMessage(err));
+		} finally {
+			setSavingUrl(false);
+		}
 	};
 
 	const handleSaveToken = async () => {
@@ -210,11 +233,13 @@ export function PublishSettingsSection() {
 						size="sm"
 						variant="secondary"
 						aria-label="scheduler URLを保存"
-						onClick={handleSaveUrl}
+						disabled={savingUrl}
+						onClick={() => void handleSaveUrl()}
 					>
-						保存
+						{savingUrl ? "保存中…" : "保存"}
 					</Button>
 				</div>
+				{urlError && <span className="text-[11px] text-danger">{urlError}</span>}
 			</div>
 
 			<div className="flex flex-col gap-1.5">

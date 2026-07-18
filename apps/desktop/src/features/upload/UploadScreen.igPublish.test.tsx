@@ -38,12 +38,11 @@ beforeEach(() => {
 
 /** ゲートが開く前提条件(scheduler URL + トークン + R2 資格情報)を作る。 */
 async function setUpReadyGate() {
-	window.localStorage.setItem(
-		"facet.desktop.private.schedulerUrl",
-		SCHEDULER_URL,
-	);
 	// tauri-mock の defaultInvokeImpl のインメモリ状態を直接構築する
 	// (render 前に呼ぶことで、PublishGateProvider のマウント時チェックが ready になる)。
+	// scheduler URL は GHSA-j74q-9v5x-87w3 対応で invoke ベースへ変わった
+	// (旧: localStorage 直接設定)。
+	await mockInvoke("set_scheduler_url", { url: SCHEDULER_URL });
 	await mockInvoke("set_scheduler_api_token", { token: "test-token" });
 	await mockInvoke("set_r2_credentials", {
 		accountId: "acc",
@@ -180,7 +179,6 @@ describe("UploadScreen: IG 投稿フロー", () => {
 				expect.objectContaining({
 					inputPath: "/publish-cache/out.mp4",
 					caption: "",
-					schedulerUrl: SCHEDULER_URL,
 					publishAt: expect.any(Number),
 				}),
 			),
