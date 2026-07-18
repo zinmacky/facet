@@ -113,7 +113,17 @@ function applyWrite(row: FakeJob, sql: string, args: unknown[]): void {
 	}
 }
 
-function makeHarness(initial: Partial<FakeJob>) {
+/**
+ * @param options.claimSucceeds pending → creating の原子的 claim(WHERE status = 'pending'
+ *   付き UPDATE)が成功するか。false にすると D1 の `meta.changes = 0` 相当を返し、
+ *   「loadJob 時点では pending だったが claim 実行時には既に他インスタンスが奪っていた」
+ *   という同時発火の競合を模せる(row 自体は変更しない = 競合相手側の状態はこの
+ *   フェイクの外側の出来事として扱う)。
+ */
+function makeHarness(
+	initial: Partial<FakeJob>,
+	options?: { claimSucceeds?: boolean },
+) {
 	const row: FakeJob & { last_error?: string } = {
 		id: "job-1",
 		r2_key: "2026/07/13/uuid.mp4",
@@ -149,8 +159,22 @@ function makeHarness(initial: Partial<FakeJob>) {
 				bind(...args: unknown[]) {
 					return {
 						async run() {
+							// claimPendingForCreating(指摘1)の原子的 claim。実 D1 の
+							// `WHERE ... AND status = 'pending'` は当フェイクでは
+							// options.claimSucceeds で明示的に制御する(既定 true)。
+							if (sql.includes("AND status = 'pending'")) {
+								const claimSucceeds = options?.claimSucceeds ?? true;
+								if (claimSucceeds) {
+									row.status = "creating";
+									const idx = args.length - 2; // updated_at
+									if (idx >= 0) {
+										row.updated_at = args[idx] as number;
+									}
+								}
+								return { meta: { changes: claimSucceeds ? 1 : 0 } };
+							}
 							applyWrite(row, sql, args);
-							return { success: true };
+							return { meta: { changes: 1 } };
 						},
 						async first() {
 							// loadJob の SELECT。id 一致でコピーを返す。
@@ -273,6 +297,56 @@ describe("PublishDO.alarm: publish 冪等化(S-2)", () => {
 		await DO.alarm();
 
 		expect(row.status).toBe("failed");
+	});
+});
+
+/**
+ * PublishDO.fetch("/start") の回帰テスト(指摘1: pending → creating の原子的 claim)。
+ * loadJob(D1 サブリクエスト)は DO の input gate 対象外のため、読み取りと直後の
+ * 書き込みの間に別インスタンス(重複した cron 起動等)が割り込みうる。
+ * WHERE status = 'pending' 付き UPDATE で claim し、meta.changes = 0(他が既に
+ * claim 済み)なら副作用なしで返すことを検証する。
+ */
+describe("PublishDO.fetch /start: pending → creating の原子的 claim(指摘1)", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mockGetIgToken.mockResolvedValue("token");
+		mockCreateContainer.mockResolvedValue("container-1");
+	});
+
+	function startRequest(jobId: string) {
+		return new Request("https://do/start", {
+			method: "POST",
+			body: JSON.stringify({ jobId }),
+		});
+	}
+
+	it("claim に成功すれば creating へ進み、コンテナ生成を実行する", async () => {
+		const { DO, row } = makeHarness({ status: "pending" });
+
+		const res = await DO.fetch(startRequest(row.id));
+
+		expect(res.status).toBe(200);
+		expect(mockCreateContainer).toHaveBeenCalledTimes(1);
+		expect(row.status).toBe("processing");
+	});
+
+	it("loadJob 時点では pending でも claim 実行時に既に奪われていれば、コンテナ生成を一切行わない(同時発火の競合)", async () => {
+		const { DO, row } = makeHarness(
+			{ status: "pending" },
+			{ claimSucceeds: false },
+		);
+
+		const res = await DO.fetch(startRequest(row.id));
+
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ status: "already-claimed" });
+		// 副作用なし: token 取得もコンテナ生成もしない。
+		expect(mockGetIgToken).not.toHaveBeenCalled();
+		expect(mockCreateContainer).not.toHaveBeenCalled();
+		// claim に失敗しているので row 自体もこのインスタンス側からは変更されない
+		// (勝った側の別インスタンスが進める前提で、こちらは何もしない)。
+		expect(row.status).toBe("pending");
 	});
 });
 

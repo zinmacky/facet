@@ -130,9 +130,23 @@ export class PublishDO implements DurableObject {
 			});
 		}
 
+		// pending → creating を原子的に claim する。loadJob は D1 サブリクエストであり
+		// DO の input gate(state.storage 操作のみ保護)の対象外のため、この読み取りと
+		// 直後の書き込みの間に別インスタンス(同一ジョブに対する重複した /start 起動。
+		// cron の毎分スキャンが同じ pending ジョブを跨分で拾う、コンテナ生成が長引いて
+		// sweepStaleJobs 経由の /resume と競合する、等)が割り込みうる。上の status
+		// チェックだけでは両者が同時に "pending" を観測して二重に createContainer を
+		// 呼び、IG コンテナを孤立させる恐れがある(指摘1)。WHERE status = 'pending' 付き
+		// UPDATE で claim し、meta.changes が 0 なら他方が既に claim 済みとして
+		// 副作用なしで返す。
+		const claimed = await this.claimPendingForCreating(jobId);
+		if (!claimed) {
+			return new Response(JSON.stringify({ status: "already-claimed" }), {
+				headers: { "content-type": "application/json" },
+			});
+		}
+
 		try {
-			// pending → creating。コンテナ生成中。
-			await this.updateStatus(jobId, "creating");
 			const token = await getIgToken(this.env);
 			await this.runCreate(jobId, job, token);
 			return new Response(JSON.stringify({ status: "processing" }), {
@@ -363,6 +377,23 @@ export class PublishDO implements DurableObject {
 		)
 			.bind(status, Date.now(), jobId)
 			.run();
+	}
+
+	/**
+	 * pending → creating の claim を `WHERE status = 'pending'` 付き UPDATE で原子的に
+	 * 行う(指摘1)。D1 はこの1文を単一トランザクションとして実行するため、
+	 * read-then-write(loadJob → updateStatus)と違い他インスタンスの割り込み余地が無い。
+	 * `meta.changes` が 0 ならこの UPDATE は何行にもマッチしなかった、つまり呼び出し時点で
+	 * 既に他インスタンスが claim 済み(status が pending でなくなっていた)ということなので
+	 * false を返し、呼び出し側は副作用(コンテナ生成)を一切行わずに終える。
+	 */
+	private async claimPendingForCreating(jobId: string): Promise<boolean> {
+		const result = await this.env.DB.prepare(
+			"UPDATE jobs SET status = 'creating', updated_at = ? WHERE id = ? AND status = 'pending'",
+		)
+			.bind(Date.now(), jobId)
+			.run();
+		return result.meta.changes > 0;
 	}
 
 	/** status は変えず updated_at だけ進める(reArm で「生存」を D1 に反映するため)。 */
