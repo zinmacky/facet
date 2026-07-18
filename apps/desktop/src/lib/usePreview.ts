@@ -1,7 +1,7 @@
 import type { EditSpec } from "@facet/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getErrorMessage } from "./getErrorMessage";
-import { cancelJob, type RenderQuality, startPreview } from "./tauri";
+import { cancelJob, type JobHandle, type RenderQuality, startPreview } from "./tauri";
 
 /**
  * `preview_start`(spec ハッシュキャッシュ。既定は低ビットレートで
@@ -64,6 +64,24 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 	// key ごとに進行中の ensure Promise(同一 key への重複呼び出しを合流させる)。
 	const pendingRef = useRef<Map<string, Promise<string>>>(new Map());
 
+	// key ごとの「現在有効な」世代トークン(useReframeQueue.ts と同じ世代管理方式。
+	// GHSA-c4jj-6rmf-h7g3 対応)。ensure() が呼び出し開始時点で同期的に発行し、
+	// remove()/reset() が破棄する。startPreview() の `.then()`/onDone/onError の
+	// 各コールバックは、自分に発行された token が今もこの Map の値と一致する場合
+	// のみ states/unsubsRef を書き換える。不一致であれば「remove() 済み、または
+	// 後から ensure() し直された新しいジョブ」とみなし、状態を書き換えず購読解除
+	// (jobId が判明していれば明示的にキャンセルも)だけ行う。
+	//
+	// トークンは ensure() というただ 1 箇所(同期実行)でのみ発行・上書きされるため、
+	// 複数の非同期コールバックが「自分が最新か」を後から claim し合うような競合は
+	// 起きない(発行順は JS の単一スレッド実行で一意に決まる)。
+	const activeTokenRef = useRef<Map<string, string>>(new Map());
+	const tokenCounterRef = useRef(0);
+	const nextToken = useCallback((): string => {
+		tokenCounterRef.current += 1;
+		return String(tokenCounterRef.current);
+	}, []);
+
 	const patch = useCallback((key: string, p: Partial<PreviewState>) => {
 		setStates((prev) => {
 			const next = new Map(prev);
@@ -89,14 +107,22 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 			const pending = pendingRef.current.get(key);
 			if (pending) return pending;
 
+			// この ensure() 呼び出し由来の世代トークン(同期発行。GHSA-c4jj-6rmf-h7g3
+			// 対応)。以降の非同期コールバックはこのクロージャで捕まえた `token` が
+			// activeTokenRef の現在値と一致する間だけ「自分が最新」とみなす。
+			const token = nextToken();
+			activeTokenRef.current.set(key, token);
+			const isCurrent = () => activeTokenRef.current.get(key) === token;
+
 			const promise = new Promise<string>((resolve, reject) => {
 				patch(key, { rendering: true, error: undefined });
-				let handle: { unsubscribe: () => void } | undefined;
+				let handle: JobHandle | undefined;
 				// onDone/onError が(invoke() の resolve より先に)既に発火済みかどうか。
 				// tauri.ts が listen() を invoke() より先に張る(バグ2 対策)ため、起動直後に
 				// 完了/失敗する短いジョブでは、後述の `.then((h) => …)` が onDone/onError より
 				// 後に実行されることがある。その場合に既に確定した状態(jobId 等)で
-				// 上書きしないためのガード。
+				// 上書きしないためのガード(isCurrent とは別物 — こちらは「同一 ensure()
+				// 呼び出し内」の順序保証)。
 				let settled = false;
 				startPreview(
 					input,
@@ -105,8 +131,17 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 						onDone: (path) => {
 							settled = true;
 							handle?.unsubscribe();
-							unsubsRef.current.delete(key);
+							if (!isCurrent()) {
+								// remove() 済み(または再 ensure() で世代が進んでいる)。この世代の
+								// 状態は書き換えず、生成自体は成功しているので値はそのまま返す。
+								// pendingRef は削除しない — 既に remove() が削除済みか、後続の
+								// ensure() (新世代)が自分の Promise で上書き済みのはずで、ここで
+								// 無条件に delete すると新世代の pendingRef を誤って消してしまう。
+								resolve(path);
+								return;
+							}
 							pendingRef.current.delete(key);
+							unsubsRef.current.delete(key);
 							patch(key, {
 								rendering: false,
 								outputPath: path,
@@ -118,8 +153,12 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 						onError: (message) => {
 							settled = true;
 							handle?.unsubscribe();
-							unsubsRef.current.delete(key);
+							if (!isCurrent()) {
+								reject(new Error(message));
+								return;
+							}
 							pendingRef.current.delete(key);
+							unsubsRef.current.delete(key);
 							patch(key, { rendering: false, error: message });
 							reject(new Error(message));
 						},
@@ -129,13 +168,32 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 					.then((h) => {
 						handle = h;
 						if (settled) return;
+						if (!isCurrent()) {
+							// jobId が確定した時点で既に remove() 済みだった(バグ1: jobId 未確定時の
+							// remove 対応)。孤児として走らせ続けないよう明示的にキャンセルし、
+							// リスナーも解放する(以降 onDone/onError は発火しないため、ここで
+							// ensure() の Promise を確定させる)。
+							h.unsubscribe();
+							void h.cancel().catch((err: unknown) => {
+								console.warn(
+									`孤児ジョブのキャンセルに失敗しました(jobId=${h.jobId})`,
+									err,
+								);
+							});
+							reject(new Error("プレビュー生成が中断されました(remove 済み)"));
+							return;
+						}
 						unsubsRef.current.set(key, h.unsubscribe);
 						patch(key, { jobId: h.jobId });
 					})
 					.catch((err: unknown) => {
 						if (settled) return;
-						pendingRef.current.delete(key);
 						const message = getErrorMessage(err);
+						if (!isCurrent()) {
+							reject(err instanceof Error ? err : new Error(message));
+							return;
+						}
+						pendingRef.current.delete(key);
 						patch(key, { rendering: false, error: message });
 						reject(err instanceof Error ? err : new Error(message));
 					});
@@ -143,7 +201,7 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 			pendingRef.current.set(key, promise);
 			return promise;
 		},
-		[patch, quality],
+		[patch, quality, nextToken],
 	);
 
 	const trigger = useCallback(
@@ -171,14 +229,13 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 			unsubsRef.current.get(key)?.();
 			unsubsRef.current.delete(key);
 			pendingRef.current.delete(key);
+			// key の世代トークンを破棄する(GHSA-c4jj-6rmf-h7g3 対応)。jobId 未確定
+			// (invoke 未 resolve)の窓で remove() が呼ばれても、ensure() の `.then()`/
+			// onDone/onError は isCurrent() が false になるため、states/unsubsRef への
+			// 再登録(ghost エントリの復活)が起きず、jobId 判明時点で明示的に
+			// unsubscribe + cancel される(useReframeQueue.ts と同じ世代管理方式)。
+			activeTokenRef.current.delete(key);
 			// jobId が既に確定していれば Rust 側のジョブへキャンセルを通知する(バグ1)。
-			// 未確定(invoke 未 resolve)の場合は、上記 ensure() の `.then()` が後から
-			// 解決した時点で unsubsRef へ key が再登録され、その先の onDone/onError の
-			// patch により states に key が「復活」しうる(ghost エントリ)。この窓では
-			// cancelOrphan も空振りするため、Rust 側のジョブはそのまま完走するまで
-			// 孤児として走り続ける(既知の限界。useReframeQueue.ts が持つような
-			// 世代トークンでの追跡は本フックには未導入 — ExportScreen の sig 照合と
-			// 合わせて別 PR で検討)。
 			cancelOrphan(statesRef.current.get(key)?.jobId);
 			setStates((prev) => {
 				if (!prev.has(key)) return prev;
@@ -194,6 +251,7 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 		for (const unsub of unsubsRef.current.values()) unsub();
 		unsubsRef.current.clear();
 		pendingRef.current.clear();
+		activeTokenRef.current.clear();
 		for (const state of statesRef.current.values()) cancelOrphan(state.jobId);
 		setStates(new Map());
 	}, [cancelOrphan]);
