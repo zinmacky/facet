@@ -27,7 +27,10 @@ use tokio_util::io::ReaderStream;
 /// `Arc<AtomicBool>` のため、非同期側からは短い間隔でポーリングする
 /// (`commands::publish::scheduler_check` の HTTP タイムアウト(10秒)より
 /// 十分短い値にし、キャンセル操作からの体感遅延を小さく保つ)。
-const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(150);
+///
+/// `crate` 内で共有する(`jobs::scheduler_client::enqueue_job` も同じ流儀で
+/// `tokio::select!` の対抗馬として使う。GHSA-q37v-7xpp-x229 残作業対応)。
+pub(crate) const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Error)]
 pub enum R2UploadError {
@@ -42,7 +45,7 @@ pub enum R2UploadError {
 }
 
 /// `cancel` がキャンセル済みになるまで待つ(`tokio::select!` の対抗馬として使う)。
-async fn wait_for_cancel(cancel: &CancelToken) {
+pub(crate) async fn wait_for_cancel(cancel: &CancelToken) {
 	loop {
 		if cancel.is_cancelled() {
 			return;
