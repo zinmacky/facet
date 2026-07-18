@@ -33,6 +33,12 @@ describe("jobManifest", () => {
 		).toBe(false);
 	});
 
+	it("未知キーは拒否せず受け入れる(.strict() を使わないため。将来フィールド追加時の後方互換を担保)", () => {
+		expect(
+			jobManifest.parse({ ...valid, futureField: 1 } as unknown as typeof valid),
+		).toEqual(valid);
+	});
+
 	it("publishAt は正の整数のみ", () => {
 		expect(jobManifest.safeParse({ ...valid, publishAt: -1 }).success).toBe(
 			false,
