@@ -3,7 +3,11 @@ import { requireBearerAuth } from "./auth.js";
 import { scanDueJobs } from "./cron.js";
 import type { Env } from "./env.js";
 import { jobsRoutes } from "./routes/jobs.js";
-import { refreshTokens } from "./token-refresh.js";
+import {
+	checkTokenExpiryAndForceRefresh,
+	getTokenHealthSnapshot,
+	refreshTokens,
+} from "./token-refresh.js";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -13,7 +17,13 @@ app.get("/health", (c) => c.json({ ok: true }));
 // これ以降の全ルート(状態変更・情報返却を行う公開エンドポイント)に Bearer 認証を適用する。
 app.use("*", requireBearerAuth());
 
-app.get("/", (c) => c.text("facet-scheduler"));
+// desktop の疎通チェック(2段階目)が叩くエンドポイント。ステータスコードは
+// 従来どおり 200 を維持しつつ、body に token 健全性情報を載せて読み手ゼロを解消する
+// (GHSA-6vwp-4jwx-8f3w 対応)。
+app.get("/", async (c) => {
+	const tokenHealth = await getTokenHealthSnapshot(c.env);
+	return c.json({ service: "facet-scheduler", tokenHealth });
+});
 app.route("/jobs", jobsRoutes());
 
 export default {
@@ -21,9 +31,10 @@ export default {
 
 	/**
 	 * cron ハンドラ。event.cron でトリガを分岐する:
-	 *  - "* * * * *" 毎分   → 公開時刻到来スキャン
-	 *  - "0 3 * * *" 毎日3時 → IG トークン更新
-	 * どちらも waitUntil で完走させる。
+	 *  - "* * * * *" 毎分   → 公開時刻到来スキャン + トークン失効監視(閾値割れなら強制リフレッシュ)
+	 *  - "0 3 * * *" 毎日3時 → IG トークン更新(通常周期)
+	 * いずれも waitUntil で完走させる。毎分の2タスクは独立に waitUntil するため、
+	 * 片方の失敗がもう片方(scanDueJobs)を止めない。
 	 */
 	async scheduled(
 		event: ScheduledController,
@@ -33,6 +44,7 @@ export default {
 		switch (event.cron) {
 			case "* * * * *":
 				ctx.waitUntil(scanDueJobs(env));
+				ctx.waitUntil(checkTokenExpiryAndForceRefresh(env));
 				break;
 			case "0 3 * * *":
 				ctx.waitUntil(refreshTokens(env));
