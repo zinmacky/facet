@@ -149,8 +149,9 @@ jobs:
           $ErrorActionPreference = "Stop"
           $markers = "一括投稿", "APIトークン", "クライアントID", "YouTube の認可が無効"
           $srcFiles = Get-ChildItem -Path "apps/desktop/src" -Recurse -File
+          # -Encoding utf8: 下(手順9)の検査と同じ理由でデコード解釈を明示固定する
           foreach ($marker in $markers) {
-            if (-not ($srcFiles | Select-String -Pattern $marker -SimpleMatch -Quiet)) {
+            if (-not ($srcFiles | Select-String -Pattern $marker -SimpleMatch -Encoding utf8 -Quiet)) {
               Write-Error "マーカー文字列「$marker」が apps/desktop/src に見つかりません(リネームされた場合は本ワークフローと ci.yml の検査対象も更新してください)"
               exit 1
             }
@@ -216,16 +217,25 @@ jobs:
             }
           }
 
+          # 実測(2026-07): workflow_dispatch のドライラン run 29640665232 で本検査が
+          # 一度だけ偽陽性で fail した。直後の再実行 run 29641611398 では、同一コミット・
+          # バイト同一の成果物(index-CyB-nYnO.js / index-jQxW2ZHN.css)に対して合格して
+          # おり、成果物側に実際のマーカー混入があったわけではない。検査対象の vite 出力
+          # (JS/CSS)は UTF-8(BOM なし)で確定しているため、原因は Select-String 側の
+          # デコード解釈の揺れ(-Encoding 未指定時の自動判定)による偽陽性が最有力。
+          # -Encoding utf8 を明示してバイト→文字列の解釈を固定する(pwsh 7 の Select-String
+          # は FileInfo のパイプ入力も -Path 指定と同じくファイルとして開き直すため、
+          # 明示した -Encoding はパイプ経由でも効く)。
           $uploadMarkers = "一括投稿", "APIトークン", "クライアントID", "YouTube の認可が無効"
           # -AllMatches: 巨大な1行に複数マーカーが出現しても取りこぼさず全て診断に出す
-          $uploadMatches = $assetFiles | Select-String -Pattern $uploadMarkers -SimpleMatch -AllMatches
+          $uploadMatches = $assetFiles | Select-String -Pattern $uploadMarkers -SimpleMatch -AllMatches -Encoding utf8
           if ($uploadMatches) {
             Write-MarkerDiagnostics $uploadMatches $assetFiles
             Write-Error "public ビルドの成果物に投稿系マーカー(「一括投稿」/「APIトークン」/「クライアントID」/「YouTube の認可が無効」)が含まれています"
             exit 1
           }
           $endpointMarkers = "googleapis", "cloudflarestorage", "graph.facebook"
-          $endpointMatches = $assetFiles | Select-String -Pattern $endpointMarkers -SimpleMatch -AllMatches
+          $endpointMatches = $assetFiles | Select-String -Pattern $endpointMarkers -SimpleMatch -AllMatches -Encoding utf8
           if ($endpointMatches) {
             Write-MarkerDiagnostics $endpointMatches $assetFiles
             Write-Error "public ビルドの成果物に投稿系エンドポイント文字列(googleapis/cloudflarestorage/graph.facebook)が含まれています"
