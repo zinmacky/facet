@@ -101,6 +101,10 @@ export function App() {
 		},
 		onSuccess: (result) => {
 			if (!result) return;
+			// stepLocked 中(リフレーム画面で投稿処理中)は新しい元動画の選択を許可しない
+			// (goToStep と同じガード)。ヘッダの選択ボタン自体は disabled にしているが、
+			// ダイアログ表示中に投稿が始まる競合もここで防ぐ(二重ガード)。
+			if (stepLocked) return;
 			// ファイル選択時に自動で 1 本目の切り抜きを追加して選択状態にする。
 			const first = createClip(result, 1);
 			clipSeqRef.current = 2; // 次の追加は _2 から。
@@ -109,7 +113,8 @@ export function App() {
 			setSelectedClipId(first.id);
 			// 新しい元動画を選んだので、必ず編集画面へ戻り、確認/リフレーム画面の
 			// 古い結果(前の動画の clip に紐づく results/posts/preview)を破棄させる。
-			setStep("edit");
+			// goToStep 経由にすることで、遷移自体も stepLocked のガードを通す。
+			goToStep("edit");
 			setResetToken((t) => t + 1);
 		},
 	});
@@ -134,11 +139,18 @@ export function App() {
 				tone: "danger",
 			});
 			if (!ok) return;
+			// setClips の functional updater 内で setSelectedClipId(別 state の setter)を
+			// 呼ぶと、React の更新関数は純粋であるべき(StrictMode は二重実行する)という
+			// 前提に反する(useReframeQueue.ts の update と同じ方針で副作用を外へ出す)。
+			// ただし `clips`(閉じ込めた state)は confirm() の await 中に古くなりうるため、
+			// prev から算出する現行の functional updater の形は保ち、算出結果だけを
+			// ローカル変数へ控えて後続の setSelectedClipId で使う。
+			let next: Clip[] = [];
 			setClips((prev) => {
-				const next = prev.filter((c) => c.id !== id);
-				setSelectedClipId((sel) => (sel === id ? (next[0]?.id ?? null) : sel));
+				next = prev.filter((c) => c.id !== id);
 				return next;
 			});
+			setSelectedClipId((sel) => (sel === id ? (next[0]?.id ?? null) : sel));
 		},
 		[clips, confirm],
 	);
@@ -206,7 +218,9 @@ export function App() {
 						<Button
 							size="sm"
 							variant="primary"
-							disabled={pickMutation.status === "pending"}
+							// stepLocked 中(リフレーム画面で投稿処理中)は新しい元動画の選択を
+							// 許可しない(pickMutation.onSuccess 側のガードと二重に防ぐ)。
+							disabled={pickMutation.status === "pending" || stepLocked}
 							onClick={() => pickMutation.mutate()}
 						>
 							{pickMutation.status === "pending"
