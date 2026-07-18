@@ -286,12 +286,18 @@ jobs:
         with:
           workspaces: apps/desktop -> target
 
+      # "latest" はローリングタグ(中身が予告なく差し替わりうる)のため、
+      # rust job の linux64-gpl-shared と同じ日付固定タグ(pin)方式に揃える。
+      # 更新時は `gh api repos/BtbN/FFmpeg-Builds/releases --jq '.[].tag_name'` で
+      # 最新の autobuild-YYYY-MM-DD-HH-MM を確認し、対象タグの assets に
+      # win64-gpl-shared のアセットが存在することを確認してから両方(URL・
+      # キャッシュキー)を更新すること。
       - name: Cache FFmpeg (win64 gpl shared)
         id: cache-ffmpeg-windows
         uses: actions/cache@v6
         with:
           path: apps/desktop/.ffmpeg
-          key: ffmpeg-n8.1-win64-gpl-shared-8.1
+          key: ffmpeg-n8.1-win64-gpl-shared-8.1-autobuild-2026-07-11-13-13
 
       - name: Download FFmpeg (win64 gpl shared)
         if: steps.cache-ffmpeg-windows.outputs.cache-hit != 'true'
@@ -299,7 +305,7 @@ jobs:
         run: |
           $dest = "$PWD\.ffmpeg-tmp"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip" -OutFile "$dest\ffmpeg.zip"
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-11-13-13/ffmpeg-n8.1.2-22-g94138f6973-win64-gpl-shared-8.1.zip" -OutFile "$dest\ffmpeg.zip"
           Expand-Archive -Path "$dest\ffmpeg.zip" -DestinationPath $dest -Force
           $inner = Get-ChildItem $dest -Directory | Select-Object -First 1 -ExpandProperty FullName
           Move-Item -Path $inner -Destination "$PWD\.ffmpeg"
