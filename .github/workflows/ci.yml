@@ -146,7 +146,7 @@ jobs:
       - name: Cache FFmpeg (linux64 gpl shared)
         if: matrix.task == 'clippy' || matrix.task == 'test' || matrix.task == 'check-publish'
         id: cache-ffmpeg-linux
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: apps/desktop/.ffmpeg
           key: ffmpeg-n8.1-linux64-gpl-shared-8.1
@@ -265,7 +265,7 @@ jobs:
 
       - name: Cache FFmpeg (win64 gpl shared)
         id: cache-ffmpeg-windows
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: apps/desktop/.ffmpeg
           key: ffmpeg-n8.1-win64-gpl-shared-8.1
