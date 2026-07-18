@@ -38,6 +38,25 @@ async function expandOutputSettings(user: ReturnType<typeof userEvent.setup>) {
 	await user.click(toggle);
 }
 
+/**
+ * PostDetail に差し込まれる PostScheduleSection 側の「投稿設定(予約日時・一括投稿)」
+ * 折りたたみを開く。「この投稿をすべて投稿」ボタン(publishPostMutation 経由。
+ * OutputPublishSection 単体の「投稿」ボタンと異なり isPending = busy に反映される)を
+ * 露出させるために使う。
+ */
+async function expandPostScheduleSettings(user: ReturnType<typeof userEvent.setup>) {
+	const toggle = await waitFor(() => {
+		const found = screen
+			.getAllByRole("button")
+			.find(
+				(el) => /投稿設定/.test(el.textContent ?? "") && /予約日時/.test(el.textContent ?? ""),
+			);
+		if (!found) throw new Error("post schedule disclosure toggle not found");
+		return found;
+	});
+	await user.click(toggle);
+}
+
 /** 「元動画を選択」→ probe 成功 → 1本目の clip 自動作成、までを行う。 */
 async function pickSource(user: ReturnType<typeof userEvent.setup>, path: string) {
 	mockDialogOpen.mockResolvedValueOnce(path);
@@ -109,6 +128,80 @@ describe("App: ウィザードの状態保持", () => {
 			selector: "input",
 		});
 		expect(freshTitleField).toHaveValue("");
+	});
+});
+
+/**
+ * stepLocked(リフレーム画面で投稿処理中)のリグレッション固定テスト。
+ * 以前は pickMutation.onSuccess が stepLocked を無視しており、ヘッダの
+ * 「元動画を選択」ボタンも投稿処理中は常に有効なままだった。投稿処理中に新しい
+ * 元動画を選ぶと、書き出し前提の state(source/clips/選択中 clip)が丸ごと
+ * 破棄されてしまう(stepLocked が本来防ぐはずの離脱と同じ実害)。
+ */
+describe("App: 投稿処理中(stepLocked)はヘッダの元動画選択を禁止する", () => {
+	it("投稿中はヘッダの「元動画を選択」ボタンが disabled になり、クリックしても何も起きない", async () => {
+		const user = userEvent.setup();
+		// YouTube OAuth 接続済み。既定 Post の Output は yt-shorts(YouTube)なので
+		// これだけで投稿ボタンを有効化できる(IG のような R2/scheduler 設定は不要)。
+		await mockInvoke("set_youtube_oauth_client", {
+			clientId: "client-id",
+			clientSecret: "client-secret",
+		});
+		await mockInvoke("youtube_oauth_connect");
+
+		renderWithProviders(<App />);
+		await pickSource(user, "/video1.mp4");
+		// canGoUpload は clips.length > 0 のみが条件なので、export を経由せず直接遷移できる。
+		await goToStep(user, "リフレーム");
+
+		await expandOutputSettings(user);
+		const titleField = await screen.findByLabelText<HTMLInputElement>("タイトル", {
+			selector: "input",
+		});
+		await user.type(titleField, "テストタイトル");
+
+		// 「この投稿をすべて投稿」(publishPostMutation 経由)をクリックする。
+		// OutputPublishSection 単体の「投稿」ボタンは publishOutput を直接 fire-and-forget
+		// 呼び出すだけで isPending(busy)には反映されないため、stepLocked を
+		// 再現するにはこちら(post 単位の一括投稿)を使う必要がある。
+		await expandPostScheduleSettings(user);
+		const publishButton = await screen.findByRole("button", {
+			name: "この投稿をすべて投稿",
+		});
+		await waitFor(() => expect(publishButton).toBeEnabled());
+		await user.click(publishButton);
+
+		// 投稿レンダリング(publish 品質の preview_start)が発火するところまで進める。
+		// done イベントを送らないことで publishPostMutation を isPending のまま止め、
+		// uploadBusy(= stepLocked)を true に保つ。
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith(
+				"preview_start",
+				expect.objectContaining({ quality: "publish" }),
+			),
+		);
+
+		// stepLocked: 他ステップへの遷移ボタンは既存の StepIndicator 側の保護で無効化される
+		// (onBusyChange の反映は effect 経由のため、commit を待つ必要がある)。
+		await waitFor(() =>
+			expect(stepNav().getByRole("button", { name: /確認/ })).toBeDisabled(),
+		);
+
+		// 本題: ヘッダの「元動画を選択」ボタンも無効化されている。
+		const pickButton = screen.getByRole("button", { name: "元動画を選択" });
+		expect(pickButton).toBeDisabled();
+
+		// disabled なボタンは click してもブラウザ/jsdom 側で onClick 自体が発火しない
+		// ため、これは「disabled 属性が付いている」ことの確認であり、
+		// pickMutation.onSuccess 内の stepLocked ガード自体の直接確認ではない
+		// (そちらは disabled を回避してでも mutate() が呼ばれた場合の保険で、
+		// UI からは再現できない)。ここでは選択ダイアログが開かず、画面/入力値も
+		// 維持されることだけを確認する。
+		mockDialogOpen.mockClear();
+		await user.click(pickButton);
+		expect(mockDialogOpen).not.toHaveBeenCalled();
+		expect(screen.getByRole("heading", { name: "リフレーム" })).toBeInTheDocument();
+		expect(titleField).toHaveValue("テストタイトル");
 	});
 });
 
