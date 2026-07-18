@@ -184,9 +184,9 @@ wrangler kv key put ig_long_lived "<取得したトークン>" --binding=TOKENS 
 ```
 
 このトークンは毎日 3 時の cron(`token-refresh.ts`)が自動更新します(長期トークン
-は約 60 日で失効しますが、失効前に `ig_refresh_token` grant で延命されます)。
-更新後のトークンと有効期限も同じ KV に書き戻されるため、通常は初回投入のみで
-以降のメンテナンスは不要です。
+は約 60 日で失効しますが、失効前に `fb_exchange_token` grant(`IG_APP_ID` /
+`IG_APP_SECRET` を使用)で延命されます)。更新後のトークンと有効期限も同じ KV に
+書き戻されるため、通常は初回投入のみで以降のメンテナンスは不要です。
 
 ### 2.5 デプロイと疎通確認
 
