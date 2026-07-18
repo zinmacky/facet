@@ -12,7 +12,8 @@
 - テスト: `pnpm test`。単一パッケージ: `pnpm --filter @facet/core test`。
   単一ファイル: `pnpm --filter @facet/contract exec vitest run src/job-manifest.test.ts`
 - 型チェック: `pnpm -r typecheck`(全体で約6秒)
-- lint: `pnpm lint`(= `biome lint .`)。整形: `pnpm format`(= `biome format --write .`)
+- lint: `pnpm lint`(= `turbo run lint:root`、実体はルート一括の `biome lint .`)。
+  整形: `pnpm format`(= `biome format --write .`)
 - dev: `pnpm --filter @facet/desktop dev` / `pnpm --filter @facet/scheduler dev`(wrangler)
 
 ### Rust(apps/desktop 内で実行)
