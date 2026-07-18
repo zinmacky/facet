@@ -35,6 +35,8 @@ function fakeTokensKV(initial: Record<string, string> = {}) {
 function envWithKV(kv: ReturnType<typeof fakeTokensKV>): Env {
 	return {
 		GRAPH_VERSION: "v21.0",
+		IG_APP_ID: "test-app-id",
+		IG_APP_SECRET: "test-app-secret",
 		// biome-ignore lint/suspicious/noExplicitAny: テスト用フェイクを KVNamespace 型へ流し込む
 		TOKENS: kv as any,
 	} as Env;
@@ -75,6 +77,51 @@ describe("refreshTokens", () => {
 
 		expect(kv.put).toHaveBeenCalledWith(TOKEN_KEY, "new-token");
 		expect(kv.__store.get(TOKEN_HEALTH_KEY)).toBeUndefined();
+	});
+
+	it("fb_exchange_token grant で oauth/access_token を POST し、秘密情報は URL でなくボディに載せる", async () => {
+		const kv = fakeTokensKV({ [TOKEN_KEY]: "old-token" });
+		const fetchMock = mockFetchOnce({
+			access_token: "new-token",
+			expires_in: 5_184_000,
+		});
+
+		await refreshTokens(envWithKV(kv));
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe("https://graph.facebook.com/v21.0/oauth/access_token");
+		// URL のクエリ文字列にトークンや client_secret が含まれない(S-4 方針)。
+		expect(url).not.toContain("old-token");
+		expect(url).not.toContain("test-app-secret");
+		expect(url).not.toContain("?");
+		expect(init.method).toBe("POST");
+		const body = init.body as URLSearchParams;
+		expect(body.get("grant_type")).toBe("fb_exchange_token");
+		expect(body.get("client_id")).toBe("test-app-id");
+		expect(body.get("client_secret")).toBe("test-app-secret");
+		expect(body.get("fb_exchange_token")).toBe("old-token");
+	});
+
+	it("fetch がネットワークレベルで reject しても例外を外に漏らさず失効間近なら health を記録する(cooldown を効かせるため)", async () => {
+		const nearExpiry = Date.now() + 1000;
+		const kv = fakeTokensKV({
+			[TOKEN_KEY]: "old-token",
+			[TOKEN_EXPIRES_KEY]: String(nearExpiry),
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => {
+				throw new TypeError("fetch failed");
+			}),
+		);
+
+		await expect(refreshTokens(envWithKV(kv))).resolves.toBeUndefined();
+
+		const raw = kv.__store.get(TOKEN_HEALTH_KEY);
+		expect(raw).toBeDefined();
+		const record = JSON.parse(raw as string);
+		expect(record.lastRefreshError).toContain("network error");
 	});
 
 	it("失効間近での失敗は health レコードを記録する", async () => {
