@@ -206,6 +206,17 @@ pub enum MediaError {
 		"音声ストリームを検出し、trim 範囲内の音声フレームも存在しましたが、AAC パケットを 1 つも出力できませんでした(入力: 音声あり / 出力: 音声なし)"
 	)]
 	AudioStreamProducedNoPackets,
+
+	/// FFmpeg の `AVFrame.data` は `[*mut u8; 8]` 固定長のため、8ch を超える
+	/// (= 9ch 以上の)planar 音声は 9 番目以降のプレーンへのポインタが `data` に
+	/// 収まらず `extended_data` 側にのみ格納される。`audio.rs` の
+	/// `audio_plane_bytes`/`audio_plane_bytes_mut` は `data[index]` を直接
+	/// 添字アクセスするため `extended_data` に対応しておらず、9ch 以上の
+	/// planar 音声をそのまま処理すると範囲外アクセスになりうる
+	/// (GHSA-2899-x373-j96f)。現行パイプラインは AAC 固定(最大 8ch)のため
+	/// live bug ではないが、防御的に早期エラーとする。
+	#[error("9ch 以上の planar 音声は未対応です(channels={channels})")]
+	UnsupportedPlanarChannelCount { channels: i32 },
 }
 
 /// `ffmpeg_next::Error` が「実エラーではない、ループの正常な終端」を表しているかを
