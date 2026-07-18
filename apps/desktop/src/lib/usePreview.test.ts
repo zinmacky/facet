@@ -316,7 +316,11 @@ describe("usePreview", () => {
 		const previewCalls = mockInvoke.mock.calls.filter(
 			([cmd]) => cmd === "preview_start",
 		);
-		const job2 = (previewCalls[1]?.[1] as { jobId: string }).jobId;
+		const secondPreviewCall = previewCalls[1];
+		if (!secondPreviewCall) {
+			throw new Error("2 回目の preview_start 呼び出しが見つからない");
+		}
+		const job2 = (secondPreviewCall[1] as { jobId: string }).jobId;
 		expect(job2).not.toBe(job1);
 		act(() => {
 			emitMockEvent(`preview://done/${job2}`, { path: "/cache/out2.mp4" });
