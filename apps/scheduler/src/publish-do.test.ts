@@ -80,6 +80,7 @@ interface FakeJob {
 	ig_container_id: string | null;
 	ig_media_id: string | null;
 	attempts: number;
+	updated_at: number;
 }
 
 /** 既知の UPDATE 文パターンを判定してインメモリ行へ反映する。id は常に末尾の bind 引数。 */
@@ -101,6 +102,15 @@ function applyWrite(row: FakeJob, sql: string, args: unknown[]): void {
 	} else if (sql.includes("SET attempts = ?")) {
 		row.attempts = args[0] as number;
 	}
+	// 本コードベースの UPDATE 文は "... updated_at = ?, ... WHERE id = ?" の形
+	// (id が常に最後の bind 引数)を守っているため、updated_at は末尾から2番目に
+	// 現れる。touchUpdatedAt のような status を変えない更新もここで一律に拾える。
+	if (sql.includes("updated_at = ?")) {
+		const idx = args.length - 2;
+		if (idx >= 0) {
+			row.updated_at = args[idx] as number;
+		}
+	}
 }
 
 function makeHarness(initial: Partial<FakeJob>) {
@@ -113,6 +123,7 @@ function makeHarness(initial: Partial<FakeJob>) {
 		ig_container_id: null,
 		ig_media_id: null,
 		attempts: 0,
+		updated_at: 0,
 		...initial,
 	};
 	const store = new Map<string, unknown>();
@@ -288,6 +299,7 @@ describe("PublishDO.alarm: ポーリング上限(S-3)", () => {
 		const { DO, row, store } = makeHarness({
 			status: "processing",
 			ig_container_id: "container-1",
+			updated_at: 1000,
 		});
 		store.set("pollDeadline", Date.now() + 60_000); // 十分先
 
@@ -295,5 +307,98 @@ describe("PublishDO.alarm: ポーリング上限(S-3)", () => {
 
 		expect(row.status).toBe("processing");
 		expect(store.get("__alarm")).toBeDefined();
+		// 指摘1対応: reArm でも updated_at を更新し、健全なジョブが
+		// sweepStaleJobs の stale 候補に誤って乗らないようにする。
+		expect(row.updated_at).toBeGreaterThan(1000);
+	});
+});
+
+/**
+ * PublishDO.fetch("/resume") の回帰テスト(アーキテクチャレビュー指摘1: 非例外系
+ * クラッシュによる孤立ジョブの掃きスイープ)。cron.ts の sweepStaleJobs が
+ * 「D1 は非終端状態のまま updated_at が長時間更新されていない」候補を送り込む先。
+ * 二重起動安全性の要点は「alarm の有無」で判定すること: alarm が生きていれば
+ * 何もせず、alarm が消えている(=本当に孤立している)ときだけ alarm() 相当の
+ * 継続処理を実行する。
+ */
+describe("PublishDO.fetch /resume: stale スイープからの再開", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mockGetIgToken.mockResolvedValue("token");
+		mockCreateContainer.mockResolvedValue("container-1");
+		mockGetContainerStatus.mockResolvedValue("FINISHED");
+		mockPublishContainer.mockResolvedValue("media-1");
+	});
+
+	function resumeRequest(jobId: string) {
+		return new Request("https://do/resume", {
+			method: "POST",
+			body: JSON.stringify({ jobId }),
+		});
+	}
+
+	it("alarm が既に張られていれば何もしない(二重起動防止)", async () => {
+		const { DO, row, store } = makeHarness({
+			status: "processing",
+			ig_container_id: "container-1",
+		});
+		store.set("__alarm", Date.now() + 60_000); // 正常進行中を模す
+
+		const res = await DO.fetch(resumeRequest(row.id));
+
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ resumed: false });
+		expect(mockGetContainerStatus).not.toHaveBeenCalled();
+		expect(row.status).toBe("processing");
+	});
+
+	it("alarm が無ければ即時 alarm を予約する(this.alarm() を直接呼ばない)", async () => {
+		const { DO, row, store } = makeHarness({ status: "creating", attempts: 1 });
+		// alarm 未設定(store に __alarm キーが無い)= 孤立状態を模す。
+
+		const res = await DO.fetch(resumeRequest(row.id));
+
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ resumed: true });
+		// setAlarm(now) で予約するだけで、この時点では継続処理(createContainer 等)は
+		// まだ実行しない。直接 alarm() を呼ぶと、自然発火した alarm() と並行実行
+		// しうる(alarm は発火時点で消費され getAlarm() が null になるため)ので、
+		// 通常の alarm ディスパッチ(=同時に1つしか実行しない保証)に委ねる。
+		expect(mockCreateContainer).not.toHaveBeenCalled();
+		expect(row.status).toBe("creating");
+		expect(store.get("__alarm")).toBeDefined();
+	});
+
+	it("予約された alarm が実際に発火すると、通常どおり継続処理が進む", async () => {
+		const { DO, row, store } = makeHarness({ status: "creating", attempts: 1 });
+
+		await DO.fetch(resumeRequest(row.id));
+		// cron から見えない、プラットフォームの alarm ディスパッチをここで模す。
+		await DO.alarm();
+
+		expect(mockCreateContainer).toHaveBeenCalledTimes(1);
+		expect(row.status).toBe("processing");
+		expect(store.get("pollDeadline")).toBeDefined();
+	});
+
+	it("JOB_ID_KEY が storage に無くても body の jobId で自己回復する", async () => {
+		const { DO, row, store } = makeHarness({ status: "creating", attempts: 1 });
+		store.delete("jobId"); // JOB_ID_KEY 未設定(極端なケース)を模す。
+
+		await DO.fetch(resumeRequest(row.id));
+		await DO.alarm();
+
+		expect(mockCreateContainer).toHaveBeenCalledTimes(1);
+		expect(row.status).toBe("processing");
+	});
+
+	it("jobId が無い / 型不正なリクエストは 400", async () => {
+		const { DO } = makeHarness({ status: "processing" });
+
+		const res = await DO.fetch(
+			new Request("https://do/resume", { method: "POST", body: "{}" }),
+		);
+
+		expect(res.status).toBe(400);
 	});
 });

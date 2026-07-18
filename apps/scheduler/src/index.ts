@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { requireBearerAuth } from "./auth.js";
-import { scanDueJobs } from "./cron.js";
+import { scanDueJobs, sweepStaleJobs } from "./cron.js";
 import type { Env } from "./env.js";
 import { jobsRoutes } from "./routes/jobs.js";
 import {
@@ -31,10 +31,11 @@ export default {
 
 	/**
 	 * cron ハンドラ。event.cron でトリガを分岐する:
-	 *  - "* * * * *" 毎分   → 公開時刻到来スキャン + トークン失効監視(閾値割れなら強制リフレッシュ)
+	 *  - "* * * * *" 毎分   → 公開時刻到来スキャン + stale ジョブの掃きスイープ
+	 *                          + トークン失効監視(閾値割れなら強制リフレッシュ)
 	 *  - "0 3 * * *" 毎日3時 → IG トークン更新(通常周期)
-	 * いずれも waitUntil で完走させる。毎分の2タスクは独立に waitUntil するため、
-	 * 片方の失敗がもう片方(scanDueJobs)を止めない。
+	 * いずれも waitUntil で完走させる。毎分の3タスクは独立に waitUntil するため、
+	 * いずれか1つの失敗が他を止めない。
 	 */
 	async scheduled(
 		event: ScheduledController,
@@ -44,6 +45,7 @@ export default {
 		switch (event.cron) {
 			case "* * * * *":
 				ctx.waitUntil(scanDueJobs(env));
+				ctx.waitUntil(sweepStaleJobs(env));
 				ctx.waitUntil(checkTokenExpiryAndForceRefresh(env));
 				break;
 			case "0 3 * * *":

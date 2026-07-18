@@ -30,6 +30,16 @@
 //! // §commands/publish/mod.rs モジュール冒頭コメント)。
 //!
 //! await invoke("ig_publish_cancel", { jobId });
+//!
+//! // 予約公開の最終成否の追跡(アーキテクチャレビュー指摘対応)。`ig_publish_start` の
+//! // done イベントは scheduler が「受理した」ことしか意味せず、実際の IG 側公開成否
+//! // (published/failed)はここでは分からない。呼び出し側は done イベントの
+//! // `schedulerJobId` を保持しておき、`ig_job_status` でポーリング/手動確認する。
+//! const outcome = await invoke("ig_job_status", { schedulerJobId: done.schedulerJobId });
+//! // outcome.outcome: "found" | "not_found" | "unauthorized" | "service_unavailable" | "network"
+//! // "found" の場合のみ outcome.status: "pending" | "creating" | "processing" |
+//! // "publishing" | "published" | "failed" が読める(JobRecord のフィールドが
+//! // フラットに乗る。§IgJobStatusOutcome 冒頭コメント)。
 //! ```
 //!
 //! ## 事前検証と非同期本体の分離
@@ -47,20 +57,28 @@
 //! ライフサイクル(HTTP アップロード vs libav エンコード)が大きく異なり、
 //! `commands::reframe::run_media_job` の同期 `catch_unwind` 前提の骨格とは噛み合わない
 //! (本体は async タスクであり、tokio がタスク境界でパニックを既に分離しているため
-//! `catch_unwind` 自体が不要)。そのため [`IgJobsState`] は独立した小さな型として持つ
-//! (共有は「2つ目の実装が現れてから」の YAGNI 方針、docs/desktop-migration-plan.md 外の
-//! グローバルルール参照)。
+//! `catch_unwind` 自体が不要)。そのため [`IgJobsState`] は `reframe`/`preview` とは
+//! 別のジョブ ID 空間を持つ専用の型として存在する。
+//!
+//! `HashMap<JobId, CancelToken>` の登録/取得/削除そのものの実装は
+//! [`crate::commands::job_state`] に集約されている。当初(本コメント旧版)は
+//! 「共有は2つ目の実装が現れてから」の YAGNI 方針で `IgJobsState` を独立した型として
+//! 持っていたが、YouTube 公開(`commands::publish::youtube`)が3つ目の実質同一実装として
+//! 追加されたことに加え、GHSA-6cx9-j28r-f866 対応の `try_register`(TOCTOU 安全な
+//! 二重登録拒否)が本ファイルにしか入らず reframe/preview・YouTube に伝播しなかった
+//! という実害が生じたため、共通部分を `job_state` へ統一した(詳細は同モジュール冒頭
+//! コメント「統一した経緯」参照)。[`IgJobsState`] 自体はジョブ ID 空間を分離するための
+//! 薄い newtype として残る。
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use media_core::CancelToken;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
-use crate::jobs::manifest;
+use crate::commands::job_state;
+use crate::jobs::manifest::{self, JobRecord};
 use crate::jobs::r2_upload::{self, R2UploadError};
 use crate::jobs::scheduler_client::{self, EnqueueError};
 use crate::jobs::sigv4::{self, R2Credentials};
@@ -70,55 +88,22 @@ use super::r2_credentials;
 use super::{KEY_SCHEDULER_API_TOKEN, KEY_SCHEDULER_URL, SERVICE};
 
 /// renderer が採番するジョブ ID(`reframe`/`preview` と同じ形の型エイリアス)。
-pub type JobId = String;
+pub type JobId = job_state::JobId;
 
 /// 実行中の IG 公開ジョブの [`CancelToken`] を保持する State。
-/// `commands::reframe::JobsState` と同じ形(`Mutex<HashMap<JobId, CancelToken>>`)だが、
-/// ジョブ ID 空間は共有しない(モジュール冒頭コメント参照)。
+///
+/// 共通実装は [`job_state::JobsState`] に集約されており、本 struct はジョブ ID 空間を
+/// `reframe`/`preview`・`youtube` と分離するための薄い newtype(`Deref` で
+/// `try_register`/`get`/`cancel`/`remove` をそのまま委譲する。モジュール冒頭コメント
+/// 「ジョブ管理」参照)。
 #[derive(Default)]
-pub struct IgJobsState(Mutex<HashMap<JobId, CancelToken>>);
+pub struct IgJobsState(job_state::JobsState);
 
-impl IgJobsState {
-	fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<JobId, CancelToken>> {
-		self.0
-			.lock()
-			.unwrap_or_else(|poisoned| poisoned.into_inner())
-	}
+impl std::ops::Deref for IgJobsState {
+	type Target = job_state::JobsState;
 
-	/// `job_id` が未登録なら `token` を登録して `true` を返す。既に登録済み(=同じ
-	/// job_id のジョブが実行中)なら何もせず `false` を返す(GHSA-6cx9-j28r-f866 対応:
-	/// 同一 job_id の並行 `ig_publish_start` を防ぐ)。「未登録か確認してから登録する」の
-	/// 2手順に分けると、その間に別呼び出しが割り込んで二重登録できてしまう(TOCTOU)ため、
-	/// `HashMap::entry` で 1 回のロック区間内にアトミックに行う。
-	fn try_register(&self, job_id: JobId, token: CancelToken) -> bool {
-		match self.lock().entry(job_id) {
-			std::collections::hash_map::Entry::Occupied(_) => false,
-			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert(token);
-				true
-			}
-		}
-	}
-
-	fn get(&self, job_id: &str) -> Option<CancelToken> {
-		self.lock().get(job_id).cloned()
-	}
-
-	fn remove(&self, job_id: &str) {
-		self.lock().remove(job_id);
-	}
-}
-
-/// [`run_ig_publish`] 終了時に必ず `jobs.remove(job_id)` を呼ぶ RAII ガード
-/// (`commands::reframe::JobGuard` と同じ考え方)。
-struct JobGuard<'a> {
-	jobs: &'a IgJobsState,
-	job_id: &'a str,
-}
-
-impl Drop for JobGuard<'_> {
-	fn drop(&mut self) {
-		self.jobs.remove(self.job_id);
+	fn deref(&self) -> &Self::Target {
+		&self.0
 	}
 }
 
@@ -374,15 +359,95 @@ pub(crate) async fn start_impl(
 /// 同じ job_id での再試行は scheduler 側の冪等性により同一ジョブへ束ねられ、二重公開は
 /// しない(詳細は `jobs::scheduler_client::enqueue_job` のドキュメントコメント参照)。
 pub(crate) fn cancel_impl(job_id: JobId, jobs: State<'_, IgJobsState>) -> Result<(), String> {
-	match jobs.get(&job_id) {
-		Some(token) => {
-			token.cancel();
-			Ok(())
+	jobs.cancel(&job_id)
+}
+
+/// [`job_status_impl`] の結果。`commands::publish::scheduler_check::ConnectionCheckResult`
+/// と同じ設計判断: 呼び出し側(`usePublishExtras.tsx`)が分岐を必要とする結果は
+/// `Result::Ok` 側のタグ付き enum とし、`Result::Err(String)` は「呼び出し自体が
+/// 想定外に失敗した」場合(キーチェーン読み出し失敗・scheduler 未設定等)のみに使う。
+///
+/// レビュー指摘対応: 当初は `FetchJobError` を `.to_string()` で一律 `Err(String)` に
+/// 潰していたが、それだと呼び出し側が「404(NotFound、恒久的に回復しない)」と
+/// 「401/503/ネットワーク瞬断(一過性・再試行で回復しうる)」を区別できず、404 の場合も
+/// ポーリング対象から外さず永久に再試行し続けてしまう(desktop が IG 予約投稿の
+/// 最終成否を追跡しない問題の修正が別の形で再発する)。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum IgJobStatusOutcome {
+	/// 取得成功。`JobRecord` のフィールドはタグ(`outcome`)と並べてフラットに
+	/// シリアライズされる(internally-tagged enum の newtype variant の挙動。
+	/// `JobRecord` は "outcome" というフィールドを持たないためタグと衝突しない)。
+	/// `Box` は他 variant(ユニット/`{ detail: String }`)とのサイズ差を抑えるため
+	/// (clippy::large_enum_variant)。`Box<T>` のシリアライズは `T` に委譲されるため
+	/// JSON 表現には影響しない。
+	Found(Box<JobRecord>),
+	/// 指定された `scheduler_job_id` のジョブが見つからない(404)。`ig_publish_start` の
+	/// done イベント(= enqueue 受理成功)の後にこれが起きるのは、ジョブが scheduler 側で
+	/// 削除された等の実質的に回復不能な事象のため、呼び出し側はポーリング対象から外し
+	/// 終端エラーとして扱うべき(他の一過性エラーとは区別する)。
+	NotFound,
+	/// Bearer トークンが scheduler 側と一致しない(401)。トークン再設定で回復しうるため
+	/// `NotFound` とは区別し、呼び出し側はポーリング対象から外さない。
+	Unauthorized,
+	/// scheduler 側で `SCHEDULER_API_TOKEN` が未設定(503, fail-closed)。
+	ServiceUnavailable,
+	/// 接続不可・タイムアウト・応答解析失敗・想定外のステータスコード等の一過性エラー。
+	Network { detail: String },
+}
+
+impl From<scheduler_client::FetchJobError> for IgJobStatusOutcome {
+	fn from(err: scheduler_client::FetchJobError) -> Self {
+		use scheduler_client::FetchJobError;
+		match err {
+			FetchJobError::Unauthorized => IgJobStatusOutcome::Unauthorized,
+			FetchJobError::ServiceUnavailable => IgJobStatusOutcome::ServiceUnavailable,
+			FetchJobError::NotFound => IgJobStatusOutcome::NotFound,
+			FetchJobError::Network(detail) => IgJobStatusOutcome::Network { detail },
 		}
-		None => Err(format!(
-			"未知のジョブです(既に完了した可能性があります): {job_id}"
-		)),
 	}
+}
+
+/// `scheduler_job_id`(`IgPublishDone.scheduler_job_id`。scheduler が発行したジョブ ID)の
+/// 現在の状態を scheduler から取得する(ロジック本体。`#[tauri::command]` は `mod.rs` 側に
+/// 付ける — 理由は [`start_impl`] 冒頭コメント参照)。
+///
+/// desktop が IG 予約投稿の最終成否を追跡しない問題(アーキテクチャレビュー指摘)への
+/// 対応で追加した。`ig_publish_start` の done イベントは「scheduler がジョブ登録を
+/// 受理した」ことまでしか保証せず、その後の IG 側公開(published/failed)は本コマンドで
+/// 別途確認する必要がある(§本モジュール冒頭コメント renderer 向け API)。
+///
+/// `start_impl` と同様、scheduler の URL・トークンはここでキーチェーンの保存値からのみ
+/// 読む(renderer から受け取らない。GHSA-j74q-9v5x-87w3 対応)。`Result::Err(String)` は
+/// キーチェーン未設定等の想定外ケースのみ(§[`IgJobStatusOutcome`] 冒頭コメント)。
+pub(crate) async fn job_status_impl(
+	scheduler_job_id: String,
+) -> Result<IgJobStatusOutcome, String> {
+	let scheduler_token = KeyringStore
+		.get(SERVICE, KEY_SCHEDULER_API_TOKEN)?
+		.ok_or_else(|| "scheduler の API トークンが未設定です。".to_string())?;
+	let scheduler_url = KeyringStore
+		.get(SERVICE, KEY_SCHEDULER_URL)?
+		.ok_or_else(|| {
+			"scheduler の URL が未設定です。設定画面から入力してください。".to_string()
+		})?;
+	scheduler_client::parse_scheduler_base(&scheduler_url)
+		.map_err(|err| format!("保存済みの scheduler URL が不正です: {err}"))?;
+
+	let client = reqwest::Client::new();
+	let outcome = match scheduler_client::fetch_job(
+		&client,
+		&scheduler_url,
+		&scheduler_token,
+		&scheduler_job_id,
+		scheduler_client::FETCH_JOB_TIMEOUT,
+	)
+	.await
+	{
+		Ok(record) => IgJobStatusOutcome::Found(Box::new(record)),
+		Err(err) => err.into(),
+	};
+	Ok(outcome)
 }
 
 /// ジョブ本体(非同期タスク)。R2 アップロード → scheduler 登録の順に実行し、
@@ -400,10 +465,7 @@ async fn run_ig_publish(
 	scheduler_token: String,
 ) {
 	let jobs = app.state::<IgJobsState>();
-	let _guard = JobGuard {
-		jobs: &jobs,
-		job_id: &job_id,
-	};
+	let _guard = job_state::JobGuard::new(&jobs, &job_id);
 
 	// r2_key と idempotency_key は job_id から決定的に導出する(GHSA-6cx9-j28r-f866 対応)。
 	// 旧実装は `Uuid::new_v4()` を毎回呼んでいたため、enqueue 失敗後に同じジョブを
@@ -530,14 +592,14 @@ mod tests {
 
 	#[test]
 	fn ig_publish_cancel_unknown_job_returns_error() {
+		// `cancel_impl` は `jobs.cancel(&job_id)`(`job_state::JobsState::cancel`)への
+		// 薄いラッパのため、`State<'_, T>` を構築せずここで直接検証できる。
 		let jobs = IgJobsState::default();
 		let token = CancelToken::new();
 		assert!(jobs.try_register("job-1".to_string(), token.clone()));
 		jobs.remove("job-1");
 
-		// State<'_, T> を直接構築できないため、内部ロジック(cancel 相当)を
-		// IgJobsState::get 経由で検証する(`ig_publish_cancel` 自体は薄いラッパ)。
-		assert!(jobs.get("job-1").is_none());
+		assert!(jobs.cancel("job-1").is_err());
 	}
 
 	#[test]

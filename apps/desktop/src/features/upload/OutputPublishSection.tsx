@@ -18,6 +18,12 @@ interface OutputPublishSectionProps {
 	onPublish: () => void;
 	/** 進行中(レンダリング/投稿中)の処理をキャンセルする(Issue #95、任意の UI 導線)。 */
 	onCancel: () => void;
+	/**
+	 * scheduler 側の最新状態を即時に1回取得する(`status.kind === "scheduled"` の間のみ
+	 * ボタンを表示、アーキテクチャレビュー指摘対応)。60秒間隔の自動ポーリングとは別に、
+	 * ユーザーが待たずに確認したい場合の手動導線。
+	 */
+	onRefreshStatus: () => void;
 }
 
 /**
@@ -76,6 +82,11 @@ export function OutputPublishSection(props: OutputPublishSectionProps) {
 				{(status?.kind === "rendering" || status?.kind === "publishing") && (
 					<Button variant="ghost" size="sm" onClick={props.onCancel}>
 						キャンセル
+					</Button>
+				)}
+				{status?.kind === "scheduled" && (
+					<Button variant="ghost" size="sm" onClick={props.onRefreshStatus}>
+						状態更新
 					</Button>
 				)}
 				<Button

@@ -29,3 +29,56 @@ export async function scanDueJobs(env: Env): Promise<void> {
 		}
 	}
 }
+
+/**
+ * stale ジョブとみなす無更新時間のしきい値(ms)。15分。
+ * PublishDO.fetch() が D1 へ status='creating' 等を書いた直後、例外を投げない
+ * 中断(isolate 退避等)が起きると alarm が張られないまま孤立しうる
+ * (scanDueJobs は status='pending' しか拾わないため回収経路が無い)。
+ * このしきい値は通常のポーリング間隔(POLL_INTERVAL_MS=15秒、最大バックオフ
+ * attempts×15秒)や1回のコンテナ生成呼び出しより十分大きく取り、正常進行中の
+ * ジョブを誤検知しないようにする。
+ */
+const STALE_THRESHOLD_MS = 15 * 60 * 1000;
+
+/**
+ * 毎分の cron で呼ばれる掃きスイープ。非終端状態(creating/processing/publishing)
+ * のまま updated_at が STALE_THRESHOLD_MS 以上更新されていないジョブを、
+ * 孤立(alarm 未設定)の疑いありとして DO の /resume へ送り込み再開させる。
+ *
+ * PublishDO.alarm() の reArm(ポーリング継続)は毎回 updated_at を更新するため、
+ * 正常にポーリング中のジョブが本条件に乗ることは基本的に無い(publish-do.ts の
+ * touchUpdatedAt 参照)。それでも本関数の SELECT 条件はあくまで「疑わしい候補」を
+ * 拾うだけであり、実際に再開してよいか(alarm が本当に張られていないか)の
+ * 最終判断は DO 側(/resume)に委ねる。二重起動安全性の詳細は publish-do.ts の
+ * handleResume のコメントを参照。
+ */
+export async function sweepStaleJobs(env: Env): Promise<void> {
+	const threshold = Date.now() - STALE_THRESHOLD_MS;
+	const { results } = await env.DB.prepare(
+		"SELECT id FROM jobs WHERE status IN ('creating', 'processing', 'publishing') AND updated_at < ?",
+	)
+		.bind(threshold)
+		.all<{ id: string }>();
+
+	for (const row of results) {
+		const stub = env.PUBLISH_DO.get(env.PUBLISH_DO.idFromName(row.id));
+		try {
+			const res = await stub.fetch("https://do/resume", {
+				method: "POST",
+				body: JSON.stringify({ jobId: row.id }),
+			});
+			// resumed:true(alarm 未設定 = 本当に孤立していた)のときだけ警告ログを
+			// 残す。alarm が生きていた(resumed:false)候補は誤検知であり、ここで
+			// 毎回 warn すると本当の孤立の見落としにつながる「沈黙回収」ならぬ
+			// 「警告インフレ」を招くため区別する。
+			const { resumed } = (await res.json()) as { resumed?: boolean };
+			if (resumed) {
+				console.warn(`sweepStaleJobs: revived orphaned job: ${row.id}`);
+			}
+		} catch (err) {
+			// 個別ジョブの再開失敗は握りつぶし、次の分の再スイープに委ねる。
+			console.error(`sweepStaleJobs: failed to resume job ${row.id}:`, err);
+		}
+	}
+}

@@ -16,7 +16,17 @@
 //! バイナリには含まれない。資格情報設定 + OS キーチェーン + scheduler 疎通チェック
 //! (§11-3)を実装済み。IG/YouTube 本体のコマンドは後続 PR で追加する
 //! (`publish/mod.rs` 冒頭コメント参照)。
+//!
+//! アーキテクチャレビュー指摘対応: `job_state` は実行中ジョブの `CancelToken` を保持する
+//! State の共通実装(`reframe`/`preview` 共有・`publish::ig`・`publish::youtube` の3箇所で
+//! 重複していたものを統一)。`publish` feature の有無に関わらずコンパイルする必要がある
+//! (`reframe`/`preview` は feature 無効でも常にコンパイルされるため)ため、`publish`
+//! feature 限定の `jobs` モジュール(`lib.rs` 参照)とは別に `commands` 直下に置く
+//! (`job_state` モジュール冒頭コメント「統一した経緯」参照)。
 
+#[cfg(test)]
+mod edit_spec_contract;
+pub(crate) mod job_state;
 pub mod preview;
 pub mod probe;
 #[cfg(feature = "publish")]
