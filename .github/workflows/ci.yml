@@ -167,13 +167,19 @@ jobs:
       # clippy/test は media-core 経由で ffmpeg-next をビルド・リンクするため、
       # BtbN の FFmpeg n8.1 linux64-gpl-shared を取得してキャッシュする(検証専用の
       # GPL shared ビルド。配布は対象外、deny.toml 冒頭コメント参照)。
+      # "latest" はローリングタグ(中身が予告なく差し替わりうる)のため、
+      # scripts/fetch-ffmpeg-lgpl.ps1 と同じ日付固定タグ(pin)方式に揃える。
+      # 更新時は `gh api repos/BtbN/FFmpeg-Builds/releases --jq '.[].tag_name'` で
+      # 最新の autobuild-YYYY-MM-DD-HH-MM を確認し、対象タグの assets に
+      # linux64-gpl-shared のアセットが存在することを確認してから両方(URL・
+      # キャッシュキー)を更新すること。
       - name: Cache FFmpeg (linux64 gpl shared)
         if: matrix.task == 'clippy' || matrix.task == 'test' || matrix.task == 'check-publish'
         id: cache-ffmpeg-linux
         uses: actions/cache@v6
         with:
           path: apps/desktop/.ffmpeg
-          key: ffmpeg-n8.1-linux64-gpl-shared-8.1
+          key: ffmpeg-n8.1-linux64-gpl-shared-8.1-autobuild-2026-07-11-13-13
 
       - name: Download FFmpeg (linux64 gpl shared)
         if: (matrix.task == 'clippy' || matrix.task == 'test' || matrix.task == 'check-publish') && steps.cache-ffmpeg-linux.outputs.cache-hit != 'true'
@@ -181,7 +187,7 @@ jobs:
           set -eu
           mkdir -p .ffmpeg-tmp
           curl -fsSL -o .ffmpeg-tmp/ffmpeg.tar.xz \
-            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-shared-8.1.tar.xz
+            https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-11-13-13/ffmpeg-n8.1.2-22-g94138f6973-linux64-gpl-shared-8.1.tar.xz
           mkdir -p .ffmpeg
           tar -xf .ffmpeg-tmp/ffmpeg.tar.xz -C .ffmpeg --strip-components=1
           rm -rf .ffmpeg-tmp
