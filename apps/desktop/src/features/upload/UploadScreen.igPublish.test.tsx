@@ -9,6 +9,7 @@ import {
 	invokeJobId,
 	mockEventListenerCount,
 	mockInvoke,
+	MOCK_IG_PUBLISH_DONE,
 } from "../../test/tauri-mock";
 import { UploadScreen } from "./UploadScreenPrivate";
 
@@ -201,10 +202,7 @@ describe("UploadScreen: IG 投稿フロー", () => {
 		);
 
 		// 4. done で「完了」。
-		emitMockEvent(`ig_publish://done/${igJobId}`, {
-			schedulerJobId: "scheduler-job-1",
-			status: "pending",
-		});
+		emitMockEvent(`ig_publish://done/${igJobId}`, MOCK_IG_PUBLISH_DONE);
 		await waitFor(() => expect(screen.getByText("完了")).toBeInTheDocument());
 	});
 
