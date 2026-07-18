@@ -64,21 +64,33 @@ export interface UsePreviewResult {
  */
 export function usePreview(quality?: RenderQuality): UsePreviewResult {
 	const [states, setStates] = useState<Map<string, PreviewState>>(new Map());
+	// states の同期ミラー。patch() が setStates と同じ呼び出し内で同期的に更新するため、
+	// 同一 tick 内で連続する ensure()/remove() 等が render commit を待たず最新値を見られる
+	// (useReframeQueue.ts の tasksRef と同じ方針。以前は render 後にしか更新されない
+	// ミラーだったため、同一 tick 内の jobId 参照が1 render 分古いままになりうるリスクが
+	// あった)。
 	const statesRef = useRef(states);
-	statesRef.current = states;
 
 	// key ごとに進行中の ensure Promise(同一 key への重複呼び出しを合流させる)。
 	const pendingRef = useRef<Map<string, Promise<string>>>(new Map());
+	// pendingRef と対になる、進行中レンダリングが対象とする sig(合流可否の判定に使う)。
+	const pendingSigRef = useRef<Map<string, string>>(new Map());
+	// pendingRef と対になる、進行中 ensure() を外部から強制的に確定させる reject。
+	// sig 不一致で cancel-and-restart するとき、孤児化した古い Promise の確定を
+	// 「自身の tauri リスナー(onDone/onError)が発火すること」に頼れない(lifecycle.remove()
+	// が jobId 確定済みなら即座にそのリスナーを購読解除するため、二度と発火しない窓が
+	// できる)。そのため、ここに登録した reject を直接呼んで確実に確定させる
+	// (呼び出し元の await が永久に hang するのを防ぐ)。
+	const pendingRejectRef = useRef<Map<string, (err: Error) => void>>(new Map());
 
 	const lifecycle = useKeyedJobLifecycle();
 
 	const patch = useCallback((key: string, p: Partial<PreviewState>) => {
-		setStates((prev) => {
-			const next = new Map(prev);
-			const cur = next.get(key) ?? { rendering: false };
-			next.set(key, { ...cur, ...p });
-			return next;
-		});
+		const cur = statesRef.current.get(key) ?? { rendering: false };
+		const next = new Map(statesRef.current);
+		next.set(key, { ...cur, ...p });
+		statesRef.current = next;
+		setStates(next);
 	}, []);
 
 	const ensure = useCallback(
@@ -94,8 +106,36 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 			// preview_start が二重発火する P1 バグがあった(usePreview.ensure の重複ガード
 			// 競合)。pendingRef は setState と異なり同期的に更新されるため、これだけを
 			// 条件にすれば tick を跨がず確実に合流する。
+			//
+			// ただし合流先が「今回と同じ sig を狙っている」場合に限る。進行中のレンダリング
+			// が古い spec 由来(sig 不一致)のまま呼び出し元へ合流させると、投稿直前に spec を
+			// 編集したケースで「編集前の内容をレンダリングした結果」を呼び出し元がそのまま
+			// アップロードしてしまう(publish 品質の ensure() を awaitして得た outputPath を
+			// そのまま投稿する UploadScreen の投稿フローで実害が出る)。
 			const pending = pendingRef.current.get(key);
-			if (pending) return pending;
+			if (pending) {
+				if (pendingSigRef.current.get(key) === sig) return pending;
+				// 世代トークンの設計(GHSA-c4jj-6rmf-h7g3)にそのまま乗せる形で
+				// cancel-and-restart する: 進行中ジョブを孤児化させ(reserve() 前に
+				// remove() 相当のクリーンアップを行うことで、jobId 確定済みなら
+				// 即座に Rust 側へキャンセルを通知し、購読も解除する)、新しい sig で
+				// 撮り直す。states は書き換えない(isCurrent() が false になるため
+				// onDone/onError 側も同様に書き換えない)。呼び出し元(古い sig で
+				// ensure() した側)の Promise は、ここで明示的に reject して確定させる
+				// — lifecycle.remove() が jobId 確定済みのリスナーを即座に購読解除して
+				// しまうため、「自身の onDone/onError がいつか発火する」ことに賭けると
+				// 呼び出し元の await が永久に解決しない(pendingRejectRef 参照)。
+				pendingRef.current.delete(key);
+				pendingSigRef.current.delete(key);
+				pendingRejectRef.current.get(key)?.(
+					new Error("プレビュー生成が中断されました(設定の変更により撮り直します)"),
+				);
+				pendingRejectRef.current.delete(key);
+				void lifecycle.remove(key, statesRef.current.get(key)?.jobId);
+				// 古い jobId を残したままにしない(cancel() がこの窓で誤って古いジョブへ
+				// キャンセルを送るのを防ぐ。新しい jobId は下の `.then()` で確定する)。
+				patch(key, { jobId: undefined });
+			}
 
 			// この ensure() 呼び出し由来の世代トークン(同期発行。GHSA-c4jj-6rmf-h7g3
 			// 対応)。以降の非同期コールバックはこのクロージャで捕まえた `token` が
@@ -104,6 +144,7 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 			const isCurrent = () => lifecycle.isCurrent(key, token);
 
 			const promise = new Promise<string>((resolve, reject) => {
+				pendingRejectRef.current.set(key, reject);
 				patch(key, { rendering: true, error: undefined });
 				let handle: JobHandle | undefined;
 				// onDone/onError が(invoke() の resolve より先に)既に発火済みかどうか。
@@ -130,6 +171,8 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 								return;
 							}
 							pendingRef.current.delete(key);
+							pendingSigRef.current.delete(key);
+							pendingRejectRef.current.delete(key);
 							lifecycle.clearUnsubscribe(key);
 							patch(key, {
 								rendering: false,
@@ -147,6 +190,8 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 								return;
 							}
 							pendingRef.current.delete(key);
+							pendingSigRef.current.delete(key);
+							pendingRejectRef.current.delete(key);
 							lifecycle.clearUnsubscribe(key);
 							patch(key, { rendering: false, error: message });
 							reject(new Error(message));
@@ -177,11 +222,14 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 							return;
 						}
 						pendingRef.current.delete(key);
+						pendingSigRef.current.delete(key);
+						pendingRejectRef.current.delete(key);
 						patch(key, { rendering: false, error: message });
 						reject(err instanceof Error ? err : new Error(message));
 					});
 			});
 			pendingRef.current.set(key, promise);
+			pendingSigRef.current.set(key, sig);
 			return promise;
 		},
 		[patch, quality, lifecycle],
@@ -202,6 +250,8 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 	const remove = useCallback(
 		(key: string) => {
 			pendingRef.current.delete(key);
+			pendingSigRef.current.delete(key);
+			pendingRejectRef.current.delete(key);
 			// key の世代トークンを破棄する(GHSA-c4jj-6rmf-h7g3 対応)。jobId 未確定
 			// (invoke 未 resolve)の窓で remove() が呼ばれても、ensure() の `.then()`/
 			// onDone/onError は isCurrent() が false になるため、states/購読への
@@ -209,19 +259,21 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 			// unsubscribe + cancel される。jobId が既に確定していれば Rust 側の
 			// ジョブへキャンセルを通知する(バグ1)。
 			void lifecycle.remove(key, statesRef.current.get(key)?.jobId);
-			setStates((prev) => {
-				if (!prev.has(key)) return prev;
-				const next = new Map(prev);
-				next.delete(key);
-				return next;
-			});
+			if (!statesRef.current.has(key)) return;
+			const next = new Map(statesRef.current);
+			next.delete(key);
+			statesRef.current = next;
+			setStates(next);
 		},
 		[lifecycle],
 	);
 
 	const reset = useCallback(() => {
 		pendingRef.current.clear();
+		pendingSigRef.current.clear();
+		pendingRejectRef.current.clear();
 		lifecycle.resetAll([...statesRef.current.values()].map((state) => state.jobId));
+		statesRef.current = new Map();
 		setStates(new Map());
 	}, [lifecycle]);
 

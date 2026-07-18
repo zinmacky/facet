@@ -104,6 +104,86 @@ describe("usePreview", () => {
 		expect(mockInvoke).toHaveBeenCalledTimes(1);
 	});
 
+	it("進行中レンダリングと異なる sig で ensure() すると合流せず、古いジョブを孤児化して新しい sig で撮り直す(cancel-and-restart)", async () => {
+		// レビュー指摘の回帰テスト: 以前は pendingRef への合流が sig を見ておらず、
+		// publish 品質のレンダリングが進行中に(投稿直前の)spec 編集で ensure() し直すと、
+		// 呼び出し元は編集前の(古い sig の)結果をそのまま受け取ってしまっていた
+		// (usePublishExtras の投稿フローがそれをそのままアップロードする実害)。
+		const { result } = renderHook(() => usePreview());
+
+		const specB: EditSpec = { ...SPEC, trim: { start: 0, end: 3 } };
+
+		// pendingA の決着(resolved/rejected)を同期的に記録する。unhandled rejection
+		// 警告を避けるため、.catch を後から生やすのではなく生成と同一 tick でハンドラを
+		// 張る(このファイルの「jobId 未確定窓で remove()」テストと同じ配慮)。
+		let pendingASettled: "resolved" | "rejected" | undefined;
+		let pendingA!: Promise<string>;
+		act(() => {
+			pendingA = result.current.ensure("clip-1", "/in.mp4", SPEC, "sig-a");
+			pendingA.then(
+				() => {
+					pendingASettled = "resolved";
+				},
+				() => {
+					pendingASettled = "rejected";
+				},
+			);
+		});
+		await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+		const jobA = invokeJobId(0);
+
+		// sig-a のレンダリングがまだ完了していないうちに、異なる sig(sig-b)で ensure()
+		// する(同一 tick 内でも成立することを確認するため act() でまとめて呼ぶ)。
+		let pendingB!: Promise<string>;
+		act(() => {
+			pendingB = result.current.ensure("clip-1", "/in.mp4", specB, "sig-b");
+		});
+
+		// 合流せず、新しい撮り直しとして 2 回目の preview_start が発火する。
+		await waitFor(() => {
+			const previewCalls = mockInvoke.mock.calls.filter(
+				([cmd]) => cmd === "preview_start",
+			);
+			expect(previewCalls.length).toBe(2);
+		});
+		const previewCalls = mockInvoke.mock.calls.filter(
+			([cmd]) => cmd === "preview_start",
+		);
+		const secondCall = previewCalls[1];
+		if (!secondCall) throw new Error("2 回目の preview_start 呼び出しが見つからない");
+		const jobB = (secondCall[1] as { jobId: string }).jobId;
+		expect(jobB).not.toBe(jobA);
+
+		// 孤児化した古い ensure()(pendingA)は、cancel-and-restart の時点で明示的に
+		// reject 済み(孤児化した古いジョブ自身の onDone/onError が発火する保証が
+		// ないため — 詳細は usePreview.ts の pendingRejectRef コメント参照)。
+		await waitFor(() => expect(pendingASettled).toBe("rejected"));
+		// 孤児化した古いジョブ(jobA)自体も、走らせっぱなしにせず Rust 側へキャンセルを
+		// 通知する(cancel-and-restart の「cancel」側の確認)。
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith("reframe_cancel", { jobId: jobA }),
+		);
+
+		// 孤児化した古いジョブ(jobA)の done が後から届いても無視され、states には
+		// 反映されない(sig-a はもはや current な世代ではない)。
+		act(() => {
+			emitMockEvent(`preview://done/${jobA}`, { path: "/cache/stale.mp4" });
+		});
+		expect(result.current.states.get("clip-1")?.sig).not.toBe("sig-a");
+
+		// 新しい sig(sig-b)のジョブが完了すると、呼び出し元(pendingB)・states の双方に
+		// sig-b の結果が反映される。
+		act(() => {
+			emitMockEvent(`preview://done/${jobB}`, { path: "/cache/fresh.mp4" });
+		});
+		await expect(pendingB).resolves.toBe("/cache/fresh.mp4");
+		expect(result.current.states.get("clip-1")).toMatchObject({
+			rendering: false,
+			outputPath: "/cache/fresh.mp4",
+			sig: "sig-b",
+		});
+	});
+
 	it("sig が一致し rendering でない完了済みキャッシュは再生成せず即解決する", async () => {
 		const { result } = renderHook(() => usePreview());
 
