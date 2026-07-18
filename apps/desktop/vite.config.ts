@@ -25,9 +25,14 @@ export default defineConfig(({ mode }) => {
 	const isMock = mode === "mock";
 
 	// public/private エディション(§lib/edition.ts、edition.build.ts)。
-	// `--mode public` を明示したビルド/dev コマンドのみ public、それ以外は既定で
-	// private(現行の全機能。dev:mock やテスト実行時の既定もここに含まれる)。
-	const edition = resolveEdition(mode);
+	// `--mode private` を明示したビルド/dev コマンドのみ private、それ以外は既定で
+	// public(GHSA-7jjf-233f-jmg8。無指定の素の `vite build` が private を生成する
+	// footgun だったため既定を安全側に倒した)。
+	// dev:mock(`vite --mode mock`)は mode を isMock 検出に使っているため
+	// `--mode private` を同時に渡せない。ローカル専用のスクリーンショット用起動
+	// (配布物には一切混入しない、README.md 参照)で現行どおり全機能を見せる必要が
+	// あるため、ここで明示的に private 相当を維持する。
+	const edition = isMock ? "private" : resolveEdition(mode);
 
 	return {
 		plugins: [react(), tailwindcss()],

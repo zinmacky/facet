@@ -60,6 +60,8 @@ pub struct JobCreateResponse {
 /// R2 オブジェクトキーを生成する。
 /// 形式: `posts/<YYYY-MM-DD>/<uuid>.mp4` 。日付は `publish_at_ms` を UTC で解釈する
 /// (旧 TS 実装 `scheduler-client.ts` の `buildR2Key` と同じ規則。§テスト参照)。
+/// `uuid` の採番方法は呼び出し側の責務(`commands::publish::ig::run_ig_publish` は
+/// job_id からの決定的導出に変更済み。GHSA-6cx9-j28r-f866 対応)。
 pub fn build_r2_key(publish_at_ms: i64, uuid: uuid::Uuid) -> String {
 	let date = unix_ms_to_utc_date(publish_at_ms);
 	format!("posts/{date}/{uuid}.mp4")

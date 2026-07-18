@@ -85,8 +85,19 @@ impl IgJobsState {
 			.unwrap_or_else(|poisoned| poisoned.into_inner())
 	}
 
-	fn register(&self, job_id: JobId, token: CancelToken) {
-		self.lock().insert(job_id, token);
+	/// `job_id` が未登録なら `token` を登録して `true` を返す。既に登録済み(=同じ
+	/// job_id のジョブが実行中)なら何もせず `false` を返す(GHSA-6cx9-j28r-f866 対応:
+	/// 同一 job_id の並行 `ig_publish_start` を防ぐ)。「未登録か確認してから登録する」の
+	/// 2手順に分けると、その間に別呼び出しが割り込んで二重登録できてしまう(TOCTOU)ため、
+	/// `HashMap::entry` で 1 回のロック区間内にアトミックに行う。
+	fn try_register(&self, job_id: JobId, token: CancelToken) -> bool {
+		match self.lock().entry(job_id) {
+			std::collections::hash_map::Entry::Occupied(_) => false,
+			std::collections::hash_map::Entry::Vacant(entry) => {
+				entry.insert(token);
+				true
+			}
+		}
 	}
 
 	fn get(&self, job_id: &str) -> Option<CancelToken> {
@@ -193,6 +204,39 @@ fn error_event_name(job_id: &str) -> String {
 /// うるため、体感が変わらない粒度(1%刻み)に間引く。0% と 100% は必ず通す。
 const PROGRESS_EMIT_STEP_PERCENT: f64 = 1.0;
 
+/// r2_key 導出用の名前空間 UUID(UUIDv5、GHSA-6cx9-j28r-f866 対応)。
+/// `Uuid::new_v4()` で一度だけ生成した固定値で、値そのものに意味はない —
+/// [`IDEMPOTENCY_KEY_NAMESPACE`] と異なる値にすることだけが目的(同じ job_id からでも
+/// r2_key 用と idempotency_key 用の UUID が一致しないようにする)。
+/// 元値: `d537d70c-0561-4f0c-9e2e-314aa1011150`。
+const R2_KEY_NAMESPACE: Uuid = Uuid::from_bytes([
+	0xd5, 0x37, 0xd7, 0x0c, 0x05, 0x61, 0x4f, 0x0c, 0x9e, 0x2e, 0x31, 0x4a, 0xa1, 0x01, 0x11, 0x50,
+]);
+
+/// idempotency_key 導出用の名前空間 UUID(UUIDv5、GHSA-6cx9-j28r-f866 対応)。
+/// [`R2_KEY_NAMESPACE`] と同じ考え方。元値: `7eceaea8-7633-49ea-b41d-36091ef67e56`。
+const IDEMPOTENCY_KEY_NAMESPACE: Uuid = Uuid::from_bytes([
+	0x7e, 0xce, 0xae, 0xa8, 0x76, 0x33, 0x49, 0xea, 0xb4, 0x1d, 0x36, 0x09, 0x1e, 0xf6, 0x7e, 0x56,
+]);
+
+/// `job_id` から r2_key 用の UUID を決定的に導出する(GHSA-6cx9-j28r-f866 対応)。
+/// job_id は renderer 採番の任意文字列(UUID 形式とは限らない)なので `Uuid::new_v5` の
+/// 名前(バイト列)としてそのまま使う。同じ job_id なら常に同じ UUID になるため、
+/// enqueue 失敗後に同じ job_id で再試行しても同じ r2_key を指す
+/// (再試行のたびに異なる R2 オブジェクトが残る「孤児」を防ぐ)。
+fn derive_r2_uuid(job_id: &str) -> Uuid {
+	Uuid::new_v5(&R2_KEY_NAMESPACE, job_id.as_bytes())
+}
+
+/// `job_id` から idempotency_key を決定的に導出する(GHSA-6cx9-j28r-f866 対応)。
+/// 同じ job_id の再試行が同じ idempotency_key を再利用するため、scheduler 側の冪等性
+/// (同一キーの再送に既存ジョブを返す、`jobs::scheduler_client`)が正しく働き、二重公開を
+/// 防げる。[`derive_r2_uuid`] とは異なる名前空間 UUID を使うため、生成される文字列は
+/// r2_key 用の UUID とは一致しない。
+fn derive_idempotency_key(job_id: &str) -> String {
+	Uuid::new_v5(&IDEMPOTENCY_KEY_NAMESPACE, job_id.as_bytes()).to_string()
+}
+
 /// enqueue 前バリデーション(ファイルサイズ・尺・キャプション長)。
 /// 尺の取得(`media_core::probe`)は libav の同期 API のため、呼び出し側
 /// (`ig_publish_start`)が `spawn_blocking` 経由で呼ぶ(`commands::probe::probe` と同じ
@@ -262,9 +306,14 @@ pub(crate) async fn start_impl(
 	.await
 	.map_err(|err| format!("バリデーションタスクが異常終了しました: {err}"))??;
 
-	// 3. ジョブ登録 + バックグラウンド実行。
+	// 3. ジョブ登録 + バックグラウンド実行。同じ job_id が既に実行中なら拒否する
+	//    (GHSA-6cx9-j28r-f866: renderer 側のリトライ経路が同じ job_id を再利用する設計に
+	//    伴い、旧ジョブの完了前に新しい呼び出しが割り込むと r2_key/idempotency_key が
+	//    同じ 2 つのジョブが並走しうるため)。
 	let token = CancelToken::new();
-	jobs.register(job_id.clone(), token.clone());
+	if !jobs.try_register(job_id.clone(), token.clone()) {
+		return Err("このジョブは既に実行中です".to_string());
+	}
 
 	let handle = tauri::async_runtime::spawn(run_ig_publish(
 		app.clone(),
@@ -340,10 +389,17 @@ async fn run_ig_publish(
 		job_id: &job_id,
 	};
 
-	// r2Key と idempotencyKey は独立した UUID(旧 TS 実装が `randomUUID()` を
-	// 2回呼んでいたのと同じ規則、§jobs/manifest.rs)。
-	let r2_key = manifest::build_r2_key(publish_at, Uuid::new_v4());
-	let idempotency_key = Uuid::new_v4().to_string();
+	// r2_key と idempotency_key は job_id から決定的に導出する(GHSA-6cx9-j28r-f866 対応)。
+	// 旧実装は `Uuid::new_v4()` を毎回呼んでいたため、enqueue 失敗後に同じジョブを
+	// 再試行すると r2_key/idempotency_key が試行のたびに変わり、(1) scheduler 側の
+	// 冪等性(同一 idempotency_key の再送に既存ジョブを返す)が効かず二重公開しうる、
+	// (2) 失敗した試行がアップロードした R2 オブジェクトが孤児として残る、という2つの
+	// 問題があった。job_id は renderer が採番し、リトライ経路でも同一の値を再利用する
+	// 設計のため、そこから UUIDv5 で決定的に導出することで両方を防ぐ
+	// (r2_key 用・idempotency_key 用は異なる名前空間 UUID を使い、互いに一致しないように
+	// する。§[`derive_r2_uuid`]/[`derive_idempotency_key`])。
+	let r2_key = manifest::build_r2_key(publish_at, derive_r2_uuid(&job_id));
+	let idempotency_key = derive_idempotency_key(&job_id);
 
 	let url = match sigv4::presigned_put_url(&r2_credentials, &r2_key) {
 		Ok(url) => url,
@@ -445,10 +501,10 @@ mod tests {
 	}
 
 	#[test]
-	fn ig_jobs_state_register_get_remove_roundtrip() {
+	fn ig_jobs_state_try_register_get_remove_roundtrip() {
 		let jobs = IgJobsState::default();
 		let token = CancelToken::new();
-		jobs.register("job-1".to_string(), token.clone());
+		assert!(jobs.try_register("job-1".to_string(), token.clone()));
 
 		assert!(jobs.get("job-1").is_some());
 		jobs.remove("job-1");
@@ -459,12 +515,69 @@ mod tests {
 	fn ig_publish_cancel_unknown_job_returns_error() {
 		let jobs = IgJobsState::default();
 		let token = CancelToken::new();
-		jobs.register("job-1".to_string(), token.clone());
+		assert!(jobs.try_register("job-1".to_string(), token.clone()));
 		jobs.remove("job-1");
 
 		// State<'_, T> を直接構築できないため、内部ロジック(cancel 相当)を
 		// IgJobsState::get 経由で検証する(`ig_publish_cancel` 自体は薄いラッパ)。
 		assert!(jobs.get("job-1").is_none());
+	}
+
+	#[test]
+	fn ig_jobs_state_try_register_rejects_duplicate_job_id() {
+		// GHSA-6cx9-j28r-f866: 同じ job_id で `ig_publish_start` が既に実行中の場合、
+		// 2回目の登録は拒否される(二重開始の防止)。
+		let jobs = IgJobsState::default();
+		let token_a = CancelToken::new();
+		let token_b = CancelToken::new();
+
+		assert!(jobs.try_register("job-1".to_string(), token_a));
+		assert!(!jobs.try_register("job-1".to_string(), token_b));
+
+		// remove 後は同じ job_id を再登録できる(完了済みジョブの再試行は妨げない)。
+		jobs.remove("job-1");
+		assert!(jobs.try_register("job-1".to_string(), CancelToken::new()));
+	}
+
+	#[test]
+	fn derive_r2_uuid_is_deterministic_for_same_job_id() {
+		// GHSA-6cx9-j28r-f866: 同じ job_id からは常に同じ r2_key 用 UUID が導出される
+		// (enqueue 失敗後の再試行が同じ R2 オブジェクトキーを指し、孤児を残さない)。
+		assert_eq!(derive_r2_uuid("job-abc"), derive_r2_uuid("job-abc"));
+	}
+
+	#[test]
+	fn derive_r2_uuid_differs_across_job_ids() {
+		assert_ne!(derive_r2_uuid("job-a"), derive_r2_uuid("job-b"));
+	}
+
+	#[test]
+	fn derive_idempotency_key_is_deterministic_for_same_job_id() {
+		// GHSA-6cx9-j28r-f866: 同じ job_id からは常に同じ idempotency_key が導出される
+		// (scheduler 側の冪等性が再試行を既存ジョブへ束ねられる)。
+		assert_eq!(
+			derive_idempotency_key("job-abc"),
+			derive_idempotency_key("job-abc")
+		);
+	}
+
+	#[test]
+	fn derive_idempotency_key_differs_across_job_ids() {
+		assert_ne!(
+			derive_idempotency_key("job-a"),
+			derive_idempotency_key("job-b")
+		);
+	}
+
+	#[test]
+	fn r2_uuid_and_idempotency_key_derivations_differ_for_same_job_id() {
+		// 名前空間 UUID を分けているため、同じ job_id でも r2_key 用と idempotency_key
+		// 用の導出結果は一致しない(GHSA-6cx9-j28r-f866 の修正で意図した設計)。
+		let job_id = "job-abc";
+		assert_ne!(
+			derive_r2_uuid(job_id).to_string(),
+			derive_idempotency_key(job_id)
+		);
 	}
 
 	#[test]
