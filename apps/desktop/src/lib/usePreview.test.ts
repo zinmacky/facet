@@ -250,6 +250,89 @@ describe("usePreview", () => {
 		});
 	});
 
+	it("jobId 未確定窓で remove() すると、jobId 判明時に states へ復活せず reframe_cancel される(世代トークン: GHSA-c4jj-6rmf-h7g3 対応)", async () => {
+		// 1 回目の preview_start は resolve を意図的に保留する(remove() が invoke() の
+		// resolve 前に起きるケースを再現するため)。
+		let resolveFirstInvoke: (() => void) | undefined;
+		mockInvoke.mockImplementationOnce(() => {
+			return new Promise<void>((resolve) => {
+				resolveFirstInvoke = () => resolve(undefined);
+			});
+		});
+
+		const { result } = renderHook(() => usePreview());
+
+		// この ensure() の Promise は remove() 済みになった時点で reject する
+		// (isCurrent() が false の間は state 更新も再登録もしないだけで、Promise 自体は
+		// 確定させる必要があるため — jobId 未確定時点の early-cancel 分岐、
+		// usePreview.ts 参照)。reject 自体はここでは検証しない(状態と mockInvoke の
+		// 呼び出しで十分)ため、unhandled rejection を避けるために即座に握りつぶす。
+		act(() => {
+			void result.current
+				.ensure("clip-1", "/in.mp4", SPEC, "sig-1")
+				.catch(() => undefined);
+		});
+		await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+		const job1 = invokeJobId(0);
+
+		// invoke() がまだ resolve していない(jobId 未確定)うちに remove() する。
+		act(() => {
+			result.current.remove("clip-1");
+		});
+		expect(result.current.states.has("clip-1")).toBe(false);
+
+		// ここで旧ジョブ(job1)の invoke がようやく resolve し、jobId が判明する。
+		act(() => {
+			resolveFirstInvoke?.();
+		});
+
+		// ghost 復活しない: states に "clip-1" が再登録されない。
+		await waitFor(() =>
+			expect(mockInvoke).toHaveBeenCalledWith("reframe_cancel", { jobId: job1 }),
+		);
+		expect(result.current.states.has("clip-1")).toBe(false);
+		// jobId が判明した時点で明示的にキャンセルされるため、購読も残らない。
+		expect(mockEventListenerCount(`preview://done/${job1}`)).toBe(0);
+
+		// 孤児化していた job1 の done が後から届いても、states には一切影響しない。
+		act(() => {
+			emitMockEvent(`preview://done/${job1}`, { path: "/cache/ghost.mp4" });
+		});
+		expect(result.current.states.has("clip-1")).toBe(false);
+
+		// 同じ key への再 ensure() は新しい世代として独立に動く(旧ジョブに影響されない)。
+		// 直前の reframe_cancel も mockInvoke の呼び出しに数えられるため、コマンド名で
+		// 絞り込んで 2 回目の preview_start を特定する。
+		let again!: Promise<string>;
+		act(() => {
+			again = result.current.ensure("clip-1", "/in.mp4", SPEC, "sig-2");
+		});
+		await waitFor(() => {
+			const previewCalls = mockInvoke.mock.calls.filter(
+				([cmd]) => cmd === "preview_start",
+			);
+			expect(previewCalls.length).toBe(2);
+		});
+		const previewCalls = mockInvoke.mock.calls.filter(
+			([cmd]) => cmd === "preview_start",
+		);
+		const secondPreviewCall = previewCalls[1];
+		if (!secondPreviewCall) {
+			throw new Error("2 回目の preview_start 呼び出しが見つからない");
+		}
+		const job2 = (secondPreviewCall[1] as { jobId: string }).jobId;
+		expect(job2).not.toBe(job1);
+		act(() => {
+			emitMockEvent(`preview://done/${job2}`, { path: "/cache/out2.mp4" });
+		});
+		await expect(again).resolves.toBe("/cache/out2.mp4");
+		expect(result.current.states.get("clip-1")).toMatchObject({
+			rendering: false,
+			outputPath: "/cache/out2.mp4",
+			sig: "sig-2",
+		});
+	});
+
 	it("reset() は jobId が確定済みの全ジョブへ reframe_cancel を呼ぶ(バグ1: 孤児ジョブ対策)", async () => {
 		const { result } = renderHook(() => usePreview());
 

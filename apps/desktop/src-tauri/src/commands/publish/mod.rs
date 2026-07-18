@@ -15,6 +15,31 @@
 //! トークン・資格情報そのものを返す invoke コマンドは存在しない(get 系は「保存済みか」の
 //! boolean のみを返す。§実装方針)。set は値を受け取るが、ログ・エラーメッセージに
 //! 値を含めない(credential_store.rs の `sanitize_err` 参照)。
+//!
+//! ## scheduler_url の保存場所についての設計判断(GHSA-j74q-9v5x-87w3 対応)
+//!
+//! 修正前は scheduler の Bearer トークン送信先(`scheduler_url`)を renderer が
+//! invoke 引数として毎回指定できた。WebView が侵害された場合、任意のホストへ
+//! トークンを流出させられる(confused deputy)。対策として、送信先は Rust 側の
+//! 保存値からのみ導出する構造に変え、renderer からは受け取らない
+//! (`ig_publish_start`/`check_scheduler_connection` から `scheduler_url` 引数を削除)。
+//!
+//! URL 自体は秘密情報ではない(これ単体で scheduler を操作できるわけではない)ため
+//! 本来は OS キーチェーンに置く必然性はないが、「トークンの送信先は Rust 側の
+//! 信頼できる保存値からのみ導出する」という不変条件を保つために、あえて既存の
+//! [`CredentialStore`](キーチェーン)に相乗りする。`r2_credentials` が `bucket` 等の
+//! 非秘密フィールドを同じ store に保存している前例と同じ考え方
+//! (§r2_credentials.rs)。加えて保存時([`set_scheduler_url_impl`])・使用時
+//! (`ig::start_impl`)の双方で `http://` はループバック限定に検証する
+//! (§jobs::scheduler_client::parse_scheduler_base)。
+//!
+//! **残存リスク(意図した設計上のスコープ)**: `set_scheduler_url` は設定画面が使う
+//! ため renderer から呼べる invoke コマンドのままである。したがって WebView が完全に
+//! 侵害されれば、`set_scheduler_url` → `ig_publish_start` の2手順で https の任意ホスト
+//! へトークンを送出する余地は残る。本対策の狙いはこの経路の完全封鎖ではなく、
+//! 「呼び出しの都度、引数で送信先を指定できる」直接経路を閉じ、永続化された信頼済み
+//! 設定の書き換えを要する形にして blast radius を縮小することにある(平文 http は
+//! ループバック限定でさらに絞る)。
 
 mod credential_store;
 mod ig;
@@ -37,6 +62,10 @@ const SERVICE: &str = "com.facet.desktop.private";
 
 /// scheduler の Bearer トークンのキーチェーン内 username。
 const KEY_SCHEDULER_API_TOKEN: &str = "scheduler_api_token";
+
+/// scheduler のベース URL のキーチェーン内 username(値自体は秘密ではない。
+/// モジュール冒頭コメント「scheduler_url の保存場所についての設計判断」参照)。
+const KEY_SCHEDULER_URL: &str = "scheduler_url";
 
 /// R2(S3 互換)資格情報一式(JSON)のキーチェーン内 username(§r2_credentials.rs)。
 const KEY_R2_CREDENTIALS: &str = "r2_credentials";
@@ -74,6 +103,25 @@ fn delete_token_impl(store: &dyn CredentialStore) -> Result<(), String> {
 	store.delete(SERVICE, KEY_SCHEDULER_API_TOKEN)
 }
 
+fn set_scheduler_url_impl(store: &dyn CredentialStore, url: &str) -> Result<(), String> {
+	let trimmed = url.trim();
+	if trimmed.is_empty() {
+		return Err("scheduler_url が空です。".to_string());
+	}
+	// 保存前に検証する(GHSA-j74q-9v5x-87w3: http はループバック限定、
+	// §jobs::scheduler_client::parse_scheduler_base)。不正な値をそもそも保存させない。
+	crate::jobs::scheduler_client::parse_scheduler_base(trimmed)?;
+	store.set(SERVICE, KEY_SCHEDULER_URL, trimmed)
+}
+
+fn get_scheduler_url_impl(store: &dyn CredentialStore) -> Result<Option<String>, String> {
+	store.get(SERVICE, KEY_SCHEDULER_URL)
+}
+
+fn delete_scheduler_url_impl(store: &dyn CredentialStore) -> Result<(), String> {
+	store.delete(SERVICE, KEY_SCHEDULER_URL)
+}
+
 // ---- invoke 境界(Tauri コマンド) ----------------------------------------------
 
 /// scheduler の Bearer トークンをキーチェーンへ保存する(既存値は上書き)。
@@ -95,13 +143,37 @@ pub fn delete_scheduler_api_token() -> Result<(), String> {
 	delete_token_impl(&KeyringStore)
 }
 
-/// scheduler への疎通を2段階(health → Bearer 認証)で確認する。
-/// トークン値はここでキーチェーンから読み出すのみで、renderer へは返さない
-/// (戻り値は判別可能な enum のみ、§scheduler_check::ConnectionCheckResult)。
+/// scheduler の URL をキーチェーンへ保存する(既存値は上書き)。
+/// URL 自体は秘密情報ではないが、送信先を Rust 側の保存値からのみ導出する不変条件を
+/// 保つため、あえてキーチェーンへ保存する(モジュール冒頭コメント参照)。保存前に
+/// `parse_scheduler_base` で検証する(不正な URL・非ループバックの http は拒否)。
 #[tauri::command]
-pub async fn check_scheduler_connection(
-	scheduler_url: String,
-) -> Result<ConnectionCheckResult, String> {
+pub fn set_scheduler_url(url: String) -> Result<(), String> {
+	set_scheduler_url_impl(&KeyringStore, &url)
+}
+
+/// 保存済みの scheduler URL を返す(表示用。URL は秘密情報ではないため値をそのまま返す)。
+#[tauri::command]
+pub fn get_scheduler_url() -> Result<Option<String>, String> {
+	get_scheduler_url_impl(&KeyringStore)
+}
+
+/// 保存済みの scheduler URL を削除する(未保存でも成功扱い)。
+#[tauri::command]
+pub fn delete_scheduler_url() -> Result<(), String> {
+	delete_scheduler_url_impl(&KeyringStore)
+}
+
+/// scheduler への疎通を2段階(health → Bearer 認証)で確認する。URL・トークンは
+/// ここでキーチェーンから読み出すのみで、renderer へは返さない(戻り値は判別可能な
+/// enum のみ、§scheduler_check::ConnectionCheckResult)。**引数を取らない** —
+/// GHSA-j74q-9v5x-87w3 対応: 以前は renderer が任意の `scheduler_url` を渡せたため、
+/// WebView 侵害時に任意ホストへの疎通チェック(≒トークン送信)を誘発できた。
+#[tauri::command]
+pub async fn check_scheduler_connection() -> Result<ConnectionCheckResult, String> {
+	let Some(scheduler_url) = KeyringStore.get(SERVICE, KEY_SCHEDULER_URL)? else {
+		return Ok(ConnectionCheckResult::NoUrl);
+	};
 	let token = KeyringStore.get(SERVICE, KEY_SCHEDULER_API_TOKEN)?;
 	Ok(perform_check(&scheduler_url, token.as_deref()).await)
 }
@@ -139,6 +211,8 @@ pub fn delete_r2_credentials() -> Result<(), String> {
 
 /// IG(Instagram)公開ジョブを開始する(ロジック本体は `ig::start_impl`、
 /// §ig.rs `start_impl` 冒頭コメント: `#[tauri::command]` をこの薄いラッパに置く理由)。
+/// `scheduler_url` 引数は存在しない — `start_impl` がキーチェーンの保存値から読む
+/// (GHSA-j74q-9v5x-87w3 対応、モジュール冒頭コメント参照)。
 #[tauri::command]
 pub async fn ig_publish_start(
 	app: tauri::AppHandle,
@@ -147,18 +221,8 @@ pub async fn ig_publish_start(
 	input_path: String,
 	caption: String,
 	publish_at: i64,
-	scheduler_url: String,
 ) -> Result<(), String> {
-	ig::start_impl(
-		app,
-		jobs,
-		job_id,
-		input_path,
-		caption,
-		publish_at,
-		scheduler_url,
-	)
-	.await
+	ig::start_impl(app, jobs, job_id, input_path, caption, publish_at).await
 }
 
 /// IG 公開ジョブをキャンセルする(ロジック本体は `ig::cancel_impl`)。
@@ -271,5 +335,40 @@ mod tests {
 	fn delete_without_prior_set_is_idempotent() {
 		let store = MemoryStore::default();
 		assert!(delete_token_impl(&store).is_ok());
+	}
+
+	#[test]
+	fn set_then_get_then_delete_scheduler_url_roundtrip() {
+		let store = MemoryStore::default();
+		assert_eq!(get_scheduler_url_impl(&store).unwrap(), None);
+
+		set_scheduler_url_impl(&store, "https://scheduler.example.workers.dev").unwrap();
+		assert_eq!(
+			get_scheduler_url_impl(&store).unwrap(),
+			Some("https://scheduler.example.workers.dev".to_string())
+		);
+
+		delete_scheduler_url_impl(&store).unwrap();
+		assert_eq!(get_scheduler_url_impl(&store).unwrap(), None);
+	}
+
+	#[test]
+	fn set_scheduler_url_rejects_blank() {
+		let store = MemoryStore::default();
+		assert!(set_scheduler_url_impl(&store, "   ").is_err());
+		assert_eq!(get_scheduler_url_impl(&store).unwrap(), None);
+	}
+
+	#[test]
+	fn set_scheduler_url_rejects_non_loopback_http() {
+		let store = MemoryStore::default();
+		assert!(set_scheduler_url_impl(&store, "http://evil.example.com").is_err());
+		assert_eq!(get_scheduler_url_impl(&store).unwrap(), None);
+	}
+
+	#[test]
+	fn set_scheduler_url_accepts_loopback_http() {
+		let store = MemoryStore::default();
+		assert!(set_scheduler_url_impl(&store, "http://127.0.0.1:8787").is_ok());
 	}
 }

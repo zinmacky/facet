@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+	IgPublishDone as ContractIgPublishDone,
+	IgPublishProgress as ContractIgPublishProgress,
+	IgPublishRuntimeError as ContractIgPublishRuntimeError,
+} from "@facet/contract";
 import { newJobId } from "../../lib/jobId";
 
 /**
@@ -9,28 +14,20 @@ import { newJobId } from "../../lib/jobId";
  * `listen()` を完了させてから `invoke()` する(ジョブがどれだけ早く失敗しても
  * 取りこぼさないため。理由は `src-tauri/src/commands/reframe.rs` 冒頭コメント
  * 「jobId 採番をフロントエンドへ移した理由」参照)。
+ *
+ * イベントペイロードの型は `@facet/contract`(`ig-publish-events.ts`)の zod スキーマから
+ * `z.infer` で導出する(Issue #93 パート B: 契約と Rust 実装の形状一致を型レベルでも
+ * 保証する)。型名はこのモジュールの既存の呼び出し側を変えないため維持する。
  */
 
 /** Rust 側 `IgPublishProgress`(`phase` タグの internally-tagged enum)と同形。 */
-export type IgPublishProgress =
-	| { phase: "uploading"; bytesSent: number; totalBytes: number; percent: number }
-	| { phase: "enqueuing" };
+export type IgPublishProgress = ContractIgPublishProgress;
 
 /** Rust 側 `IgPublishDone` と同形。 */
-export interface IgPublishDone {
-	schedulerJobId: string;
-	status: string;
-}
+export type IgPublishDone = ContractIgPublishDone;
 
 /** Rust 側 `IgPublishRuntimeError`(`kind` タグの internally-tagged enum)と同形。 */
-export type IgPublishRuntimeError =
-	| { kind: "upload_failed"; detail: string }
-	| { kind: "enqueue_unauthorized" }
-	| { kind: "enqueue_service_unavailable" }
-	| { kind: "enqueue_rejected"; detail: string }
-	| { kind: "network"; detail: string }
-	| { kind: "cancelled" }
-	| { kind: "internal"; detail: string };
+export type IgPublishRuntimeError = ContractIgPublishRuntimeError;
 
 /** `IgPublishRuntimeError` を日本語のユーザー向けメッセージへ変換する。 */
 export function describeIgPublishError(error: IgPublishRuntimeError): string {
@@ -79,23 +76,34 @@ export function cancelIgPublishJob(jobId: string): Promise<void> {
 /**
  * IG(Instagram)への予約公開ジョブを開始する。
  *
- * `inputPath` は書き出し済みの mp4 の絶対パス、`publishAt` は unix ms、
- * `schedulerUrl` は scheduler のベース URL(`schedulerUrlStore.ts` から読む)。
- * バリデーション(ファイルサイズ・尺・キャプション長)・R2/scheduler の資格情報未設定は
- * `invoke()` 自体の reject(Err(String))として返る(ジョブは開始されない、
+ * `inputPath` は書き出し済みの mp4 の絶対パス、`publishAt` は unix ms。scheduler の
+ * 送信先(scheduler_url)はここでは渡さない — Rust 側がキーチェーンの保存値から読む
+ * (GHSA-j74q-9v5x-87w3 対応: renderer が任意の送信先を指定できると、WebView 侵害時に
+ * Bearer トークンを任意ホストへ流出させられるため。`schedulerUrlStore.ts`/
+ * `commands/publish/ig.rs` 冒頭コメント参照)。
+ * バリデーション(ファイルサイズ・尺・キャプション長)・R2/scheduler の資格情報・URL
+ * 未設定は `invoke()` 自体の reject(Err(String))として返る(ジョブは開始されない、
  * `commands/publish/ig.rs` 冒頭コメント参照)。R2 アップロード/scheduler 登録開始後の
  * 失敗(ネットワーク・401・503・キャンセル)は `onError` ハンドラに構造化 enum で届く。
+ *
+ * `params.jobId` は省略可能(省略時は従来どおり `newJobId()` で新規採番)。
+ * 呼び出し側(`usePublishExtras.tsx`)が output ごとに安定な jobId を再利用して渡すと、
+ * Rust 側(並行実装中)が jobId から idempotency_key を決定的に導出できるようになり、
+ * 同一 output の再投稿(リトライ)が同一キーになって二重公開を防げる
+ * (Issue #95 と対になる Rust 側変更)。再利用する場合、呼び出し側は「前回の試行が
+ * 終了(done/error)している」ことを保証する責任を負う — Rust 側は実行中の同一
+ * jobId を拒否する予定のため。
  */
 export async function startIgPublish(
 	params: {
 		inputPath: string;
 		caption: string;
 		publishAt: number;
-		schedulerUrl: string;
+		jobId?: string;
 	},
 	handlers: IgPublishHandlers,
 ): Promise<IgPublishHandle> {
-	const jobId = newJobId();
+	const jobId = params.jobId ?? newJobId();
 
 	let unlisteners: UnlistenFn[] = [];
 	const unsubscribe = () => {
@@ -128,7 +136,6 @@ export async function startIgPublish(
 			inputPath: params.inputPath,
 			caption: params.caption,
 			publishAt: params.publishAt,
-			schedulerUrl: params.schedulerUrl,
 		});
 	} catch (err) {
 		unsubscribe();
