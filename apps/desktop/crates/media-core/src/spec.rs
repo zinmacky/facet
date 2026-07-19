@@ -77,8 +77,7 @@ pub struct Preset {
 	pub fit: FitMode,
 }
 
-/// 編集の全指定。core(TS)はこれ 1 つから `FilterPlan` を導出する。
-/// media-core(Rust)は同じ JSON をこの型でデシリアライズして扱う。
+/// 編集の全指定。media-core(Rust)は同じ JSON をこの型でデシリアライズして扱う。
 /// (`packages/core/src/types.ts` の `EditSpec` に対応)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

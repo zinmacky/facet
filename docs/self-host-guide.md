@@ -154,7 +154,8 @@ pnpm migrate:remote   # = wrangler d1 migrations apply facet-jobs --remote
   `https://media.dysalgia.com` は作者自身のカスタムドメインなので、自分の
   バケットの URL に必ず差し替える)
 - `GRAPH_VERSION`: Graph API のバージョン(既定 `v21.0` のままで通常問題ない)
-- `MAX_ATTEMPTS`: ポーリング失敗時の最大リトライ回数(既定 5)
+- `MAX_ATTEMPTS`: transient 失敗時の最大リトライ回数(既定 8。指数バックオフ
+  [30秒, 1分, 2分, 5分, 10分, 15分(以降15分固定)] と組み合わせて合計約48.5分粘る)
 
 ### 2.3 シークレットの投入
 
@@ -183,9 +184,9 @@ wrangler kv key put ig_long_lived "<取得したトークン>" --binding=TOKENS 
 ```
 
 このトークンは毎日 3 時の cron(`token-refresh.ts`)が自動更新します(長期トークン
-は約 60 日で失効しますが、失効前に `ig_refresh_token` grant で延命されます)。
-更新後のトークンと有効期限も同じ KV に書き戻されるため、通常は初回投入のみで
-以降のメンテナンスは不要です。
+は約 60 日で失効しますが、失効前に `fb_exchange_token` grant(`IG_APP_ID` /
+`IG_APP_SECRET` を使用)で延命されます)。更新後のトークンと有効期限も同じ KV に
+書き戻されるため、通常は初回投入のみで以降のメンテナンスは不要です。
 
 ### 2.5 デプロイと疎通確認
 

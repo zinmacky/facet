@@ -99,8 +99,11 @@ export async function getTokenHealthSnapshot(
 }
 
 /**
- * 毎日3時の cron で呼ばれる。IG 長期トークンを ig_refresh_token で更新し KV に書き戻す。
- * 長期トークンは約60日で失効するため、期限内に定期リフレッシュして延命する。
+ * 毎日3時の cron で呼ばれる。IG 長期トークンを fb_exchange_token で更新し KV に書き戻す。
+ * このトークンは Facebook ページに接続された IG ビジネスアカウントへの投稿(instagram.ts の
+ * graph.facebook.com/{IG_USER_ID}/media 呼び出し)に使う Facebook-Login フレーバーのユーザー
+ * トークンであり、Instagram-Login API 専用の ig_refresh_token grant(graph.instagram.com)
+ * とは互換性が無い。長期トークンは約60日で失効するため、期限内に定期リフレッシュして延命する。
  * トークン未設定なら何もしない(no-op)。
  *
  * `forcedByExpiryWatch` は毎分 cron からの強制呼び出しであることを示す。ログ用途のみで
@@ -120,16 +123,36 @@ export async function refreshTokens(
 	// 成功すれば expires_at は更新されるが、失敗時はこの値が「現在の期限」のまま。
 	const expiresAtBeforeAttempt = await readExpiresAt(env);
 
-	const query = new URLSearchParams({
-		grant_type: "ig_refresh_token",
-		access_token: current,
+	// client_secret / 現在の長期トークンを含むため、S-4 方針(秘密情報を URL に載せない)に
+	// 従い POST ボディで渡す(instagram.ts の authHeader と同じ理由)。
+	const body = new URLSearchParams({
+		grant_type: "fb_exchange_token",
+		client_id: env.IG_APP_ID,
+		client_secret: env.IG_APP_SECRET,
+		fb_exchange_token: current,
 	});
-	const url = `https://graph.facebook.com/${env.GRAPH_VERSION}/refresh_access_token?${query.toString()}`;
+	const url = `https://graph.facebook.com/${env.GRAPH_VERSION}/oauth/access_token`;
 
-	const res = await fetch(url, { method: "GET" });
-	let body: unknown;
+	let res: Response;
 	try {
-		body = await res.json();
+		res = await fetch(url, {
+			method: "POST",
+			headers: { "content-type": "application/x-www-form-urlencoded" },
+			body,
+		});
+	} catch (err) {
+		// ネットワークレベルの fetch 拒否(DNS 失敗・タイムアウト等)。ここで捕まえずに
+		// 上位へ投げると recordFailureIfNearExpiry を経由せず、失効間近の cooldown が
+		// 一切効かないまま毎分 cron が Graph API を叩き続けてしまう。
+		const message = `network error: ${err instanceof Error ? err.message : String(err)}`;
+		console.error(`token-refresh: ${message}`);
+		await recordFailureIfNearExpiry(env, message, expiresAtBeforeAttempt);
+		return;
+	}
+
+	let responseBody: unknown;
+	try {
+		responseBody = await res.json();
 	} catch {
 		const message = `non-JSON response (status ${res.status})`;
 		console.error(`token-refresh: ${message}`);
@@ -137,15 +160,19 @@ export async function refreshTokens(
 		return;
 	}
 
-	if (typeof body === "object" && body !== null && "error" in body) {
-		const err = (body as { error?: { message?: string } }).error;
+	if (
+		typeof responseBody === "object" &&
+		responseBody !== null &&
+		"error" in responseBody
+	) {
+		const err = (responseBody as { error?: { message?: string } }).error;
 		const message = `graph error: ${err?.message ?? "unknown"}`;
 		console.error(`token-refresh: ${message}`);
 		await recordFailureIfNearExpiry(env, message, expiresAtBeforeAttempt);
 		return;
 	}
 
-	const data = body as { access_token?: unknown; expires_in?: unknown };
+	const data = responseBody as { access_token?: unknown; expires_in?: unknown };
 	if (typeof data.access_token !== "string") {
 		const message = "response missing access_token";
 		console.error(`token-refresh: ${message}`);

@@ -11,7 +11,6 @@ export interface Preset {
 	fit: FitMode;
 }
 
-export type PresetName = "9:16" | "1:1" | "4:5";
 export type FitMode = "blur-pad" | "crop";
 
 /**
@@ -31,7 +30,7 @@ export interface Trim {
 	end: number;
 }
 
-/** 編集の全指定。core はこれ 1 つから FilterPlan を導出する。 */
+/** 編集の全指定。crop-overlay UI や desktop 側の manifest 生成が参照する。 */
 export interface EditSpec {
 	/** 元動画の実ピクセル寸法。crop 矩形をピクセルに解決するのに使う。 */
 	source: { width: number; height: number };
@@ -39,20 +38,4 @@ export interface EditSpec {
 	/** ソース側の事前クロップ(手動指定枠)。無指定なら全体を使う。 */
 	crop?: CropRect;
 	preset: Preset;
-}
-
-/**
- * core の出力。旧 ffmpeg-runner(削除済み)が実コマンドに組み立てていた型。
- * 現在は生成元(filtergraph/compose)が削除され未使用だが、型としては残す。
- * 純データなのでスナップショットテストが容易。
- */
-export interface FilterPlan {
-	/** 入力より前に置くシーク引数(例: ["-ss", "1.5"])。 */
-	seekArgs: string[];
-	/** 入力より後に置く尺引数(例: ["-to", "8.0"] は -ss 起点からの相対)。 */
-	durationArgs: string[];
-	/** -filter_complex に渡すグラフ文字列。 */
-	filterComplex: string;
-	/** グラフの最終出力ラベル(例: "[out]")。-map で使う。 */
-	outLabel: string;
 }
