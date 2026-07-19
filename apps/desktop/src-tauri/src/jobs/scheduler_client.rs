@@ -175,7 +175,21 @@ pub async fn enqueue_job(
 			.map_err(|err| EnqueueError::Network(format!("応答の解析に失敗しました: {err}"))),
 		StatusCode::UNAUTHORIZED => Err(EnqueueError::Unauthorized),
 		StatusCode::SERVICE_UNAVAILABLE => Err(EnqueueError::ServiceUnavailable),
-		// 4xx(401 を除く)は manifest 自体が scheduler 側のバリデーションで拒否された
+		// 429(レート制限)は「再送しても同じ結果になる」恒久エラーではなく、時間を
+		// 置けば成功しうる一時的な状態 — 下の `is_client_error` 一括処理(4xx→`Rejected`)
+		// に含めると PR #128 が 5xx について修正したのと同じ「一時的な失敗が恒久エラーとして
+		// ユーザーに表示される」バグになる(scheduler 側のレート制限が「拒否されました」と
+		// 誤って伝わる)。`EnqueueError::ServiceUnavailable` は
+		// `IgPublishRuntimeError::EnqueueServiceUnavailable`(「scheduler が未設定です」という
+		// 設定不備向けの文言)に対応するため意味的に合わない。5xx と同じ再試行可能な
+		// `Network`(`IgPublishRuntimeError::Network`、「通信に失敗しました」)に分類する。
+		StatusCode::TOO_MANY_REQUESTS => {
+			let detail = response.text().await.unwrap_or_default();
+			Err(EnqueueError::Network(format!(
+				"scheduler のレート制限に達しました: {detail}"
+			)))
+		}
+		// 4xx(401・429 を除く)は manifest 自体が scheduler 側のバリデーションで拒否された
 		// ケース — 再送しても同じ結果になるため恒久的な `Rejected` のまま。
 		other if other.is_client_error() => {
 			let detail = response.text().await.unwrap_or_default();
@@ -183,7 +197,7 @@ pub async fn enqueue_job(
 		}
 		// 5xx(Cloudflare のゲートウェイエラー等)やその他の想定外ステータスは
 		// scheduler 側の一時的な不調である可能性が高く、同じファイルの `fetch_job`
-		// (252行目付近)の「想定外ステータス」フォールバックと同じく再試行可能な
+		// (281行目付近)の「想定外ステータス」フォールバックと同じく再試行可能な
 		// `Network` に分類する(以前は恒久エラーの `Rejected` として扱っていたため、
 		// 一時的な 502/504 でもリトライされずユーザーに「拒否された」と誤って
 		// 伝わっていた)。
@@ -483,6 +497,30 @@ mod tests {
 		.await
 		.unwrap_err();
 		assert!(matches!(err, EnqueueError::Rejected(_)));
+	}
+
+	// 429(レート制限)は他の 4xx と異なり `Rejected`(恒久エラー)ではなく再試行可能な
+	// `Network` に分類する(本 PR の対象: 429 が 401 以外の 4xx 一括処理に紛れ込み、
+	// 「拒否されました」という恒久エラー文言でユーザーに誤って伝わっていた。5xx について
+	// 同種の問題を修正した PR #128 と同じ考え方)。
+	#[tokio::test]
+	async fn enqueue_job_network_error_on_429() {
+		let base = spawn_mock_server(
+			"HTTP/1.1 429 Too Many Requests",
+			r#"{"error":"rate limited"}"#,
+		);
+		let client = Client::new();
+		let err = enqueue_job(
+			&client,
+			&base,
+			"any-token",
+			&sample_manifest(),
+			TEST_TIMEOUT,
+			&CancelToken::new(),
+		)
+		.await
+		.unwrap_err();
+		assert!(matches!(err, EnqueueError::Network(_)));
 	}
 
 	// 5xx は scheduler 側の一時的な不調(Cloudflare のゲートウェイエラー等)である
