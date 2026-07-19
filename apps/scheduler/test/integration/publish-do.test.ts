@@ -9,8 +9,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
  * 一度も経由していなかった。ここでは IG Graph API 呼び出しのみ fetch レベルで
  * スタブ化し、それ以外(D1 / DO / alarm)は実物を使う。
  *
- * バックオフ定数やリトライ回数など PR #130 が変更しうる細部には依存せず、
- * 「/start → alarm → published」という構造的な状態遷移だけを検証する。
+ * バックオフ定数やリトライ回数(PR #130 で指数バックオフ・既定8回に変更)などの
+ * 細部には依存せず、「/start → alarm → published」という構造的な状態遷移だけを
+ * 検証する。/start の pending → creating は claimPendingForCreating(条件付き
+ * UPDATE)による原子的 claim を内部で通過する(claim の D1 プリミティブ自体の
+ * 検証は test/integration/d1-schema.test.ts 側)。
  *
  * 1ファイル1テストに意図的にまとめている: real DO(ファイル永続化された
  * SQLite ストレージ)へ複数の it() で個別にアクセスすると、vitest-pool-workers の

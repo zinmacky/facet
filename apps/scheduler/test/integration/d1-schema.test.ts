@@ -210,16 +210,13 @@ describe("cron.ts scanDueJobs: idx_due に対する実 SELECT", () => {
 });
 
 describe("claim 用の条件付き UPDATE(WHERE id = ? AND status = 'pending')", () => {
-	// 現状の PublishDO.fetch("/start") は「pending 以外なら early return」という
-	// read-then-write でジョブの二重処理を避けており(同一 job id は idFromName で
-	// 常に同一 DO インスタンスに収束するため、実際の排他は DO の単一実行保証に依る)、
-	// SQL の compare-and-swap 的な claim UPDATE(WHERE ... AND status = 'pending')は
-	// 現時点のコードには存在しない。
-	//
-	// それでも本レビューが指摘した「claim の原子性」自体は D1 の一般的な保証であり、
-	// (a) 将来この形の claim へ寄せる場合の安全網、(b) meta.changes が実 D1 で
-	// 期待どおり報告されることの確認、として価値があるため、生 SQL でこのパターンを
-	// 直接検証しておく。
+	// PublishDO.fetch("/start") の claimPendingForCreating(publish-do.ts)が
+	// pending → creating の遷移をこの形の条件付き UPDATE で原子的に claim しており、
+	// meta.changes === 0 を「他インスタンスが claim 済み」(already-claimed 応答)の
+	// 判定に使っている。ここではその依拠する D1 の保証 —— この1文が単一
+	// トランザクションとして実行され、負けた側の meta.changes が実 D1 で 0 と
+	// 報告されること —— を、DO を経由せず生 SQL で直接検証する
+	// (claim を含む DO 側の一連の流れは test/integration/publish-do.test.ts が担う)。
 	it("2回目の claim UPDATE は対象行が既に pending でないため 0 件更新になる", async () => {
 		await insertJob({ id: "claim-1", idempotency_key: "claim-key-1" });
 
