@@ -4,7 +4,7 @@ import type { Source } from "../../App";
 import type { Clip, OutputTarget } from "../../types";
 import { targetById } from "../../types";
 import { generateSchedule, msToLocalInput } from "../../lib/schedule";
-import { usePreview } from "../../lib/usePreview";
+import { PreviewSupersededError, usePreview } from "../../lib/usePreview";
 import { getErrorMessage } from "../../lib/getErrorMessage";
 import { newJobId } from "../../lib/jobId";
 import {
@@ -72,6 +72,15 @@ export function usePublishExtras({
 	const [pubStatuses, setPubStatuses] = useState<Map<string, PubStatus>>(
 		new Map(),
 	);
+	// OutputPublishSection 単体の「投稿」ボタン(fire-and-forget、publishPostMutation/
+	// publishAllMutation を経由しない)経由で実行中の output.id 集合。従来はこの経路が
+	// `busy`(=下記)に一切反映されず、UploadScreenPrivate.tsx の onBusyChange →
+	// App.tsx の uploadBusy/stepLocked(PR #131)が発火しないまま投稿中に元動画を
+	// 選び直せてしまう High バグがあった。increment は呼び出し直前、decrement は
+	// resolve/reject いずれでも行う(finally)ことで、確実に対になるようにする。
+	const [individualPublishIds, setIndividualPublishIds] = useState<
+		Set<string>
+	>(new Set());
 	// output.id → 投稿用レンダリング結果(本書き出しと同一品質 8Mbps、publish-cache)。
 	// 目視確認は共通側の高速な 2Mbps(preview)のまま、実際に IG へ投稿される実体のみ
 	// この publish 品質を使う(preview とはキャッシュディレクトリごと分離される —
@@ -156,6 +165,7 @@ export function usePublishExtras({
 	// biome-ignore lint/correctness/useExhaustiveDependencies: resetToken の変化そのものがトリガ(mount 時の初回実行は無害)
 	useEffect(() => {
 		setPubStatuses(new Map());
+		setIndividualPublishIds(new Set());
 		publishRender.reset();
 		igJobIdsRef.current.clear();
 		igSchedulerJobsRef.current.clear();
@@ -420,12 +430,51 @@ export function usePublishExtras({
 				setPubStatus(output.id, { kind: "success" });
 			}
 		} catch (err) {
+			if (err instanceof PreviewSupersededError) {
+				// ensurePublishRendered(=publishRender.ensure)が、同一 output.id への
+				// 後続 ensure()(新しい呼び出しの publishOutput)によって cancel-and-restart
+				// された(usePreview.ts 参照)。この output.id への投稿処理は既に新しい
+				// 呼び出しが引き継いで進行中のはずなので、ここでは「エラー」として
+				// pubStatuses へ書き込まない(そのまま上書きすると、進行中の新しい呼び出しの
+				// 表示を古い呼び出しの reject が後追いで壊してしまう)。
+				return;
+			}
 			setPubStatus(output.id, {
 				kind: "error",
 				message: getErrorMessage(err),
 			});
 			throw err;
 		}
+	};
+
+	/**
+	 * OutputPublishSection 単体の「投稿」ボタン用ラッパ(High バグ修正、上記
+	 * `individualPublishIds` 参照)。publishPostMutation/publishAllMutation を経由しない
+	 * fire-and-forget 呼び出しだが、この Set への increment/decrement を通して `busy`
+	 * (下記)へ反映することで、App.tsx の stepLocked(PR #131)が正しく効くようにする。
+	 *
+	 * `Set<string>` は「同一 output.id への同時実行が高々 1 件」を前提にしている
+	 * (存在有無のみ扱い、参照カウントしない)。この前提は `busy` 自体がすべての
+	 * 「投稿」ボタンを disabled にする(OutputPublishSection.tsx の
+	 * `disabled={busy || …}`)ことで UI 側から保証されている — 同一 output への
+	 * 二重発火(cancel-and-restart 等)は現状 UI からは再現できない。
+	 */
+	const publishOutputIndividually = (post: UploadPost, output: UploadOutput) => {
+		setIndividualPublishIds((prev) => {
+			const next = new Set(prev);
+			next.add(output.id);
+			return next;
+		});
+		void publishOutput(post, output)
+			.catch(() => undefined)
+			.finally(() => {
+				setIndividualPublishIds((prev) => {
+					if (!prev.has(output.id)) return prev;
+					const next = new Set(prev);
+					next.delete(output.id);
+					return next;
+				});
+			});
 	};
 
 	/**
@@ -607,7 +656,10 @@ export function usePublishExtras({
 		},
 	});
 
-	const busy = publishPostMutation.isPending || publishAllMutation.isPending;
+	const busy =
+		publishPostMutation.isPending ||
+		publishAllMutation.isPending ||
+		individualPublishIds.size > 0;
 	const totalOutputs = posts.reduce((sum, p) => sum + p.outputs.length, 0);
 	/** 「すべて投稿」ボタンの活性化判定: いずれかの Output が投稿可能(canPublishTarget)か。 */
 	const anyPublishableOutput = posts.some((post) =>
@@ -763,7 +815,7 @@ export function usePublishExtras({
 					busy={busy}
 					canPublish={canPublishTarget(target)}
 					onPatch={onPatchOutput}
-					onPublish={() => void publishOutput(post, output).catch(() => undefined)}
+					onPublish={() => publishOutputIndividually(post, output)}
 					onCancel={() => cancelOutput(output.id)}
 					onRefreshStatus={() => void pollIgJobStatus(output.id)}
 				/>

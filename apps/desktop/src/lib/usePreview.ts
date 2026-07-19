@@ -22,6 +22,21 @@ export interface PreviewState {
 	jobId?: string;
 }
 
+/**
+ * cancel-and-restart(同一 key への ensure() が異なる sig で呼ばれ、進行中だった
+ * 呼び出しを打ち切って撮り直した)ことを示す reject 専用の識別子。ユーザー操作
+ * (設定変更)による意図的な置き換えであり、失敗ではない。呼び出し元は
+ * `err instanceof PreviewSupersededError` で判定し、previewErrors/pubStatuses の
+ * ような常時表示のエラー表示へは書き込まない(置き換えた側の呼び出しが改めて
+ * 自分の then/catch で結果を報告するため)。
+ */
+export class PreviewSupersededError extends Error {
+	constructor() {
+		super("プレビュー生成が中断されました(設定の変更により撮り直します)");
+		this.name = "PreviewSupersededError";
+	}
+}
+
 export interface UsePreviewResult {
 	/** key(clip.id / output.id)ごとのプレビュー生成状態。 */
 	states: Map<string, PreviewState>;
@@ -127,9 +142,7 @@ export function usePreview(quality?: RenderQuality): UsePreviewResult {
 				// 呼び出し元の await が永久に解決しない(pendingRejectRef 参照)。
 				pendingRef.current.delete(key);
 				pendingSigRef.current.delete(key);
-				pendingRejectRef.current.get(key)?.(
-					new Error("プレビュー生成が中断されました(設定の変更により撮り直します)"),
-				);
+				pendingRejectRef.current.get(key)?.(new PreviewSupersededError());
 				pendingRejectRef.current.delete(key);
 				void lifecycle.remove(key, statesRef.current.get(key)?.jobId);
 				// 古い jobId を残したままにしない(cancel() がこの窓で誤って古いジョブへ
