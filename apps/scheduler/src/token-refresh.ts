@@ -1,4 +1,5 @@
 import type { Env } from "./env.js";
+import { fetchWithTimeout } from "./fetch-with-timeout.js";
 
 /** KV に保管する長期トークンのキー。instagram.ts と共有。 */
 const TOKEN_KEY = "ig_long_lived";
@@ -135,13 +136,14 @@ export async function refreshTokens(
 
 	let res: Response;
 	try {
-		res = await fetch(url, {
+		res = await fetchWithTimeout(url, {
 			method: "POST",
 			headers: { "content-type": "application/x-www-form-urlencoded" },
 			body,
 		});
 	} catch (err) {
-		// ネットワークレベルの fetch 拒否(DNS 失敗・タイムアウト等)。ここで捕まえずに
+		// ネットワークレベルの fetch 拒否(DNS 失敗・タイムアウト等。fetchWithTimeout の
+		// abort もここに含まれる)。ここで捕まえずに
 		// 上位へ投げると recordFailureIfNearExpiry を経由せず、失効間近の cooldown が
 		// 一切効かないまま毎分 cron が Graph API を叩き続けてしまう。
 		const message = `network error: ${err instanceof Error ? err.message : String(err)}`;

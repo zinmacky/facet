@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "./env.js";
+import { GRAPH_API_TIMEOUT_MS } from "./fetch-with-timeout.js";
 import {
 	checkTokenExpiryAndForceRefresh,
 	getTokenHealthSnapshot,
@@ -122,6 +123,41 @@ describe("refreshTokens", () => {
 		expect(raw).toBeDefined();
 		const record = JSON.parse(raw as string);
 		expect(record.lastRefreshError).toContain("network error");
+	});
+
+	it("fetch がハングして応答しない場合、fetchWithTimeout により abort され network error として扱われる(MEDIUM 指摘1)", async () => {
+		vi.useFakeTimers();
+		const nearExpiry = Date.now() + 1000;
+		const kv = fakeTokensKV({
+			[TOKEN_KEY]: "old-token",
+			[TOKEN_EXPIRES_KEY]: String(nearExpiry),
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn((_url: string, init: RequestInit) => {
+				return new Promise<Response>((_resolve, reject) => {
+					init.signal?.addEventListener("abort", () => {
+						reject(
+							new DOMException("The operation was aborted.", "AbortError"),
+						);
+					});
+				});
+			}),
+		);
+
+		const refreshPromise = refreshTokens(envWithKV(kv));
+		const assertion = expect(refreshPromise).resolves.toBeUndefined();
+
+		await vi.advanceTimersByTimeAsync(GRAPH_API_TIMEOUT_MS + 1_000);
+		await assertion;
+
+		const raw = kv.__store.get(TOKEN_HEALTH_KEY);
+		expect(raw).toBeDefined();
+		const record = JSON.parse(raw as string);
+		expect(record.lastRefreshError).toContain("network error");
+		expect(record.lastRefreshError).toContain("timed out");
+
+		vi.useRealTimers();
 	});
 
 	it("失効間近での失敗は health レコードを記録する", async () => {

@@ -1,5 +1,6 @@
 import type { MediaType } from "@facet/contract";
 import type { Env } from "./env.js";
+import { fetchWithTimeout } from "./fetch-with-timeout.js";
 
 /** コンテナの処理状態。Graph API の status_code に対応する。 */
 export type ContainerStatus = "IN_PROGRESS" | "FINISHED" | "ERROR" | "EXPIRED";
@@ -95,7 +96,7 @@ export async function createContainer(
 		video_url: params.videoUrl,
 		caption: params.caption,
 	});
-	const res = await fetch(graphUrl(env, `${env.IG_USER_ID}/media`), {
+	const res = await fetchWithTimeout(graphUrl(env, `${env.IG_USER_ID}/media`), {
 		method: "POST",
 		headers: {
 			"content-type": "application/x-www-form-urlencoded",
@@ -120,10 +121,13 @@ export async function getContainerStatus(
 	const query = new URLSearchParams({
 		fields: "status_code",
 	});
-	const res = await fetch(graphUrl(env, `${containerId}?${query.toString()}`), {
-		method: "GET",
-		headers: authHeader(token),
-	});
+	const res = await fetchWithTimeout(
+		graphUrl(env, `${containerId}?${query.toString()}`),
+		{
+			method: "GET",
+			headers: authHeader(token),
+		},
+	);
 	const json = await readGraphJson(res);
 	const status = json.status_code;
 	if (
@@ -146,14 +150,17 @@ export async function publishContainer(
 	const body = new URLSearchParams({
 		creation_id: containerId,
 	});
-	const res = await fetch(graphUrl(env, `${env.IG_USER_ID}/media_publish`), {
-		method: "POST",
-		headers: {
-			"content-type": "application/x-www-form-urlencoded",
-			...authHeader(token),
+	const res = await fetchWithTimeout(
+		graphUrl(env, `${env.IG_USER_ID}/media_publish`),
+		{
+			method: "POST",
+			headers: {
+				"content-type": "application/x-www-form-urlencoded",
+				...authHeader(token),
+			},
+			body,
 		},
-		body,
-	});
+	);
 	const json = await readGraphJson(res);
 	const id = json.id;
 	if (typeof id !== "string") {
