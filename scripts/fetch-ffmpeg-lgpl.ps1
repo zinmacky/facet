@@ -70,19 +70,46 @@ if (-not $ExtractRoot) {
 
 $assetBaseName = [System.IO.Path]::GetFileNameWithoutExtension($AssetName)
 $lgplRoot = Join-Path $ExtractRoot $assetBaseName
+# キャッシュ再利用時の完全性再検証用に、検証済み zip を _tmp の外($ExtractRoot 直下)
+# に残しておく。展開済みディレクトリの実在だけを見て再取得をスキップすると、
+# キャッシュが破損・改ざん(ファイル差し替えや不要ファイル混入)されていても
+# 検出できずそのまま使ってしまうため。
+$cachedZipPath = Join-Path $ExtractRoot $AssetName
 
 function Write-Log([string]$Message) {
 	Write-Host "[fetch-ffmpeg-lgpl] $Message"
 }
 
+# キャッシュ再利用は「展開済みディレクトリがあり」かつ「保存済み zip の SHA-256 が
+# 期待値と一致する」場合のみ許可する(fail closed)。展開済みディレクトリだけが
+# あって zip が無い(旧バージョンのキャッシュ等)場合や、zip はあってもハッシュが
+# 不一致の場合は、無検証で使い回さず再取得する。
+$cacheIsValid = $false
 if ((Test-Path $lgplRoot) -and -not $Force) {
-	Write-Log "既に展開済み: $lgplRoot (再取得する場合は -Force)"
+	if (Test-Path $cachedZipPath) {
+		$cachedSha256 = (Get-FileHash -Path $cachedZipPath -Algorithm SHA256).Hash
+		if ($cachedSha256.ToUpperInvariant() -eq $ExpectedSha256.ToUpperInvariant()) {
+			$cacheIsValid = $true
+		}
+		else {
+			Write-Log "警告: キャッシュ済み zip の SHA-256 が期待値と不一致のため再取得します: $cachedZipPath"
+		}
+	}
+	else {
+		Write-Log "警告: 展開済みキャッシュはあるが検証用 zip が無いため再取得します: $lgplRoot"
+	}
+}
+
+if ($cacheIsValid) {
+	Write-Log "既に展開済み・検証済み: $lgplRoot (再取得する場合は -Force)"
 }
 else {
+	# $Force 指定時に加え、キャッシュが無検証(zip 欠落・ハッシュ不一致)と判定された
+	# 場合も、展開済みディレクトリに改ざん時の混入ファイルが残り得るため既存の
+	# $ExtractRoot を丸ごと削除してから作り直す(Expand-Archive -Force による
+	# 上書きだけでは zip に無い余分なファイルは削除されない)。
 	if (Test-Path $ExtractRoot) {
-		if ($Force) {
-			Remove-Item -Recurse -Force $ExtractRoot
-		}
+		Remove-Item -Recurse -Force $ExtractRoot
 	}
 	New-Item -ItemType Directory -Force -Path $ExtractRoot | Out-Null
 
@@ -107,6 +134,10 @@ else {
 
 	Write-Log "展開中: $zipPath -> $ExtractRoot"
 	Expand-Archive -Path $zipPath -DestinationPath $ExtractRoot -Force
+
+	# 検証済み zip を _tmp の外($cachedZipPath)にコピーしてから _tmp を削除する。
+	# 次回実行時のキャッシュ再利用判定(上記)はこの zip のハッシュを再検証して行う。
+	Copy-Item -Path $zipPath -Destination $cachedZipPath -Force
 
 	Remove-Item -Recurse -Force $tmpDir
 
