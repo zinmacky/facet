@@ -18,8 +18,13 @@ export const jobManifest = z.object({
 	r2Key: z.string().min(1),
 	mediaType,
 	caption: z.string().max(2200),
-	/** 公開時刻(unix ms)。この時刻以降に scheduler が公開を開始する。 */
-	publishAt: z.number().int().positive(),
+	/**
+	 * 公開時刻(unix ms)。この時刻以降に scheduler が公開を開始する。
+	 * 下限は 2020-01-01T00:00:00Z(ms)。unix 秒値(例: 1_752_000_000)を誤って
+	 * ms として渡すと 1970 年扱いになり即時公開ジョブとして処理されてしまう
+	 * ため、秒/ms の単位取り違えを 400 で弾くガードとして設ける。
+	 */
+	publishAt: z.number().int().positive().min(Date.UTC(2020, 0, 1)),
 });
 export type JobManifest = z.infer<typeof jobManifest>;
 

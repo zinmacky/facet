@@ -229,12 +229,10 @@ fn derive_idempotency_key(job_id: &str) -> String {
 /// 方針)。サイズチェックを先に行い、上限超過が明らかな場合は probe(デコードを伴う)を
 /// 省略する。
 ///
-/// `publish_at` の検証(`manifest::validate_publish_at`)は typify 配線後の
-/// `JobManifest.publish_at` が `NonZeroU64`(0/負値を表現できない)になったことに伴い
-/// 追加した([`manifest`] モジュール冒頭コメント参照)。以前はここでチェックせず
-/// scheduler 側の 400 応答(`EnqueueError::Rejected`)に委ねていたが、typify 配線後は
-/// 検証を怠ると `manifest::new_job_manifest` がパニックしてしまうため、ここで
-/// 事前に弾いて従来通りの通常のエラーとして返す。
+/// `publish_at` の検証(`manifest::validate_publish_at`)は contract
+/// `jobManifest.publishAt` の下限(`manifest::MIN_PUBLISH_AT_MS`、秒/ms 単位
+/// 取り違えガード)と同じ基準で行う。scheduler 側の 400 応答
+/// (`EnqueueError::Rejected`)に委ねず、ここで事前に弾いて通常のエラーとして返す。
 fn validate_enqueue_target(path: &Path, caption: &str, publish_at: i64) -> Result<(), String> {
 	manifest::validate_publish_at(publish_at).map_err(|err| err.to_string())?;
 
