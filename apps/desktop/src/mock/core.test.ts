@@ -33,7 +33,7 @@ describe("mock/core.ts: renderer 採番の jobId 追随", () => {
 		await invoke("reframe_start", { jobId: RENDERER_JOB_ID });
 		vi.advanceTimersByTime(3_000);
 
-		expect(captured).toEqual({ encoder: "libx264" });
+		expect(captured).toEqual({ encoder: "h264_videotoolbox" });
 	});
 
 	it("preview_start は渡された jobId で preview://done を emit する", async () => {
