@@ -8,7 +8,7 @@ import type { Clip, OutputTarget } from "../../types";
 import { targetById } from "../../types";
 import { cancelJob, pickExportDirectory, sanitizeFileName } from "../../lib/tauri";
 import { useSettings } from "../../lib/settings";
-import { usePreview } from "../../lib/usePreview";
+import { PreviewSupersededError, usePreview } from "../../lib/usePreview";
 import { useReframeQueue } from "../../lib/useReframeQueue";
 import { usePauseVideosOnHide } from "../../lib/usePauseVideosOnHide";
 import { uniqueBaseNames } from "../../lib/uniqueBaseName";
@@ -457,13 +457,32 @@ export function ReframeScreen({
 	// 含むあらゆる失敗を `previewErrors`(常時見える表示、§OutputCard.tsx)へも反映し、
 	// 必ずユーザーに見える形にする。
 	const previewOutput = (post: UploadPost, output: UploadOutput) => {
-		void ensureRendered(post, output).catch((err: unknown) => {
-			setPreviewErrors((prev) => {
-				const next = new Map(prev);
-				next.set(output.id, getErrorMessage(err));
-				return next;
+		void ensureRendered(post, output)
+			.then(() => {
+				// 撮り直しが成功した後も、前回失敗時に previewErrors へ書き込んだバナーが
+				// 残り続けていた(previewErrors は resetToken/preset 再適用/output 削除
+				// でしかクリアされないため)。成功したら、その key の古いエラー表示を消す。
+				setPreviewErrors((prev) => {
+					if (!prev.has(output.id)) return prev;
+					const next = new Map(prev);
+					next.delete(output.id);
+					return next;
+				});
+			})
+			.catch((err: unknown) => {
+				if (err instanceof PreviewSupersededError) {
+					// cancel-and-restart による打ち切り(usePreview.ts 参照)。設定変更で
+					// 撮り直しただけのユーザー操作起因であり失敗ではないため、常時表示の
+					// previewErrors には書き込まない(撮り直した側の呼び出しが改めて
+					// この then/catch を実行して結果を反映する)。
+					return;
+				}
+				setPreviewErrors((prev) => {
+					const next = new Map(prev);
+					next.set(output.id, getErrorMessage(err));
+					return next;
+				});
 			});
-		});
 	};
 
 	// 一括保存可否の判定に使う全 Output 数。
