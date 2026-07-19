@@ -129,6 +129,40 @@ export function cancelJob(jobId: JobId): Promise<void> {
 	return invoke<void>("reframe_cancel", { jobId });
 }
 
+/**
+ * 複数の `listen()` 登録を並行に行い、1つでも reject したら、既に登録済みの
+ * listener をすべて `unlisten()` してから(`factories` の配列順で最初に reject した
+ * ものの)エラーで reject し直す。
+ *
+ * `Promise.all([listen(...), listen(...), ...])` をそのまま使うと、途中の1つが
+ * reject した時点で全体が reject するものの、既に resolve 済みだった listen() の
+ * unlisten 関数は誰も呼ばない ── 購読が Tauri 側に残ったままリークする
+ * (`subscribeReframeEvents`/`startPreview` の双方に同型のバグがあった)。
+ * `factories` は呼び出し時点(`.map` 実行時)ですべて同期的に起動するため、並行登録
+ * という既存の挙動(listen-before-invoke を素早く終える)は変えない。
+ */
+async function listenAll(
+	factories: Array<() => Promise<UnlistenFn>>,
+): Promise<UnlistenFn[]> {
+	const results = await Promise.allSettled(factories.map((factory) => factory()));
+	const unlisteners: UnlistenFn[] = [];
+	let firstError: unknown;
+	let hasError = false;
+	for (const result of results) {
+		if (result.status === "fulfilled") {
+			unlisteners.push(result.value);
+		} else if (!hasError) {
+			hasError = true;
+			firstError = result.reason;
+		}
+	}
+	if (hasError) {
+		for (const unlisten of unlisteners) unlisten();
+		throw firstError;
+	}
+	return unlisteners;
+}
+
 // ---- reframe(実書き出し) ------------------------------------------------
 
 export interface ReframeHandlers {
@@ -198,18 +232,21 @@ async function subscribeReframeEvents(
 		for (const unlisten of unlisteners) unlisten();
 		unlisteners = [];
 	};
-	unlisteners = await Promise.all([
-		listen<Progress>(`reframe://progress/${jobId}`, (event) => {
-			handlers.onProgress?.(event.payload);
-		}),
-		listen<{ encoder: string }>(`reframe://done/${jobId}`, (event) => {
-			unsubscribe();
-			handlers.onDone?.(event.payload.encoder);
-		}),
-		listen<{ message: string }>(`reframe://error/${jobId}`, (event) => {
-			unsubscribe();
-			handlers.onError?.(event.payload.message);
-		}),
+	unlisteners = await listenAll([
+		() =>
+			listen<Progress>(`reframe://progress/${jobId}`, (event) => {
+				handlers.onProgress?.(event.payload);
+			}),
+		() =>
+			listen<{ encoder: string }>(`reframe://done/${jobId}`, (event) => {
+				unsubscribe();
+				handlers.onDone?.(event.payload.encoder);
+			}),
+		() =>
+			listen<{ message: string }>(`reframe://error/${jobId}`, (event) => {
+				unsubscribe();
+				handlers.onError?.(event.payload.message);
+			}),
 	]);
 	return { jobId, unsubscribe, cancel: () => cancelJob(jobId) };
 }
@@ -253,18 +290,21 @@ export async function startPreview(
 		for (const unlisten of unlisteners) unlisten();
 		unlisteners = [];
 	};
-	unlisteners = await Promise.all([
-		listen<Progress>(`preview://progress/${jobId}`, (event) => {
-			handlers.onProgress?.(event.payload);
-		}),
-		listen<{ path: string }>(`preview://done/${jobId}`, (event) => {
-			unsubscribe();
-			handlers.onDone?.(event.payload.path);
-		}),
-		listen<{ message: string }>(`preview://error/${jobId}`, (event) => {
-			unsubscribe();
-			handlers.onError?.(event.payload.message);
-		}),
+	unlisteners = await listenAll([
+		() =>
+			listen<Progress>(`preview://progress/${jobId}`, (event) => {
+				handlers.onProgress?.(event.payload);
+			}),
+		() =>
+			listen<{ path: string }>(`preview://done/${jobId}`, (event) => {
+				unsubscribe();
+				handlers.onDone?.(event.payload.path);
+			}),
+		() =>
+			listen<{ message: string }>(`preview://error/${jobId}`, (event) => {
+				unsubscribe();
+				handlers.onError?.(event.payload.message);
+			}),
 	]);
 	const handle: JobHandle = { jobId, unsubscribe, cancel: () => cancelJob(jobId) };
 	try {
