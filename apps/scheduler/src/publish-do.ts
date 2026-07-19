@@ -132,6 +132,20 @@ export class PublishDO implements DurableObject {
 	private readonly state: DurableObjectState;
 	private readonly env: Env;
 
+	/**
+	 * runCreate の同一インスタンス内での再入を防ぐガード(指摘2)。
+	 * fetch の /start 経路と alarm() 経路の双方が同じ jobId に対して runCreate を
+	 * 呼びうる: createContainer が STALE_THRESHOLD_MS(cron.ts, 20分)以上ハングした
+	 * 場合、sweepStaleJobs 経由の /resume が「alarm 未設定(runCreate 完了時にしか
+	 * 張らない)」を孤立と誤認して即時 alarm を予約し、その alarm() が status
+	 * "creating" を見て runCreate をもう一度呼んでしまう。この2回目の呼び出しは
+	 * 1回目とまったく同じ isolate 内で発生する(D1 を跨いだ別インスタンスの競合では
+	 * ない)ため、インメモリのフラグだけで防げる。isolate を跨ぐ競合は
+	 * claimPendingForCreating の D1 原子的 claim が別途担っており、このガードは
+	 * それを置き換えるものではない。
+	 */
+	private runCreateInFlight = false;
+
 	constructor(state: DurableObjectState, env: Env) {
 		this.state = state;
 		this.env = env;
@@ -254,22 +268,39 @@ export class PublishDO implements DurableObject {
 		job: JobRow,
 		token: string,
 	): Promise<void> {
-		const videoUrl = `${this.env.R2_PUBLIC_BASE}/${job.r2_key}`;
-		const containerId = await createContainer(this.env, token, {
-			videoUrl,
-			caption: job.caption ?? "",
-			mediaType: job.media_type as "VIDEO" | "REELS",
-		});
-		// creating → processing。container_id を保存しポーリングを開始。
-		await this.env.DB.prepare(
-			"UPDATE jobs SET status = 'processing', ig_container_id = ?, updated_at = ? WHERE id = ?",
-		)
-			.bind(containerId, Date.now(), jobId)
-			.run();
-		// ポーリングの打ち切り時刻を記録する(S-3: 正常化しないコンテナを無制限に
-		// 叩き続けないための上限)。
-		await this.state.storage.put(POLL_DEADLINE_KEY, Date.now() + MAX_POLL_MS);
-		await this.state.storage.setAlarm(Date.now() + POLL_INTERVAL_MS);
+		// 指摘2: 同一インスタンス内での再入ガード。/start 経路が createContainer で
+		// ハング中に alarm() 経路が割り込んだ場合、ここで即座に no-op として返る
+		// (createContainer を二重に呼ばない)。先行呼び出しの完了を待ち合わせは
+		// しない(ハングした呼び出しに他方の処理まで巻き添えでブロックされるのを
+		// 避けるため)。先行呼び出しが完了すれば通常どおり processing へ進み、
+		// 以後の alarm ディスパッチが継続処理を引き継ぐ。
+		if (this.runCreateInFlight) {
+			console.warn(
+				`runCreate: reentrant call for job ${jobId} ignored (already in flight in this instance)`,
+			);
+			return;
+		}
+		this.runCreateInFlight = true;
+		try {
+			const videoUrl = `${this.env.R2_PUBLIC_BASE}/${job.r2_key}`;
+			const containerId = await createContainer(this.env, token, {
+				videoUrl,
+				caption: job.caption ?? "",
+				mediaType: job.media_type as "VIDEO" | "REELS",
+			});
+			// creating → processing。container_id を保存しポーリングを開始。
+			await this.env.DB.prepare(
+				"UPDATE jobs SET status = 'processing', ig_container_id = ?, updated_at = ? WHERE id = ?",
+			)
+				.bind(containerId, Date.now(), jobId)
+				.run();
+			// ポーリングの打ち切り時刻を記録する(S-3: 正常化しないコンテナを無制限に
+			// 叩き続けないための上限)。
+			await this.state.storage.put(POLL_DEADLINE_KEY, Date.now() + MAX_POLL_MS);
+			await this.state.storage.setAlarm(Date.now() + POLL_INTERVAL_MS);
+		} finally {
+			this.runCreateInFlight = false;
+		}
 	}
 
 	async alarm(): Promise<void> {
