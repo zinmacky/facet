@@ -95,12 +95,18 @@ function applyWrite(row: FakeJob, sql: string, args: unknown[]): void {
 	} else if (sql.includes("status = 'failed'") && sql.includes("attempts = ?")) {
 		row.status = "failed";
 		row.attempts = args[0] as number;
+		if (sql.includes("last_error = ?")) {
+			row.last_error = args[1] as string;
+		}
 	} else if (sql.includes("status = 'failed'")) {
 		row.status = "failed";
 	} else if (sql.includes("SET status = ?")) {
 		row.status = args[0] as string;
 	} else if (sql.includes("SET attempts = ?")) {
 		row.attempts = args[0] as number;
+		if (sql.includes("last_error = ?")) {
+			row.last_error = args[1] as string;
+		}
 	}
 	// 本コードベースの UPDATE 文は "... updated_at = ?, ... WHERE id = ?" の形
 	// (id が常に最後の bind 引数)を守っているため、updated_at は末尾から2番目に
@@ -355,6 +361,68 @@ describe("PublishDO.fetch /start: pending → creating の原子的 claim(指摘
 });
 
 /**
+ * runCreate の同一インスタンス内再入ガード(指摘2)の回帰テスト。
+ * createContainer が STALE_THRESHOLD_MS(20分)以上ハングすると、sweepStaleJobs
+ * 経由の /resume が「alarm 未設定 = 孤立」と誤認して即時 alarm を予約し、その
+ * alarm() が status "creating" を見て runCreate をもう一度呼んでしまいうる
+ * (両呼び出しは同一 isolate 内で走る)。runCreateInFlight フラグにより2回目の
+ * 呼び出しは createContainer を呼ばず no-op で返ることを検証する。
+ */
+describe("PublishDO.runCreate: 同一インスタンス内の再入ガード(指摘2)", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mockGetIgToken.mockResolvedValue("token");
+	});
+
+	function startRequest(jobId: string) {
+		return new Request("https://do/start", {
+			method: "POST",
+			body: JSON.stringify({ jobId }),
+		});
+	}
+
+	it("createContainer がハング中に alarm() 経由で再入しても、createContainer は1回しか呼ばれず2回目は副作用なしで返る", async () => {
+		let resolveCreate: (id: string) => void = () => {};
+		const pending = new Promise<string>((resolve) => {
+			resolveCreate = resolve;
+		});
+		mockCreateContainer.mockReturnValueOnce(pending);
+
+		const { DO, row } = makeHarness({ status: "pending" });
+
+		// /start 経路で runCreate に入る(createContainer がハングしたまま止まる)。
+		const startPromise = DO.fetch(startRequest(row.id));
+
+		// claim が完了し createContainer 呼び出しに到達するまで待つ
+		// (claim 自体の非同期処理を挟むため、単純な microtask 1回では足りない)。
+		await vi.waitFor(() => {
+			expect(mockCreateContainer).toHaveBeenCalledTimes(1);
+		});
+		expect(row.status).toBe("creating");
+		const attemptsBeforeReentry = row.attempts;
+
+		// sweepStaleJobs 経由の /resume が即時 alarm を予約し、その alarm() が
+		// 同一インスタンス内で再入したケースを模す。
+		await DO.alarm();
+
+		// 2回目の呼び出しは無視され、createContainer は依然として1回だけ。
+		expect(mockCreateContainer).toHaveBeenCalledTimes(1);
+		// 副作用なし: status/attempts は変化せず、getIgToken 以上の処理は起きない
+		// (alarm() の "creating" 分岐は runCreate を呼ぶだけで即 return するため)。
+		expect(row.status).toBe("creating");
+		expect(row.attempts).toBe(attemptsBeforeReentry);
+
+		// 先行呼び出し(/start 経路)が完了すれば通常どおり processing へ進む。
+		resolveCreate("container-1");
+		await startPromise;
+
+		expect(row.status).toBe("processing");
+		expect(row.ig_container_id).toBe("container-1");
+		expect(mockCreateContainer).toHaveBeenCalledTimes(1);
+	});
+});
+
+/**
  * handleFailure の指数バックオフ(指摘2)の回帰テスト。旧: 線形 15秒×n backoff
  * (5 attempts で合計 150 秒 ≈ 2.5分)は短時間の IG/ネットワーク障害でも
  * 即座に恒久失敗させてしまっていた。新スケジュールは 30秒 → 1分 → 2分 → 5分 →
@@ -396,6 +464,26 @@ describe("PublishDO.handleFailure: 指数バックオフの適用と恒久失敗
 		// attempts=3 回目の失敗 → backoffDelayMs(3) = 120秒後に再試行。
 		expect(alarmAt - before).toBeGreaterThanOrEqual(120_000);
 		expect(alarmAt - before).toBeLessThan(120_000 + 5_000); // テスト実行の揺れを許容
+	});
+
+	it("fetchWithTimeout 由来の timeout エラー(createContainer)も transient 失敗として扱われ backoff が効く", async () => {
+		// instagram.ts はモック化されているため実際の fetchWithTimeout は経由しないが、
+		// fetchWithTimeout が投げる `fetch timed out after ...` 形式のプレーンな Error が
+		// InstagramError と同様に handleFailure の transient 経路(attempts++ → backoff)に
+		// 乗ることを検証する(指摘1: タイムアウトは既存のエラーハンドリングに乗せる)。
+		mockCreateContainer.mockRejectedValueOnce(
+			new Error("fetch timed out after 30000ms: https://graph.facebook.com/..."),
+		);
+		const { DO, row, store } = makeHarness({ status: "creating", attempts: 2 });
+		const before = Date.now();
+
+		await DO.alarm();
+
+		expect(row.status).toBe("creating");
+		expect(row.attempts).toBe(3);
+		expect(row.last_error).toContain("timed out");
+		const alarmAt = store.get("__alarm") as number;
+		expect(alarmAt - before).toBeGreaterThanOrEqual(120_000);
 	});
 
 	it("恒久失敗(container status ERROR)は backoff を経由せず即座に failed 確定する", async () => {
