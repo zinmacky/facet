@@ -55,6 +55,8 @@ jobs:
     steps:
       # --- 1. checkout + pnpm/Node セットアップ + 依存インストール(ci.yml と同形) ---
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
