@@ -34,6 +34,7 @@
 				},
 				"publishAt": {
 					"exclusiveMinimum": 0,
+					"minimum": 1577836800000,
 					"type": "integer"
 				},
 				"r2Key": {
@@ -98,6 +99,7 @@
 				},
 				"publishAt": {
 					"exclusiveMinimum": 0,
+					"minimum": 1577836800000,
 					"type": "integer"
 				},
 				"r2Key": {

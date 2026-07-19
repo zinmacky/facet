@@ -50,6 +50,12 @@ describe("editSpec", () => {
 		).toBe(false);
 	});
 
+	it("未知キーは拒否せず受け入れる(.strict() を使わないため。将来フィールド追加時の後方互換を担保)", () => {
+		expect(
+			editSpec.parse({ ...full, futureField: 1 } as unknown as typeof full),
+		).toEqual(full);
+	});
+
 	it("source の寸法は非負整数のみ", () => {
 		expect(
 			editSpec.safeParse({

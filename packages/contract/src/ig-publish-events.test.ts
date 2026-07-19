@@ -45,6 +45,11 @@ describe("igPublishDone", () => {
 	it("schedulerJobId が無ければ弾く", () => {
 		expect(igPublishDone.safeParse({ status: "pending" }).success).toBe(false);
 	});
+
+	it("未知キーは拒否せず受け入れる(.strict() を使わないため。将来フィールド追加時の後方互換を担保)", () => {
+		const value = { schedulerJobId: "job-1", status: "pending" };
+		expect(igPublishDone.parse({ ...value, futureField: 1 })).toEqual(value);
+	});
 });
 
 describe("igPublishRuntimeError", () => {

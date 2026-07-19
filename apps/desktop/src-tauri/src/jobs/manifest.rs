@@ -22,8 +22,6 @@
 //! (scheduler が新しい status 値を追加しても、自動更新にタイムラグのある desktop
 //! 側のデシリアライズが壊れないようにするため)。
 
-use std::num::NonZeroU64;
-
 use contract_rs::MediaType;
 pub use contract_rs::{JobCreateResponse, JobManifest, JobRecord};
 use thiserror::Error;
@@ -35,7 +33,10 @@ use thiserror::Error;
 /// 検証は呼び出し側の責務):
 /// - `caption`: [`validate_caption`](2200 UTF-16 単位以下)
 /// - `r2_key`: [`build_r2_key`] が常に1文字以上を生成する
-/// - `publish_at_ms`: [`validate_publish_at`](正の値)
+/// - `publish_at_ms`: [`validate_publish_at`]([`MIN_PUBLISH_AT_MS`] 以上)。
+///   生成型の `publish_at` は平の `i64`(契約の `minimum` 追加により typify の
+///   `NonZeroU64` 写像が外れた)ため型レベルの保護は無く、未検証の値を渡しても
+///   ここではパニックしないが、契約違反として scheduler 側で 400 になる
 /// - `idempotency_key`: 呼び出し側(`commands::publish::ig::derive_idempotency_key`)が
 ///   常に UUID 文字列を渡す
 pub fn new_job_manifest(
@@ -56,8 +57,7 @@ pub fn new_job_manifest(
 		caption: caption
 			.try_into()
 			.expect("caption は validate_caption で ≤2200 UTF-16 単位を検証済みの前提"),
-		publish_at: NonZeroU64::new(publish_at_ms as u64)
-			.expect("publish_at は validate_publish_at で正の値を検証済みの前提"),
+		publish_at: publish_at_ms,
 	}
 }
 
@@ -109,6 +109,13 @@ pub const MAX_DURATION_SECS: f64 = 15.0 * 60.0;
 /// (UTF-16 コード単位数)に合わせるため、呼び出し側は `str::encode_utf16().count()` で
 /// 数える(§validate_caption)。
 pub const MAX_CAPTION_UTF16_LEN: usize = 2200;
+/// contract `jobManifest.publishAt` の下限(`.min(Date.UTC(2020,0,1))` =
+/// 2020-01-01T00:00:00Z の unix ms)。unix 秒値(例: 1_752_000_000)を誤って
+/// ms として渡すと 1970 年扱いになり即時公開ジョブになってしまうため、
+/// 秒/ms の単位取り違えを弾くガード(contract 側と同じ値に保つこと —
+/// 整合性は `job_manifest_conforms_to_contract_schema` 系ではなく
+/// `min_publish_at_matches_contract_schema` テストで固定する)。
+pub const MIN_PUBLISH_AT_MS: i64 = 1_577_836_800_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum ValidationError {
@@ -126,10 +133,12 @@ pub enum ValidationError {
 	DurationTooLong { seconds: f64, max_seconds: f64 },
 	#[error("キャプションが長すぎます({len}文字 > {max}文字)。")]
 	CaptionTooLong { len: usize, max: usize },
-	/// contract `jobManifest.publishAt`(`z.number().int().positive()`)違反。
-	/// 生成型 `JobManifest.publish_at` が `NonZeroU64` のため、[`new_job_manifest`] に
-	/// 渡す前にここで検証しておかないと 0/負値でパニックしてしまう。
-	#[error("公開時刻が不正です({value})。正の unix ms(1970-01-01 以降)である必要があります。")]
+	/// contract `jobManifest.publishAt`(`z.number().int().positive().min(Date.UTC(2020,0,1))`)
+	/// 違反。scheduler 側の 400 応答に委ねず desktop 側で事前に弾く
+	/// ([`MIN_PUBLISH_AT_MS`] のコメント参照: 秒/ms 単位取り違えガード)。
+	#[error(
+		"公開時刻が不正です({value})。2020-01-01T00:00:00Z 以降の unix ms である必要があります(秒単位の値を渡していませんか?)。"
+	)]
 	InvalidPublishAt { value: i64 },
 }
 
@@ -175,9 +184,10 @@ pub fn validate_caption(caption: &str) -> Result<(), ValidationError> {
 	Ok(())
 }
 
-/// 公開時刻(unix ms)を検証する(contract `jobManifest.publishAt` と同じ基準、正の値のみ)。
+/// 公開時刻(unix ms)を検証する(contract `jobManifest.publishAt` と同じ基準:
+/// [`MIN_PUBLISH_AT_MS`](2020-01-01T00:00:00Z)以上)。
 pub fn validate_publish_at(publish_at_ms: i64) -> Result<(), ValidationError> {
-	if publish_at_ms <= 0 {
+	if publish_at_ms < MIN_PUBLISH_AT_MS {
 		return Err(ValidationError::InvalidPublishAt {
 			value: publish_at_ms,
 		});
@@ -271,8 +281,20 @@ mod tests {
 	// ---- validate_publish_at 境界値 ---------------------------------------------------
 
 	#[test]
-	fn publish_at_positive_is_valid() {
-		assert!(validate_publish_at(1).is_ok());
+	fn publish_at_exactly_at_lower_bound_is_valid() {
+		assert!(validate_publish_at(MIN_PUBLISH_AT_MS).is_ok());
+	}
+
+	#[test]
+	fn publish_at_just_below_lower_bound_is_invalid() {
+		assert!(validate_publish_at(MIN_PUBLISH_AT_MS - 1).is_err());
+	}
+
+	#[test]
+	fn publish_at_unix_seconds_value_is_invalid() {
+		// 秒単位なら 2025 年頃の値。ms として解釈すると 1970 年 = 下限未満で弾かれる
+		// (contract 側 `job-manifest.test.ts` の同名ケースと対になる単位取り違えガード)。
+		assert!(validate_publish_at(1_752_000_000).is_err());
 	}
 
 	#[test]
@@ -518,6 +540,18 @@ mod tests {
 			let value = &actual_obj[key];
 			assert_field_matches_schema(schema, field_schema, value, &format!("{def_name}.{key}"));
 		}
+	}
+
+	/// [`MIN_PUBLISH_AT_MS`] が契約スキーマ(`$defs.jobManifest.properties.publishAt.minimum`)
+	/// と同じ値であることを固定する。contract 側で下限を変更した場合、schema 再生成後に
+	/// このテストが失敗して Rust 側の追従漏れに気付ける。
+	#[test]
+	fn min_publish_at_matches_contract_schema() {
+		let schema = contract_schema();
+		let minimum = schema_def(&schema, "jobManifest")["properties"]["publishAt"]["minimum"]
+			.as_i64()
+			.expect("契約スキーマの publishAt に minimum(整数)があること");
+		assert_eq!(MIN_PUBLISH_AT_MS, minimum);
 	}
 
 	#[test]

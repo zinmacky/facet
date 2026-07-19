@@ -33,6 +33,12 @@ describe("jobManifest", () => {
 		).toBe(false);
 	});
 
+	it("未知キーは拒否せず受け入れる(.strict() を使わないため。将来フィールド追加時の後方互換を担保)", () => {
+		expect(
+			jobManifest.parse({ ...valid, futureField: 1 } as unknown as typeof valid),
+		).toEqual(valid);
+	});
+
 	it("publishAt は正の整数のみ", () => {
 		expect(jobManifest.safeParse({ ...valid, publishAt: -1 }).success).toBe(
 			false,
@@ -40,6 +46,14 @@ describe("jobManifest", () => {
 		expect(jobManifest.safeParse({ ...valid, publishAt: 1.5 }).success).toBe(
 			false,
 		);
+	});
+
+	it("publishAt は 2020-01-01 未満(unix 秒値の誤送信)を弾く", () => {
+		// 1_752_000_000 は秒単位なら 2025 年頃だが、ms として解釈すると 1970 年になる。
+		// 単位取り違えのまま通すと即時公開ジョブとして処理されてしまうため拒否する。
+		expect(
+			jobManifest.safeParse({ ...valid, publishAt: 1_752_000_000 }).success,
+		).toBe(false);
 	});
 });
 

@@ -1,3 +1,4 @@
+import type { JobRecord } from "@facet/contract";
 import type { MediaInfo } from "../lib/tauri";
 
 /**
@@ -50,4 +51,27 @@ export const MOCK_PROBE: MediaInfo = {
 export const MOCK_UPDATE_INFO = {
 	version: "9.9.9-mock",
 	body: "モック更新(UI 確認用のダミーリリースノートです。dev:mock では常にこの更新が「利用可能」として通知されます。",
+};
+
+/**
+ * `ig_job_status` の既定応答(`IgJobStatusOutcome` の `found` variant)が包む
+ * `JobRecord` 本体。`src/test/tauri-mock.ts` の `MOCK_IG_JOB_RECORD` と同じ値
+ * (テスト用モックとブラウザ用 dev:mock で見た目を揃える)。`id` は呼び出し側が
+ * 渡した `schedulerJobId` で上書きされる(§mock/core.ts の `ig_job_status` ケース)。
+ */
+export const MOCK_IG_JOB_RECORD: JobRecord = {
+	id: "scheduler-job-1",
+	idempotencyKey: "11111111-2222-3333-4444-555555555555",
+	platform: "instagram",
+	r2Key: "posts/2026-07-10/uuid.mp4",
+	mediaType: "REELS",
+	caption: "",
+	publishAt: 1_783_686_896_000,
+	status: "published",
+	igContainerId: "container-1",
+	igMediaId: "media-1",
+	attempts: 1,
+	lastError: null,
+	createdAt: 1_783_686_896_000,
+	updatedAt: 1_783_686_896_000,
 };

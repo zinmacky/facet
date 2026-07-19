@@ -8,6 +8,7 @@
 		"deploy": "wrangler deploy",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"test": "vitest run",
+		"test:integration": "vitest run --config vitest.integration.config.ts",
 		"migrate:local": "wrangler d1 migrations apply facet-jobs --local",
 		"migrate:remote": "wrangler d1 migrations apply facet-jobs --remote"
 	},
@@ -17,6 +18,7 @@
 		"zod": "^3.23.8"
 	},
 	"devDependencies": {
+		"@cloudflare/vitest-pool-workers": "0.12.21",
 		"@cloudflare/workers-types": "^5.20260718.1",
 		"typescript": "^6.0.3",
 		"vitest": "^3.2.7",

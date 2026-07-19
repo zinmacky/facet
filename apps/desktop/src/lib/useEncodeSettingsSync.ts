@@ -12,6 +12,14 @@ export function useEncodeSettingsSync(): void {
 	const { settings } = useSettings();
 
 	useEffect(() => {
-		void setMaxConcurrentEncodes(settings.maxConcurrentEncodes);
+		// invoke が reject すると unhandled rejection になり、かつ UI(設定値)と Rust 側の
+		// 同時実行数上限が silently 乖離してしまう。他の非致命的 invoke 失敗と同様
+		// console.warn に留める(tauriJobLifecycle.ts の cancelOrphanJob 等と同じ方針)。
+		setMaxConcurrentEncodes(settings.maxConcurrentEncodes).catch((err: unknown) => {
+			console.warn(
+				`同時実行数の上限設定の同期に失敗しました(max=${settings.maxConcurrentEncodes})`,
+				err,
+			);
+		});
 	}, [settings.maxConcurrentEncodes]);
 }
