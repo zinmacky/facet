@@ -164,7 +164,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Setup rust-cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           workspaces: apps/desktop -> target
 
@@ -304,7 +304,7 @@ jobs:
           toolchain: stable
 
       - name: Setup rust-cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           workspaces: apps/desktop -> target
 
@@ -408,7 +408,7 @@ jobs:
       # 死んで `ld: library 'avutil' not found` になる(2026-07-13 の 8.1.2→8.1.2_1
       # bump で実際に発生)。キーに正確なバージョンを含め、bump 時は作り直させる。
       - name: Setup rust-cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           workspaces: apps/desktop -> target
           key: ${{ steps.ffmpeg.outputs.version }}
