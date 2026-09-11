@@ -22,7 +22,7 @@
 	},
 	"devDependencies": {
 		"typescript": "^6.0.3",
-		"vitest": "^3.2.7",
+		"vitest": "^4.1.11",
 		"zod-to-json-schema": "^3.25.2"
 	}
 }
